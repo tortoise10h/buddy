@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Buddy launcher script
+# Launches or switches to the Buddy session in Rex
+
+set -euo pipefail
+
+BUDDY_DIR="$HOME/.buddy"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUDDY_CTL="$REPO_DIR/skills/buddy/scripts/buddy-ctl"
+
+# Ensure ~/.buddy exists
+if [ -x "$BUDDY_CTL" ]; then
+    "$BUDDY_CTL" init >/dev/null 2>&1 || true
+fi
+
+# Find Rex binary
+REX_BIN="$(command -v rex 2>/dev/null || echo "/Users/sunday/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex")"
+
+# If running inside Rex in the Buddy session, start the agent
+CURRENT_SESS="${REX_SESSION:-}"
+if [ -n "$CURRENT_SESS" ]; then
+    SESS_LABEL="$("$REX_BIN" session inspect "$CURRENT_SESS" --json 2>/dev/null | jq -r '.label // empty' || true)"
+    if [ "$SESS_LABEL" = "Buddy" ]; then
+        cd "$BUDDY_DIR"
+        exec agy "$@"
+    fi
+fi
+
+# Check if a session named Buddy already exists in Rex
+SESSIONS_JSON="$("$REX_BIN" ls --json 2>/dev/null || echo '{"sessions":[]}')"
+BUDDY_SESS_ID="$(echo "$SESSIONS_JSON" | jq -r '.sessions[] | select(.label == "Buddy") | .session_id' | head -n 1)"
+
+# Find connected Rex app client (GUI)
+CLIENTS_JSON="$("$REX_BIN" client ls --json 2>/dev/null || echo '{"clients":[]}')"
+APP_CLIENT_ID="$(echo "$CLIENTS_JSON" | jq -r '.clients[] | select(.info.kind == "app") | .client_id' | head -n 1)"
+
+if [ -n "$BUDDY_SESS_ID" ]; then
+    echo "Buddy session active in Rex ($BUDDY_SESS_ID)."
+    if [ -n "$APP_CLIENT_ID" ]; then
+        "$REX_BIN" -C "$APP_CLIENT_ID" do session.select "session_id=$BUDDY_SESS_ID" >/dev/null 2>&1 || true
+        echo "Switched Rex to Buddy session."
+    fi
+else
+    echo "Creating Buddy session in Rex..."
+    NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- agy)"
+    BUDDY_SESS_ID="$(echo "$NEW_SESS" | jq -r '.session_id')"
+    if [ -x "$BUDDY_CTL" ]; then
+        "$BUDDY_CTL" init >/dev/null 2>&1 || true
+    fi
+    if [ -n "$APP_CLIENT_ID" ] && [ -n "$BUDDY_SESS_ID" ]; then
+        "$REX_BIN" -C "$APP_CLIENT_ID" do session.select "session_id=$BUDDY_SESS_ID" >/dev/null 2>&1 || true
+        echo "Created and switched Rex to Buddy session ($BUDDY_SESS_ID)."
+    fi
+fi
