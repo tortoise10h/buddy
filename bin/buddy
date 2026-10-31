@@ -9,9 +9,99 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUDDY_CTL="$REPO_DIR/skills/buddy/scripts/buddy-ctl"
 
+# Resolve buddy-ctl CLI executable
+BUDDY_CTL_CMD=""
+if command -v buddy-ctl >/dev/null 2>&1; then
+    BUDDY_CTL_CMD="buddy-ctl"
+elif [ -x "$BUDDY_CTL" ]; then
+    BUDDY_CTL_CMD="$BUDDY_CTL"
+fi
+
 # Ensure ~/.buddy exists
-if [ -x "$BUDDY_CTL" ]; then
-    "$BUDDY_CTL" init >/dev/null 2>&1 || true
+if [ -n "$BUDDY_CTL_CMD" ]; then
+    "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
+fi
+
+# Parse agent selection and arguments
+# Supported syntax:
+#   buddy pi / buddy opencode / buddy agy
+#   buddy --agent <agent> / buddy --agent=<agent>
+#   buddy -a <agent> / buddy -a=<agent>
+#   BUDDY_AGENT env var
+#   Extra arguments forwarded to the resolved agent
+CHOSEN_AGENT=""
+EXTRA_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --agent)
+            if [ $# -lt 2 ]; then
+                echo "Error: --agent requires an agent name" >&2
+                exit 1
+            fi
+            CHOSEN_AGENT="$2"
+            shift 2
+            ;;
+        --agent=*)
+            CHOSEN_AGENT="${1#*=}"
+            shift
+            ;;
+        -a)
+            if [ $# -lt 2 ]; then
+                echo "Error: -a requires an agent name" >&2
+                exit 1
+            fi
+            CHOSEN_AGENT="$2"
+            shift 2
+            ;;
+        -a=*)
+            CHOSEN_AGENT="${1#*=}"
+            shift
+            ;;
+        agy|pi|opencode)
+            if [ -z "$CHOSEN_AGENT" ]; then
+                CHOSEN_AGENT="$1"
+            else
+                EXTRA_ARGS+=("$1")
+            fi
+            shift
+            ;;
+        --)
+            shift
+            while [ $# -gt 0 ]; do
+                EXTRA_ARGS+=("$1")
+                shift
+            done
+            break
+            ;;
+        *)
+            EXTRA_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Environment variable fallback if not specified on CLI
+if [ -z "$CHOSEN_AGENT" ] && [ -n "${BUDDY_AGENT:-}" ]; then
+    CHOSEN_AGENT="$BUDDY_AGENT"
+fi
+
+# Default agent resolution via buddy-ctl config or fallback to agy
+RESOLVED_AGENT="$CHOSEN_AGENT"
+if [ -z "$RESOLVED_AGENT" ]; then
+    DEFAULT_AGENT=""
+    if [ -n "$BUDDY_CTL_CMD" ]; then
+        CFG_OUT="$("$BUDDY_CTL_CMD" config get default_agent 2>/dev/null || true)"
+        if command -v jq >/dev/null 2>&1; then
+            DEFAULT_AGENT="$(echo "$CFG_OUT" | jq -r '.value // empty' 2>/dev/null || true)"
+        else
+            DEFAULT_AGENT="$(echo "$CFG_OUT" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+        fi
+    fi
+    if [ "$DEFAULT_AGENT" = "null" ] || [ -z "$DEFAULT_AGENT" ]; then
+        DEFAULT_AGENT="agy"
+    fi
+    RESOLVED_AGENT="$DEFAULT_AGENT"
 fi
 
 # Find Rex binary
@@ -23,7 +113,11 @@ if [ -n "$CURRENT_SESS" ]; then
     SESS_LABEL="$("$REX_BIN" session inspect "$CURRENT_SESS" --json 2>/dev/null | jq -r '.label // empty' || true)"
     if [ "$SESS_LABEL" = "Buddy" ]; then
         cd "$BUDDY_DIR"
-        exec agy "$@"
+        if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+            exec "$RESOLVED_AGENT" "${EXTRA_ARGS[@]}"
+        else
+            exec "$RESOLVED_AGENT"
+        fi
     fi
 fi
 
@@ -43,10 +137,14 @@ if [ -n "$BUDDY_SESS_ID" ]; then
     fi
 else
     echo "Creating Buddy session in Rex..."
-    NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- agy)"
+    if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "$RESOLVED_AGENT" "${EXTRA_ARGS[@]}")"
+    else
+        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "$RESOLVED_AGENT")"
+    fi
     BUDDY_SESS_ID="$(echo "$NEW_SESS" | jq -r '.session_id')"
-    if [ -x "$BUDDY_CTL" ]; then
-        "$BUDDY_CTL" init >/dev/null 2>&1 || true
+    if [ -n "$BUDDY_CTL_CMD" ]; then
+        "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
     fi
     if [ -n "$APP_CLIENT_ID" ] && [ -n "$BUDDY_SESS_ID" ]; then
         "$REX_BIN" -C "$APP_CLIENT_ID" do session.select "session_id=$BUDDY_SESS_ID" >/dev/null 2>&1 || true

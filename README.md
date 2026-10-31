@@ -1,6 +1,6 @@
 # Buddy
 
-Single-session Rex terminal orchestrator and agent skill for managing 5–10+ concurrent project sessions and feature tabs without cognitive overload or context drift.
+Single-session Rex terminal orchestrator and agent skill for managing as many concurrent project sessions and feature tabs as you want without cognitive overload or context drift.
 
 ---
 
