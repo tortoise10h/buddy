@@ -78,9 +78,11 @@ DEFAULT_CONFIG = {
         "default_runtime_mode": "full-access",
         "default_worktree_base_ref": "HEAD",
         "agent_aliases": {
-            "agy": "antigravity",
+            "agy": "antigravity/gemini-4-argon-high",
             "agy-argon": "antigravity/gemini-4-argon-high",
-            "agy-flash": "antigravity/gemini-3.8-flash-medium"
+            "agy-flash": "antigravity/gemini-3.8-flash-medium",
+            "claude": "anthropic/claude-3-7-sonnet",
+            "codestral": "mistral/codestral-2501"
         }
     }
 }
@@ -428,8 +430,118 @@ def save_t3_mcp_oauth(oauth_data: dict) -> None:
         pass
 
 
+_T3_MCP_SESSION_ID: str | None = None
+
+
+def _parse_mcp_response(resp: urllib.response.addinfourl, raw_body: bytes) -> list[dict]:
+    """Parses JSON-RPC payload(s) from either plain application/json or text/event-stream (SSE)."""
+    if resp.status in (202, 204) or not raw_body or not raw_body.strip():
+        return []
+
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/event-stream" in content_type:
+        text = raw_body.decode("utf-8", errors="replace")
+        events = re.split(r"\n\n|\r\n\r\n", text)
+        payloads = []
+        for ev in events:
+            if not ev.strip():
+                continue
+            data_lines = []
+            for line in ev.splitlines():
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+            if data_lines:
+                data_str = "\n".join(data_lines).strip()
+                if data_str:
+                    try:
+                        payloads.append(json.loads(data_str))
+                    except Exception:
+                        pass
+        return payloads
+
+    # Default application/json
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+        if isinstance(data, list):
+            return data
+        return [data]
+    except Exception:
+        return []
+
+
+def _get_or_create_mcp_session(url: str, token: str, timeout: float = 10.0) -> str:
+    global _T3_MCP_SESSION_ID
+    if _T3_MCP_SESSION_ID:
+        return _T3_MCP_SESSION_ID
+
+    init_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "buddy-ctl",
+                "version": "1.0.0"
+            }
+        }
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(init_payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw_body = resp.read()
+            sess_id = resp.headers.get("mcp-session-id")
+            if not sess_id:
+                raise RuntimeError(f"T3 MCP initialize succeeded at {url} but server did not return 'mcp-session-id' header")
+            _T3_MCP_SESSION_ID = sess_id
+
+            # Send notifications/initialized (harmless if ignored / returns 202/204)
+            try:
+                notif_payload = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized"
+                }
+                notif_req = urllib.request.Request(
+                    url,
+                    data=json.dumps(notif_payload).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                        "mcp-session-id": _T3_MCP_SESSION_ID,
+                        "mcp-protocol-version": "2025-06-18"
+                    }
+                )
+                with urllib.request.urlopen(notif_req, timeout=5.0) as n_resp:
+                    n_resp.read()
+            except Exception:
+                pass
+
+            return _T3_MCP_SESSION_ID
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise T3McpAuthRequiredError(get_mcp_auth_error_message())
+        err_body = ""
+        try:
+            err_body = e.read().decode("utf-8").strip()
+        except Exception:
+            pass
+        details = err_body if err_body else f"reason={e.reason}"
+        raise RuntimeError(f"HTTP {e.code} ({details}) during MCP initialize at {url}")
+
+
 def t3_mcp_call(tool_name: str, arguments: dict, cfg: dict | None = None, timeout: float = 20.0) -> dict:
-    """Invokes an MCP tool via POST /mcp using the 30-day OAuth token."""
+    """Invokes an MCP tool via POST /mcp using the 30-day OAuth token and Streamable HTTP transport."""
+    global _T3_MCP_SESSION_ID
     if cfg is None:
         cfg = load_config()
     oauth = load_t3_mcp_oauth()
@@ -445,35 +557,55 @@ def t3_mcp_call(tool_name: str, arguments: dict, cfg: dict | None = None, timeou
     origin = info.get("origin", "http://127.0.0.1:3773")
     url = f"{origin}/mcp"
     token = oauth["access_token"]
-    payload = {
-        "jsonrpc": "2.0",
-        "id": int(time.time() * 1000) % 1000000,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments
+
+    def _execute_call(sess_id: str) -> dict:
+        req_id = int(time.time() * 1000) % 1000000
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
         }
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-    )
-    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "mcp-session-id": sess_id,
+                "mcp-protocol-version": "2025-06-18"
+            }
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resp_data = json.loads(resp.read().decode("utf-8"))
-            if "error" in resp_data:
-                err = resp_data["error"]
-                err_msg = err.get("message", json.dumps(err))
+            raw_body = resp.read()
+            payloads = _parse_mcp_response(resp, raw_body)
+            if not payloads:
+                raise RuntimeError(f"Empty response from MCP tool '{tool_name}' at {url}")
+
+            # Find matching envelope or first result
+            envelope = None
+            for p in payloads:
+                if isinstance(p, dict) and p.get("id") == req_id:
+                    envelope = p
+                    break
+            if envelope is None and payloads:
+                envelope = payloads[0] if isinstance(payloads[0], dict) else {}
+
+            if "error" in envelope:
+                err = envelope["error"]
+                err_msg = err.get("message", json.dumps(err)) if isinstance(err, dict) else str(err)
                 raise RuntimeError(f"MCP tool '{tool_name}' failed: {err_msg}")
-            result = resp_data.get("result", {})
+
+            result = envelope.get("result", {})
             if result.get("isError"):
                 content = result.get("content", [])
                 texts = [c.get("text", "") for c in content if isinstance(c, dict)]
                 raise RuntimeError(f"MCP tool '{tool_name}' returned error: {' '.join(texts)}")
+
             content = result.get("content", [])
             for c in content:
                 if isinstance(c, dict) and c.get("type") == "text":
@@ -483,12 +615,31 @@ def t3_mcp_call(tool_name: str, arguments: dict, cfg: dict | None = None, timeou
                             return parsed
                     except Exception:
                         pass
+            if isinstance(result.get("structuredContent"), dict):
+                return result["structuredContent"]
             return result
+
+    sess_id = _get_or_create_mcp_session(url, token, timeout=min(10.0, timeout))
+    try:
+        return _execute_call(sess_id)
     except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # Session expired on server; re-initialize and retry once
+            _T3_MCP_SESSION_ID = None
+            sess_id = _get_or_create_mcp_session(url, token, timeout=min(10.0, timeout))
+            try:
+                return _execute_call(sess_id)
+            except urllib.error.HTTPError as e2:
+                e = e2
         if e.code == 401:
             raise T3McpAuthRequiredError(get_mcp_auth_error_message())
-        err_body = e.read().decode("utf-8")
-        raise RuntimeError(f"HTTP {e.code} during MCP tool '{tool_name}': {err_body}")
+        err_body = ""
+        try:
+            err_body = e.read().decode("utf-8").strip()
+        except Exception:
+            pass
+        details = err_body if err_body else f"reason={e.reason}"
+        raise RuntimeError(f"HTTP {e.code} ({details}) during MCP tool '{tool_name}' at {url}")
 
 
 def resolve_t3_model_selection(
@@ -496,18 +647,31 @@ def resolve_t3_model_selection(
     cfg: dict,
     project_id: str | None = None
 ) -> tuple[dict | None, str]:
-    if not agent_spec or agent_spec.lower() in {"default", "none"}:
-        return None, "default"
+    target_spec = agent_spec
+    if not target_spec or target_spec.lower() in {"default", "none"}:
+        # Check if project has a defaultModelSelection in T3
+        if project_id:
+            try:
+                p_data = t3_http_get("/api/projects", cfg)
+                for p in p_data.get("projects", []):
+                    if p.get("id") == project_id:
+                        def_model = p.get("defaultModelSelection")
+                        if def_model and def_model.get("instanceId") and def_model.get("model"):
+                            return def_model, f"{def_model['instanceId']}/{def_model['model']}"
+            except Exception:
+                pass
+        # Fall back to default agent configured in Buddy
+        target_spec = cfg.get("default_agent", "agy")
 
     aliases = cfg.get("t3code", {}).get("agent_aliases", {})
-    expanded = aliases.get(agent_spec, agent_spec)
+    expanded = aliases.get(target_spec, target_spec)
 
     if "/" in expanded:
         provider, model = expanded.split("/", 1)
         provider = provider.strip()
         model = model.strip()
         if not provider or not model:
-            die(f"Invalid agent specification '{agent_spec}': expected <provider>/<model>")
+            die(f"Invalid agent specification '{target_spec}': expected <provider>/<model>")
         return {"instanceId": provider, "model": model}, f"{provider}/{model}"
 
     known_providers = {"antigravity", "claude", "codex", "cursor", "grok", "fx", "opencode", "pi", "muse", "acp-registry"}
@@ -523,6 +687,9 @@ def resolve_t3_model_selection(
                         return def_model, f"{bare}/{def_model.get('model', '')}"
         except Exception:
             pass
+
+        if bare == "antigravity":
+            return {"instanceId": "antigravity", "model": "gemini-4-argon-high"}, "antigravity/gemini-4-argon-high"
 
         die(
             f"Provider '{bare}' requires a model slug in T3 Code.\n"
@@ -2056,8 +2223,9 @@ def cmd_capture(args: argparse.Namespace) -> None:
                 except Exception:
                     pass
 
-        th_info = th_data.get("thread", th_data)
-        if not th_info or not th_info.get("threadId", th_info.get("id")):
+        projection = th_data.get("projection", {})
+        th_info = projection.get("thread") or th_data.get("thread", th_data)
+        if not th_info or not (th_info.get("threadId") or th_info.get("id")):
             task["status"] = "missing"
             task["last_summary"] = "Thread not found in T3 Code"
             task["updated_at"] = now_iso()
@@ -2069,8 +2237,11 @@ def cmd_capture(args: argparse.Namespace) -> None:
             }, indent=2))
             return
 
-        t3_status = th_info.get("status", "running")
-        pending_count = th_info.get("pendingRequestCount", 0)
+        runs = projection.get("runs", [])
+        latest_run_stat = runs[-1].get("status") if runs else None
+        t3_status = latest_run_stat or th_info.get("status", "running")
+        pending_requests = projection.get("runtimeRequests", [])
+        pending_count = len(pending_requests) if pending_requests else th_info.get("pendingRequestCount", 0)
         if pending_count > 0 or t3_status == "waiting":
             buddy_status = "waiting_for_input"
         elif t3_status == "completed":
@@ -2098,7 +2269,7 @@ def cmd_capture(args: argparse.Namespace) -> None:
             except Exception as e:
                 output_lines.append(f"❓ Pending input required ({e})")
 
-        messages = th_data.get("messages", [])
+        messages = projection.get("messages") or th_data.get("messages", [])
         if messages:
             output_lines.append("--- Recent Messages ---")
             for m in messages[-20:]:
@@ -2921,7 +3092,8 @@ def cmd_watch(args: argparse.Namespace) -> None:
                         except Exception:
                             pass
 
-                th_info = th_data.get("thread", th_data)
+                projection = th_data.get("projection", {})
+                th_info = projection.get("thread") or th_data.get("thread", th_data)
                 if not th_info or not (th_info.get("threadId") or th_info.get("id")):
                     task["status"] = "missing"
                     task["last_summary"] = "Thread not found in T3 Code"
@@ -2936,10 +3108,13 @@ def cmd_watch(args: argparse.Namespace) -> None:
                         }, indent=2))
                         return
                 else:
-                    t3_status = th_info.get("status", "running")
-                    pending_count = th_info.get("pendingRequestCount", 0)
+                    runs = projection.get("runs", [])
+                    latest_run_stat = runs[-1].get("status") if runs else None
+                    t3_status = latest_run_stat or th_info.get("status", "running")
+                    pending_requests = projection.get("runtimeRequests", [])
+                    pending_count = len(pending_requests) if pending_requests else th_info.get("pendingRequestCount", 0)
                     last_msg = ""
-                    messages = th_info.get("messages", [])
+                    messages = projection.get("messages") or th_data.get("messages", [])
                     if messages:
                         last_msg = messages[-1].get("content") or messages[-1].get("text", "")
 
@@ -3402,7 +3577,7 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
         errors = []
         if last_error:
             errors.append({"line": 1, "text": str(last_error), "context": str(last_error)})
-        messages = th_data.get("messages", [])
+        messages = projection.get("messages") or th_data.get("messages", [])
         tail_lines = [f"[{m.get('role')}]: {m.get('text', '')[:100]}" for m in messages[-30:]]
         print(json.dumps({
             "project": project_name,
