@@ -236,6 +236,9 @@ When the user confirms the task is accepted and done:
 | `buddy-ctl status --sync` | Reconcile cache against live Rex sessions and tabs. |
 | `buddy-ctl status --format brief` | One-line summary per project/task. |
 | `buddy-ctl projects [--query <q>]` | List all discovered projects under project roots. |
+| `buddy-ctl projects roots` | List configured project root directories. |
+| `buddy-ctl projects add-root <path>` | Add a new project root directory to configuration. |
+| `buddy-ctl projects remove-root <path>` | Remove a project root directory from configuration. |
 | `buddy-ctl config show` | View current Buddy configuration. |
 | `buddy-ctl config set <key> <val>` | Change configuration (e.g. `default_agent pi`). |
 | `buddy-ctl ensure-session -p <proj>` | Ensure Rex session exists for a project. |

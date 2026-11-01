@@ -104,6 +104,13 @@ cd /Users/sunday/Dev/Personal/Projects/buddy
 ./install.sh
 ```
 
+During installation, Buddy prompts you for one or more project root directories where your repositories live (e.g. `~/Dev/Personal/Projects`, `~/Dev/Work/repos`, `~/Code/oss`):
+- Hit **Enter** to accept the default (`~/Dev/Personal/Projects`).
+- Enter multiple paths separated by commas or spaces, or add more iteratively when prompted.
+- Non-existent directories are validated with an option to auto-create them.
+- Re-running `install.sh` on an existing installation automatically detects and preserves your configured roots.
+- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` (and optionally `BUDDY_PROJECTS_ROOTS="dir1:dir2"`).
+
 This:
 1. Links `bin/buddy` and `buddy-ctl` -> `~/.local/bin/`
 2. Links `skills/buddy` into:
@@ -112,7 +119,7 @@ This:
    - `~/.gemini/antigravity-cli/skills/buddy`
    - `~/.pi/agent/skills/buddy`
    - `~/.config/opencode/skills/buddy`
-3. Initializes `~/.buddy/` (`config.json`, `state.json`, `AGENTS.md`, `.agents/hooks.json`).
+3. Initializes `~/.buddy/` (`config.json`, `state.json`, `AGENTS.md`, `.agents/hooks.json`) with your configured project roots.
 
 ---
 
@@ -133,8 +140,14 @@ buddy-ctl status
 # Reconcile cache against live Rex sessions
 buddy-ctl status --sync
 
-# List available projects under ~/Dev/Personal/Projects
+# List available projects across all configured project roots
 buddy-ctl projects
+buddy-ctl projects --query docnotate
+
+# Manage project roots
+buddy-ctl projects roots
+buddy-ctl projects add-root ~/Dev/Work/repos
+buddy-ctl projects remove-root ~/Dev/Work/repos
 
 # Fast-path atomic dispatch (auto-slug, spawn, prompt, verify in 1 shot)
 buddy-ctl dispatch --project docnotate --prompt "Add shortcut to resolve comments" [--task inline-comments]

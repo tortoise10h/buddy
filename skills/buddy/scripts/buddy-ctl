@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
     "buddy_session_name": "Buddy",
     "default_agent": "agy",
     "projects_roots": [
+        # Fallback default project root; can be overridden during install/init via --projects-root,
+        # env BUDDY_PROJECTS_ROOTS, or buddy-ctl projects add-root / remove-root
         os.path.expanduser("~/Dev/Personal/Projects")
     ],
     "use_worktree_by_default": False,
@@ -321,6 +323,38 @@ def get_rex_app_client() -> str | None:
     return None
 
 
+def parse_projects_roots_input(
+    roots_list: list[str] | None = None,
+    roots_str: str | None = None,
+    include_env: bool = True
+) -> list[str]:
+    """Parse, expand, resolve, and deduplicate project roots from flags/env."""
+    raw_roots: list[str] = []
+    if roots_list:
+        for item in roots_list:
+            parts = re.split(r"[:,\n]+", item)
+            raw_roots.extend([p.strip() for p in parts if p.strip()])
+    if roots_str:
+        parts = re.split(r"[:,\n]+", roots_str)
+        raw_roots.extend([p.strip() for p in parts if p.strip()])
+    if not raw_roots and include_env:
+        env_val = os.environ.get("BUDDY_PROJECTS_ROOTS", "").strip()
+        if env_val:
+            parts = re.split(r"[:,\n]+", env_val)
+            raw_roots.extend([p.strip() for p in parts if p.strip()])
+
+    final_roots: list[str] = []
+    seen: set[str] = set()
+    for r in raw_roots:
+        expanded = str(Path(os.path.expanduser(r)).resolve())
+        if not os.path.exists(expanded):
+            print(f"Warning: Project root directory does not exist: {expanded}", file=sys.stderr)
+        if expanded not in seen:
+            seen.add(expanded)
+            final_roots.append(expanded)
+    return final_roots
+
+
 def resolve_project(query: str, cfg: dict | None = None) -> tuple[str, str]:
     """Resolve a project name or query to (project_name, project_path)."""
     if not cfg:
@@ -335,7 +369,9 @@ def resolve_project(query: str, cfg: dict | None = None) -> tuple[str, str]:
 
     # 2. Check roots in config
     roots = [Path(r) for r in cfg.get("projects_roots", [])]
-    candidates = []
+    exact_matches: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str]] = []
+
     for root in roots:
         if not root.is_dir():
             continue
@@ -344,15 +380,24 @@ def resolve_project(query: str, cfg: dict | None = None) -> tuple[str, str]:
                 c_name = child.name
                 c_slug = c_name.lower().replace("_", "-").replace(" ", "-")
                 if c_slug == clean_query:
-                    return c_name, str(child)
-                if clean_query in c_slug:
+                    exact_matches.append((c_name, str(child)))
+                elif clean_query in c_slug:
                     candidates.append((c_name, str(child)))
+
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    elif len(exact_matches) > 1:
+        matched_paths = [m[1] for m in exact_matches]
+        print(f"Warning: Ambiguous project name '{query}' matches multiple roots: {matched_paths}. Using {exact_matches[0][1]}.", file=sys.stderr)
+        return exact_matches[0]
 
     if len(candidates) == 1:
         return candidates[0]
     elif len(candidates) > 1:
         # Prioritize exact prefix or shortest match
         candidates.sort(key=lambda c: len(c[0]))
+        cand_paths = [c[1] for c in candidates]
+        print(f"Warning: Ambiguous project query '{query}' matches multiple projects: {cand_paths}. Using {candidates[0][1]}.", file=sys.stderr)
         return candidates[0]
 
     # 3. Check existing projects in state
@@ -377,10 +422,26 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     created = []
 
+    flag_roots = getattr(args, "projects_root", None)
+    flag_roots_str = getattr(args, "projects_roots", None)
+    has_explicit_flags = bool(flag_roots or flag_roots_str)
+
+    custom_roots = parse_projects_roots_input(flag_roots, flag_roots_str, include_env=True)
+    if custom_roots:
+        DEFAULT_CONFIG["projects_roots"] = custom_roots
+
     # 1. config.json
     if not CONFIG_PATH.is_file() or args.force:
-        save_config(DEFAULT_CONFIG)
+        cfg_to_save = json.loads(json.dumps(DEFAULT_CONFIG))
+        if custom_roots:
+            cfg_to_save["projects_roots"] = custom_roots
+        save_config(cfg_to_save)
         created.append("config.json")
+    elif has_explicit_flags and custom_roots:
+        cfg = load_config()
+        cfg["projects_roots"] = custom_roots
+        save_config(cfg)
+        created.append("config.json (updated projects_roots)")
 
     # 2. state.json
     state = load_state()
@@ -424,7 +485,7 @@ def cmd_init(args: argparse.Namespace) -> None:
                 "PreInvocation": [
                     {
                         "type": "command",
-                        "command": "python3 /Users/sunday/.local/bin/buddy-ctl context-inject",
+                        "command": f"python3 {os.path.expanduser('~/.local/bin/buddy-ctl')} context-inject",
                         "timeout": 5
                     }
                 ]
@@ -513,11 +574,22 @@ def cmd_config(args: argparse.Namespace) -> None:
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
+    action = getattr(args, "projects_action", None)
+    if action == "add-root":
+        cmd_projects_add_root(args)
+        return
+    elif action == "remove-root":
+        cmd_projects_remove_root(args)
+        return
+    elif action == "roots":
+        cmd_projects_roots(args)
+        return
+
     cfg = load_config()
     state = load_state()
     roots = [Path(r) for r in cfg.get("projects_roots", [])]
 
-    query = args.query.lower().strip() if args.query else None
+    query = args.query.lower().strip() if getattr(args, "query", None) else None
     projects_list = []
 
     for root in roots:
@@ -528,8 +600,13 @@ def cmd_projects(args: argparse.Namespace) -> None:
                 name = child.name
                 if query and query not in name.lower():
                     continue
-                is_active = name in state.get("projects", {})
-                tasks_count = len(state.get("projects", {}).get(name, {}).get("tasks", {}))
+                is_active = False
+                tasks_count = 0
+                for p_name, p_data in state.get("projects", {}).items():
+                    if p_data.get("project_path") == str(child) or (p_name == name and not p_data.get("project_path")):
+                        is_active = True
+                        tasks_count = len(p_data.get("tasks", {}))
+                        break
                 projects_list.append({
                     "name": name,
                     "path": str(child),
@@ -538,6 +615,85 @@ def cmd_projects(args: argparse.Namespace) -> None:
                 })
 
     print(json.dumps({"projects": projects_list, "total": len(projects_list)}, indent=2))
+
+
+def cmd_projects_add_root(args: argparse.Namespace) -> None:
+    raw_path = getattr(args, "path", None)
+    if not raw_path:
+        print(json.dumps({"error": "Missing PATH argument"}, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    abs_path = str(Path(os.path.expanduser(raw_path)).resolve())
+    if not os.path.exists(abs_path):
+        print(f"Warning: Directory does not exist: {abs_path}", file=sys.stderr)
+
+    cfg = load_config()
+    current_roots = cfg.get("projects_roots", [])
+    normalized = [str(Path(os.path.expanduser(r)).resolve()) for r in current_roots]
+
+    if abs_path in normalized:
+        print(json.dumps({"error": f"Root already exists: {abs_path}", "projects_roots": current_roots}, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    current_roots.append(abs_path)
+    deduped = []
+    seen = set()
+    for r in current_roots:
+        resolved = str(Path(os.path.expanduser(r)).resolve())
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(resolved)
+
+    cfg["projects_roots"] = deduped
+    save_config(cfg)
+    print(json.dumps({"status": "ok", "action": "add-root", "added": abs_path, "projects_roots": deduped}, indent=2))
+
+
+def cmd_projects_remove_root(args: argparse.Namespace) -> None:
+    raw_path = getattr(args, "path", None)
+    if not raw_path:
+        print(json.dumps({"error": "Missing PATH argument"}, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    abs_path = str(Path(os.path.expanduser(raw_path)).resolve())
+    cfg = load_config()
+    current_roots = cfg.get("projects_roots", [])
+
+    found = False
+    new_roots = []
+    for r in current_roots:
+        resolved = str(Path(os.path.expanduser(r)).resolve())
+        if resolved == abs_path or r == raw_path:
+            found = True
+        else:
+            new_roots.append(r)
+
+    if not found:
+        print(json.dumps({"error": f"Root not found: {raw_path}", "projects_roots": current_roots}, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    cfg["projects_roots"] = new_roots
+    save_config(cfg)
+    print(json.dumps({"status": "ok", "action": "remove-root", "removed": abs_path, "projects_roots": new_roots}, indent=2))
+
+
+def cmd_projects_roots(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    current_roots = cfg.get("projects_roots", [])
+    resolved_roots = []
+    for r in current_roots:
+        abs_path = str(Path(os.path.expanduser(r)).resolve())
+        exists = os.path.exists(abs_path)
+        if not exists:
+            print(f"Warning: Root directory does not exist: {abs_path}", file=sys.stderr)
+        resolved_roots.append({
+            "path": abs_path,
+            "exists": exists
+        })
+    print(json.dumps({
+        "projects_roots": [r["path"] for r in resolved_roots],
+        "roots": resolved_roots
+    }, indent=2))
 
 
 def cmd_ensure_session(args: argparse.Namespace) -> None:
@@ -957,34 +1113,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     project_name, project_path = resolve_project(args.project, cfg)
 
     # Ensure project session exists
-    if project_name not in state["projects"] or not state["projects"][project_name].get("rex_session_id"):
-        # call ensure_session internally
-        ns = argparse.Namespace(project=project_name)
-        # Capture ensure session
-        res = run_rex(["ls", "--json"], timeout=5.0, check=False)
-        sess_id = None
-        if res.returncode == 0:
-            for s in json.loads(res.stdout).get("sessions", []):
-                if s.get("label", "").lower() == project_name.lower():
-                    sess_id = s.get("session_id")
-                    break
-        if not sess_id:
-            res_new = run_rex(["new", project_name, "-c", project_path, "--window", "shell", "--json"])
-            sess_id = json.loads(res_new.stdout).get("session_id")
-
-        if project_name not in state["projects"]:
-            state["projects"][project_name] = {
-                "name": project_name,
-                "project_path": project_path,
-                "rex_session_id": sess_id,
-                "rex_session_label": project_name,
-                "tasks": {}
-            }
-        else:
-            state["projects"][project_name]["rex_session_id"] = sess_id
-        save_state(state)
-    else:
-        sess_id = state["projects"][project_name]["rex_session_id"]
+    sess_id = ensure_project_session(project_name, project_path, state)
 
     # Agent selection
     agent_name = args.agent or cfg.get("default_agent", "agy")
@@ -2180,6 +2309,8 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     p_init = subparsers.add_parser("init", help="Initialize ~/.buddy control tower directory")
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
+    p_init.add_argument("--projects-root", action="append", help="Project root directory (repeatable)")
+    p_init.add_argument("--projects-roots", help="Colon- or comma-separated list of project root directories")
 
     # config
     p_config = subparsers.add_parser("config", help="Get, set, or show configuration")
@@ -2188,8 +2319,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("value", nargs="?", help="Value to set")
 
     # projects
-    p_projects = subparsers.add_parser("projects", help="List available project directories")
+    p_projects = subparsers.add_parser("projects", help="List available project directories or manage project roots")
     p_projects.add_argument("--query", "-q", help="Filter projects by substring")
+    projects_sub = p_projects.add_subparsers(dest="projects_action", help="Manage project roots")
+
+    p_add_root = projects_sub.add_parser("add-root", help="Add a project root directory")
+    p_add_root.add_argument("path", help="Path to project root directory")
+
+    p_rm_root = projects_sub.add_parser("remove-root", help="Remove a project root directory")
+    p_rm_root.add_argument("path", help="Path to project root directory")
+
+    p_roots = projects_sub.add_parser("roots", help="List configured project roots")
 
     # ensure-session
     p_ens = subparsers.add_parser("ensure-session", help="Ensure a Rex session exists for a project")
