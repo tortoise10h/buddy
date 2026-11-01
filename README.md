@@ -129,6 +129,47 @@ This:
 
 ---
 
+## Go CLI (in development)
+
+The Go rewrite of `buddy-ctl` is currently underway (Phase 1 Parity Spike & Foundation).
+
+> [!NOTE]
+> The Python `buddy-ctl` remains the live production CLI used by `bin/buddy` and orchestration hooks until the Phase 8 cutover. Prebuilt static release binaries will be published from tags later in the migration.
+
+Developers working on or testing the Go rewrite can build and install the binary locally:
+
+- **Build binary**:
+  ```sh
+  make build
+  ```
+  Produces `bin/buddy-ctl`.
+
+- **Install locally**:
+  ```sh
+  make install
+  ```
+  Installs the binary to `$(PREFIX)/$(INSTALL_NAME)` (defaults to `~/.local/bin/buddy-ctl-go`), deliberately not shadowing the live Python `buddy-ctl`.
+
+- **Uninstall**:
+  ```sh
+  make uninstall
+  ```
+
+- **Cross-compile release matrix**:
+  ```sh
+  make cross
+  make checksums  # or 'make dist'
+  ```
+  Builds static binaries (`CGO_ENABLED=0`) for `darwin/arm64`, `darwin/amd64`, `linux/amd64`, and `linux/arm64` into `dist/` with SHA-256 checksums in `dist/checksums.txt`.
+
+- **Run parity tests**:
+  ```sh
+  make parity
+  ```
+  Executes the automated parity test harness in `test/parity/` verifying byte-identical hooks and command outputs against the Python CLI.
+
+---
+
 ## Agent Configuration & Roles
 
 Buddy cleanly decouples the agent running the control tower from the agents performing implementation tasks:
