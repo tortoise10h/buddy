@@ -1,0 +1,4 @@
+PROJECT          TASK                 AGENT    STATUS           SUMMARY
+--------------------------------------------------------------------------------
+docnotate        (none)               -        idle             Rex session: session:01a18d0d-b56d-752c-ac4c-0cf87d8e07c7
+myproj           feat-auth            agy      running          Implementing JWT authentication

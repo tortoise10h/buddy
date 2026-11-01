@@ -1,0 +1,14 @@
+{
+  "windows": [
+    {
+      "window_id": "window:01a18d0d-b597-7a54-8a44-4a82a7b43c7d",
+      "label": "Server",
+      "focused_block_id": "block:01a18d0d-b56d-773b-a504-f42ef787c258"
+    },
+    {
+      "window_id": "window:01a19070-6e9d-774b-a0f4-520257037b94",
+      "label": "Console",
+      "focused_block_id": "block:01a19070-6e6c-7d69-af75-40babbf56644"
+    }
+  ]
+}

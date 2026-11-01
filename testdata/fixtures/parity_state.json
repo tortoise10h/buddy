@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "buddy_session_id": "session:test-session-1234",
+  "updated_at": "2026-11-01T15:00:00.000000+07:00",
+  "projects": {
+    "docnotate": {
+      "name": "docnotate",
+      "project_path": "/tmp/test-docnotate",
+      "rex_session_id": "session:rex-docnotate",
+      "rex_session_label": "docnotate",
+      "tasks": {
+        "auth": {
+          "task_slug": "auth",
+          "window_id": "window:auth",
+          "window_label": "auth",
+          "agent_block_id": "block:auth",
+          "dev_block_id": null,
+          "agent": "agy",
+          "cwd": "/tmp/test-docnotate",
+          "worktree_path": null,
+          "branch": null,
+          "status": "waiting_for_input",
+          "initial_prompt": null,
+          "last_summary": "Asking user which OAuth provider to use",
+          "created_at": "2026-11-01T15:00:00.000000+07:00",
+          "updated_at": "2026-11-01T15:01:00.000000+07:00"
+        }
+      }
+    }
+  }
+}

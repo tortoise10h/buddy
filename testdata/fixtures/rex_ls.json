@@ -1,0 +1,14 @@
+{
+  "sessions": [
+    {
+      "session_id": "session:01a18d0d-b56d-752c-ac4c-0cf87d8e07c7",
+      "label": "docnotate",
+      "cwd": "/Users/sunday/Dev/Personal/Projects/docnotate"
+    },
+    {
+      "session_id": "session:01a18ce6-a7f8-75c8-9959-16d692a220fb",
+      "label": "buddy",
+      "cwd": "/Users/sunday/Dev/Personal/Projects/buddy"
+    }
+  ]
+}
