@@ -212,7 +212,11 @@ buddy
 ```
 Switches to or creates the `Buddy` Rex session and launches your orchestrator agent (`agy`).
 
+Use `buddy --help` (or `-h`) to inspect launcher options, supported agents, and agent resolution rules. To pass options directly through to the agent without interpretation, use `--` (e.g. `buddy -- --model pro`). Unrecognized options passed directly to `buddy` will report an error and the full help message to stderr and exit with code 2.
+
 ### CLI Usage (`buddy-ctl`)
+
+Run `buddy-ctl --help` for top-level command usage or `buddy-ctl <subcommand> --help` for command-specific flags. Any unknown options or invalid subcommands print an error and the full help message to stderr and exit with code 2.
 
 ```sh
 # View tracked projects and tasks from cache (O(1))

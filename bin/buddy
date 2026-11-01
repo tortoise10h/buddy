@@ -17,10 +17,40 @@ elif [ -x "$BUDDY_CTL" ]; then
     BUDDY_CTL_CMD="$BUDDY_CTL"
 fi
 
-# Ensure ~/.buddy exists
-if [ -n "$BUDDY_CTL_CMD" ]; then
-    "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
-fi
+print_help() {
+    cat <<'EOF'
+Usage: buddy [options] [agent] [-- <agent-args...>]
+
+Launch or switch to the Buddy orchestrator session in Rex.
+
+Options:
+  -a, --agent <agent>   Agent to launch in the orchestrator session
+  -h, --help            Show this help message and exit
+
+Positional Agent:
+  agy, pi, opencode, claude, codex, cursor, gemini
+
+Agent Resolution:
+  1. CLI argument (--agent, -a, or positional)
+  2. BUDDY_AGENT environment variable
+  3. config.orchestrator_agent (in ~/.buddy/config.json)
+  4. config.default_agent
+  5. Default fallback: agy
+
+Passthrough:
+  Use '--' to pass flags and options directly to the underlying agent.
+  Everything after '--' is forwarded untouched.
+
+Examples:
+  buddy                     Launch or attach using default agent
+  buddy opencode            Launch with opencode agent
+  buddy -a pi               Launch with pi agent
+  buddy -- --model pro      Pass '--model pro' directly to the agent
+
+Controller Commands:
+  Run 'buddy-ctl --help' for task dispatch, status, and project management.
+EOF
+}
 
 # Parse agent selection and arguments
 # Supported syntax:
@@ -34,6 +64,10 @@ EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            print_help
+            exit 0
+            ;;
         --agent)
             if [ $# -lt 2 ]; then
                 echo "Error: --agent requires an agent name" >&2
@@ -74,12 +108,24 @@ while [ $# -gt 0 ]; do
             done
             break
             ;;
+        -*)
+            echo "Error: unknown option '$1'" >&2
+            echo "Hint: Use 'buddy -- <args>' to pass options through to the agent." >&2
+            echo >&2
+            print_help >&2
+            exit 2
+            ;;
         *)
             EXTRA_ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+# Ensure ~/.buddy exists
+if [ -n "$BUDDY_CTL_CMD" ]; then
+    "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
+fi
 
 # Environment variable fallback if not specified on CLI
 if [ -z "$CHOSEN_AGENT" ] && [ -n "${BUDDY_AGENT:-}" ]; then

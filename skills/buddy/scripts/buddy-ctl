@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+""":"
+exec python3 "$0" "$@"
+"""
 """
 buddy-ctl — Command-line controller for Buddy, the multi-project Rex terminal orchestrator.
 """
@@ -2388,12 +2391,48 @@ def cmd_context_inject(args: argparse.Namespace) -> None:
         sys.exit(0)
 
 
+class BuddyArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser subclass that prints Error: <msg> and full format_help() to stderr on invalid input."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._subparsers_action = None
+
+    def error(self, message: str) -> None:
+        if "invalid choice:" in message and ("subcommand" in message or "action" in message or "command" in message):
+            m = re.search(r"invalid choice:\s*('[^']+'|\"[^\"]+\")", message)
+            err_msg = f"unknown command {m.group(1)}" if m else message
+        else:
+            err_msg = message
+        sys.stderr.write(f"Error: {err_msg}\n\n" + self.format_help())
+        raise SystemExit(2)
+
+    def parse_args(self, args=None, namespace=None):
+        args, argv = self.parse_known_args(args, namespace)
+        if argv:
+            sub_name = getattr(args, "subcommand", None)
+            if sub_name and getattr(self, "_subparsers_action", None):
+                subparser = self._subparsers_action.choices.get(sub_name)
+                if subparser:
+                    for action_name in ["task_action", "projects_action"]:
+                        nested_name = getattr(args, action_name, None)
+                        if nested_name and getattr(subparser, "_subparsers_action", None):
+                            nested_sub = subparser._subparsers_action.choices.get(nested_name)
+                            if nested_sub:
+                                subparser = nested_sub
+                                break
+                    subparser.error(f"unrecognized arguments: {' '.join(argv)}")
+            self.error(f"unrecognized arguments: {' '.join(argv)}")
+        return args
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = BuddyArgumentParser(
         prog="buddy-ctl",
         description="Controller CLI for Buddy, the multi-project Rex terminal orchestrator."
     )
-    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to run")
+    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to run", parser_class=BuddyArgumentParser)
+    parser._subparsers_action = subparsers
 
     # init
     p_init = subparsers.add_parser("init", help="Initialize ~/.buddy control tower directory")
@@ -2412,7 +2451,8 @@ def build_parser() -> argparse.ArgumentParser:
     # projects
     p_projects = subparsers.add_parser("projects", help="List available project directories or manage project roots")
     p_projects.add_argument("--query", "-q", help="Filter projects by substring")
-    projects_sub = p_projects.add_subparsers(dest="projects_action", help="Manage project roots")
+    projects_sub = p_projects.add_subparsers(dest="projects_action", help="Manage project roots", parser_class=BuddyArgumentParser)
+    p_projects._subparsers_action = projects_sub
 
     p_add_root = projects_sub.add_parser("add-root", help="Add a project root directory")
     p_add_root.add_argument("path", help="Path to project root directory")
@@ -2438,7 +2478,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # task start
     p_ts = subparsers.add_parser("task", help="Task management")
-    ts_sub = p_ts.add_subparsers(dest="task_action", help="Task action")
+    ts_sub = p_ts.add_subparsers(dest="task_action", help="Task action", parser_class=BuddyArgumentParser)
+    p_ts._subparsers_action = ts_sub
 
     p_start = ts_sub.add_parser("start", help="Start a new feature task tab in project session")
     p_start.add_argument("--project", "-p", required=True, help="Project name or path")
@@ -2572,7 +2613,8 @@ def main() -> None:
     elif args.subcommand in dispatch:
         dispatch[args.subcommand](args)
     else:
-        parser.print_help()
+        sys.stderr.write(f"Error: unknown command '{args.subcommand}'\n\n" + parser.format_help())
+        sys.exit(2)
 
 
 if __name__ == "__main__":
