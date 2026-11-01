@@ -1,0 +1,50 @@
+# .goreleaser.yaml
+# GoReleaser configuration for buddy-ctl
+# Reference: https://goreleaser.com
+version: 2
+
+project_name: buddy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: buddy-ctl
+    main: ./cmd/buddy-ctl
+    binary: buddy-ctl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/tortoise10h/buddy/internal/cli.Version={{.Version}}
+      - -X github.com/tortoise10h/buddy/internal/cli.Commit={{.ShortCommit}}
+      - -X github.com/tortoise10h/buddy/internal/cli.Date={{.Date}}
+
+archives:
+  - id: buddy-ctl-binary
+    format: binary
+    name_template: "buddy-ctl_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
