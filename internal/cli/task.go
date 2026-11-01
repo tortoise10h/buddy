@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/state"
 )
 
 func newTaskCmd() *cobra.Command {
@@ -59,8 +60,52 @@ func newTaskUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update task status or summary in state cache",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("[buddy-ctl] task update: skeleton called with args %v\n", args)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if project == "" || task == "" {
+				return fmt.Errorf("both --project (-p) and --task (-t) are required")
+			}
+
+			var updatedProj, updatedTask string
+			err := state.MutateState(func(s *state.State) error {
+				p, err := s.FindProject(project)
+				if err != nil {
+					return err
+				}
+				updatedProj = p.Name
+
+				t, err := p.FindTask(task)
+				if err != nil {
+					return err
+				}
+				updatedTask = t.TaskSlug
+
+				if status != "" {
+					t.Status = status
+				}
+				if summary != "" {
+					t.LastSummary = summary
+				}
+
+				p.Tasks[t.TaskSlug] = *t
+				s.Projects[p.Name] = *p
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			resp := map[string]any{
+				"status":  "ok",
+				"project": updatedProj,
+				"task":    updatedTask,
+				"updated": map[string]any{
+					"status":  status,
+					"summary": summary,
+				},
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(resp)
 		},
 	}
 
@@ -99,6 +144,10 @@ func newTaskCloseCmd() *cobra.Command {
 			if err := eng.Close(cmd.Context(), sessID, winID); err != nil {
 				return err
 			}
+
+			_ = state.MutateState(func(s *state.State) error {
+				return s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+			})
 
 			resp := map[string]any{
 				"status":    "closed",
