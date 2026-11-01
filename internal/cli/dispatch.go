@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -17,6 +15,7 @@ import (
 	"github.com/tortoise10h/buddy/internal/project"
 	"github.com/tortoise10h/buddy/internal/state"
 	"github.com/tortoise10h/buddy/internal/task"
+	"github.com/tortoise10h/buddy/internal/worktree"
 )
 
 func newDispatchCmd() *cobra.Command {
@@ -105,20 +104,9 @@ func newDispatchCmd() *cobra.Command {
 			}
 
 			if useWorktree {
-				parentDir := filepath.Dir(projectPath)
-				wt := filepath.Join(parentDir, fmt.Sprintf("%s-wt-%s", filepath.Base(projectPath), taskSlug))
+				wt, b, _ := worktree.EnsureWorktree(projectPath, taskSlug, flagBranch)
 				wtPath = &wt
-				if branch == nil {
-					b := fmt.Sprintf("feat/%s", taskSlug)
-					branch = &b
-				}
-				if _, err := os.Stat(wt); os.IsNotExist(err) {
-					gitCmd := exec.Command("git", "-C", projectPath, "worktree", "add", "-b", *branch, wt)
-					if err := gitCmd.Run(); err != nil {
-						fallbackCmd := exec.Command("git", "-C", projectPath, "worktree", "add", wt, *branch)
-						_ = fallbackCmd.Run()
-					}
-				}
+				branch = &b
 				cwd = wt
 			}
 

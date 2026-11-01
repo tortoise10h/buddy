@@ -311,10 +311,68 @@ func (r *RexBackend) Capture(ctx context.Context, sessionID, blockID string, lin
 	}, nil
 }
 
+func (r *RexBackend) GetRexAppClient(ctx context.Context) string {
+	out, err := r.runRex(ctx, "client", "ls", "--json")
+	if err != nil {
+		return ""
+	}
+	var data struct {
+		Clients []struct {
+			ClientID string `json:"client_id"`
+			Info     map[string]any `json:"info"`
+		} `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		return ""
+	}
+	for _, c := range data.Clients {
+		if c.Info != nil && c.Info["kind"] == "app" {
+			return c.ClientID
+		}
+	}
+	return ""
+}
+
+func (r *RexBackend) InspectBlock(ctx context.Context, blockID string) (RexBlockInspectOutput, error) {
+	out, err := r.runRex(ctx, "block", "inspect", blockID, "--json")
+	if err != nil {
+		return RexBlockInspectOutput{}, err
+	}
+	var data RexBlockInspectOutput
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		return RexBlockInspectOutput{}, err
+	}
+	return data, nil
+}
+
 func (r *RexBackend) Focus(ctx context.Context, sessionID string, windowID string) error {
-	_, _ = r.runRex(ctx, "window", "focus", "-s", sessionID, windowID)
-	_, err := r.runRex(ctx, "focus", windowID)
-	return err
+	return r.FocusRexWindow(ctx, sessionID, windowID)
+}
+
+func (r *RexBackend) FocusRexWindow(ctx context.Context, sessionID, windowID string) error {
+	if sessionID != "" && windowID != "" {
+		appClient := r.GetRexAppClient(ctx)
+		if appClient != "" {
+			_, _ = r.runRex(ctx, "-C", appClient, "do", "session.select",
+				fmt.Sprintf("session_id=%s", sessionID),
+				fmt.Sprintf("window_id=%s", windowID),
+			)
+		}
+		_, _ = r.runRex(ctx, "window", "focus", "-s", sessionID, windowID)
+	} else if windowID != "" {
+		_, _ = r.runRex(ctx, "focus", windowID)
+	} else if sessionID != "" {
+		appClient := r.GetRexAppClient(ctx)
+		if appClient != "" {
+			_, _ = r.runRex(ctx, "-C", appClient, "do", "session.select",
+				fmt.Sprintf("session_id=%s", sessionID),
+			)
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, "osascript", "-e", `tell application "Rex Beta" to activate`)
+	_ = cmd.Run()
+	return nil
 }
 
 func (r *RexBackend) CloseWindow(ctx context.Context, sessionID, windowID string) error {
@@ -324,29 +382,40 @@ func (r *RexBackend) CloseWindow(ctx context.Context, sessionID, windowID string
 
 func (r *RexBackend) OpenDevSplit(ctx context.Context, sessionID, blockID, cwd, cmd string) (backends.BlockRef, error) {
 	args := []string{
-		"block", "split", blockID,
-		"-d", "right",
-		"-s", "40%",
+		"split",
+		"-s", sessionID,
+		"-b", blockID,
+		"--split=right",
+		"--ratio", "40",
+		"--label", "Demo",
 		"-c", cwd,
 		"--keep-open",
+		"--focus=false",
 		"--json",
 		"--",
+		"sh", "-c", cmd,
 	}
-	parts := strings.Fields(cmd)
-	args = append(args, parts...)
 
 	out, err := r.runRex(ctx, args...)
 	if err != nil {
 		return backends.BlockRef{}, err
 	}
 
-	var data RexBlockInspectOutput
+	var data struct {
+		BlockIDs []string `json:"block_ids"`
+		BlockID  string   `json:"block_id"`
+	}
 	if err := json.Unmarshal([]byte(out), &data); err != nil {
-		return backends.BlockRef{}, fmt.Errorf("failed to parse rex block split JSON: %w", err)
+		return backends.BlockRef{}, fmt.Errorf("failed to parse rex split JSON: %w", err)
+	}
+
+	bID := data.BlockID
+	if bID == "" && len(data.BlockIDs) > 0 {
+		bID = data.BlockIDs[0]
 	}
 
 	return backends.BlockRef{
-		BlockID:   data.BlockID,
+		BlockID:   bID,
 		SessionID: sessionID,
 	}, nil
 }

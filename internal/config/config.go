@@ -63,7 +63,6 @@ func DefaultConfig() Config {
 	return Config{
 		Version:              1,
 		BuddySessionName:     "Buddy",
-		TerminalBackend:      "rex",
 		OrchestratorAgent:    "agy",
 		WorkerAgent:          "agy",
 		DefaultAgent:         "agy",
@@ -172,6 +171,80 @@ func LoadConfig() Config {
 	}
 
 	return cfg
+}
+
+// LoadRawConfig loads ~/.buddy/config.json as map[string]any with defaults merged.
+func LoadRawConfig() (map[string]any, error) {
+	cfgPath := filepath.Join(GetBuddyDir(), "config.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		// Convert DefaultConfig to map
+		defaultBytes, _ := json.Marshal(DefaultConfig())
+		var raw map[string]any
+		_ = json.Unmarshal(defaultBytes, &raw)
+		return raw, nil
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		defaultBytes, _ := json.Marshal(DefaultConfig())
+		_ = json.Unmarshal(defaultBytes, &raw)
+		return raw, nil
+	}
+
+	// Merge defaults for missing keys
+	defaultBytes, _ := json.Marshal(DefaultConfig())
+	var defaultMap map[string]any
+	_ = json.Unmarshal(defaultBytes, &defaultMap)
+
+	legacyDefault, _ := raw["default_agent"].(string)
+
+	for k, v := range defaultMap {
+		if _, exists := raw[k]; !exists {
+			if (k == "orchestrator_agent" || k == "worker_agent") && legacyDefault != "" {
+				raw[k] = legacyDefault
+			} else {
+				raw[k] = v
+			}
+		}
+	}
+
+	// Merge missing agents
+	if defaultAgents, ok := defaultMap["agents"].(map[string]any); ok {
+		rawAgents, ok := raw["agents"].(map[string]any)
+		if !ok {
+			rawAgents = make(map[string]any)
+			raw["agents"] = rawAgents
+		}
+		for ak, av := range defaultAgents {
+			if _, exists := rawAgents[ak]; !exists {
+				rawAgents[ak] = av
+			}
+		}
+	}
+
+	return raw, nil
+}
+
+// SaveRawConfig atomically saves raw config to disk.
+func SaveRawConfig(raw map[string]any) error {
+	buddyDir := GetBuddyDir()
+	if err := os.MkdirAll(buddyDir, 0755); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	tmpPath := filepath.Join(buddyDir, ".config.json.tmp")
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, filepath.Join(buddyDir, "config.json"))
 }
 
 func (c *Config) GetEffectiveOrchestratorAgent() string {

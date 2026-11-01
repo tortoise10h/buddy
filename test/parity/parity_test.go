@@ -52,10 +52,10 @@ func printSummaryTable() {
 	fmt.Println("==========================================================================================")
 	fmt.Println("                           BUDDY-CTL PARITY VERIFICATION SUMMARY                          ")
 	fmt.Println("==========================================================================================")
-	fmt.Printf("%-34s %-22s %-12s %s\n", "TEST CASE", "COMMAND", "EXIT (PY/GO)", "PARITY RESULT")
+	fmt.Printf("%-34s %-24s %-12s %s\n", "TEST CASE", "COMMAND", "EXIT (PY/GO)", "PARITY RESULT")
 	fmt.Println("------------------------------------------------------------------------------------------")
 	for _, r := range parityResults {
-		fmt.Printf("%-34s %-22s %-12s %s\n",
+		fmt.Printf("%-34s %-24s %-12s %s\n",
 			r.CaseName,
 			r.Command,
 			fmt.Sprintf("%d / %d", r.PyCode, r.GoCode),
@@ -121,6 +121,10 @@ func setupTempBuddyEnv(t *testing.T) (tempHome, buddyDir string) {
 		t.Fatalf("failed to create .buddy: %v", err)
 	}
 
+	projectsDir := filepath.Join(tempHome, "projects")
+	_ = os.MkdirAll(filepath.Join(projectsDir, "docnotate"), 0755)
+	_ = os.MkdirAll(filepath.Join(projectsDir, "daily-catch"), 0755)
+
 	fixturePath := filepath.Join("..", "..", "testdata", "fixtures", "parity_state.json")
 	stateData, err := os.ReadFile(fixturePath)
 	if err != nil {
@@ -130,7 +134,7 @@ func setupTempBuddyEnv(t *testing.T) (tempHome, buddyDir string) {
 		t.Fatalf("failed to write state.json: %v", err)
 	}
 
-	configJSON := `{"version": 1, "orchestrator_agent": "agy", "worker_agent": "agy", "projects_roots": ["/tmp"]}`
+	configJSON := fmt.Sprintf(`{"version": 1, "orchestrator_agent": "agy", "worker_agent": "agy", "projects_roots": [%q]}`, projectsDir)
 	if err := os.WriteFile(filepath.Join(buddyDir, "config.json"), []byte(configJSON), 0644); err != nil {
 		t.Fatalf("failed to write config.json: %v", err)
 	}
@@ -181,13 +185,31 @@ if cmd == "window":
     if sub == "ls":
         print(json.dumps({"windows": [{"window_id": "window:auth", "label": "auth", "focused_block_id": "block:auth"}]}))
         sys.exit(0)
+    if sub in ("close", "focus"):
+        sys.exit(0)
+    sys.exit(0)
+
+if cmd == "client" and len(args) > 1 and args[1] == "ls":
+    print(json.dumps({"clients": [{"client_id": "client:1", "info": {"kind": "app"}}]}))
+    sys.exit(0)
+
+if cmd == "block" and len(args) > 1 and args[1] == "inspect":
+    block_id = args[2]
+    print(json.dumps({"block_id": block_id, "window_id": "window:auth"}))
+    sys.exit(0)
+
+if cmd == "split":
+    print(json.dumps({"block_ids": ["block:dev-1"], "block_id": "block:dev-1"}))
     sys.exit(0)
 
 if cmd == "capture":
     print("? for shortcuts\nauto · Gemini 3.8 Flash\nLine 1: agent initialized\nLine 2: thinking...\nLine 3: reading files\n")
     sys.exit(0)
 
-if cmd in ("send", "send-key", "focus"):
+if cmd in ("send", "send-key", "focus", "do"):
+    sys.exit(0)
+
+if cmd == "-C":
     sys.exit(0)
 
 if cmd == "new":
@@ -201,6 +223,9 @@ sys.exit(0)
 	if err := os.WriteFile(rexPath, []byte(stubScript), 0755); err != nil {
 		t.Fatalf("failed to write stub rex: %v", err)
 	}
+
+	osascriptPath := filepath.Join(stubDir, "osascript")
+	_ = os.WriteFile(osascriptPath, []byte("#!/bin/sh\nexit 0\n"), 0755)
 
 	return stubDir
 }
@@ -233,6 +258,53 @@ func runCLI(bin string, isPython bool, stdinPayload string, env []string, args .
 		}
 	}
 	return outBuf.String(), errBuf.String(), exitCode
+}
+
+func normalizeJSON(obj any, tempHome string) any {
+	switch val := obj.(type) {
+	case map[string]any:
+		res := make(map[string]any, len(val))
+		for k, item := range val {
+			if k == "created_at" || k == "updated_at" {
+				res[k] = "MASKED_TIMESTAMP"
+			} else {
+				res[k] = normalizeJSON(item, tempHome)
+			}
+		}
+		return res
+	case []any:
+		res := make([]any, len(val))
+		for i, item := range val {
+			res[i] = normalizeJSON(item, tempHome)
+		}
+		return res
+	case string:
+		s := val
+		if tempHome != "" {
+			evalHome, _ := filepath.EvalSymlinks(tempHome)
+			if evalHome != "" {
+				s = strings.ReplaceAll(s, evalHome, "<TEMP_HOME>")
+			}
+			s = strings.ReplaceAll(s, tempHome, "<TEMP_HOME>")
+			s = strings.ReplaceAll(s, "/private<TEMP_HOME>", "<TEMP_HOME>")
+		}
+		return s
+	default:
+		return val
+	}
+}
+
+func normalizeText(s string, tempHome string) string {
+	res := s
+	if tempHome != "" {
+		evalHome, _ := filepath.EvalSymlinks(tempHome)
+		if evalHome != "" {
+			res = strings.ReplaceAll(res, evalHome, "<TEMP_HOME>")
+		}
+		res = strings.ReplaceAll(res, tempHome, "<TEMP_HOME>")
+		res = strings.ReplaceAll(res, "/private<TEMP_HOME>", "<TEMP_HOME>")
+	}
+	return res
 }
 
 func TestParity_ContextInject_NotBuddy(t *testing.T) {
@@ -453,7 +525,7 @@ func TestParity_Dispatch_ArgvSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read python stub log: %v", err)
 	}
-	pyArgvSeq := strings.TrimSpace(string(pyLogBytes))
+	pyArgvSeq := normalizeText(strings.TrimSpace(string(pyLogBytes)), tempHomePy)
 
 	// 2. Run Go dispatch with stub rex
 	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
@@ -474,7 +546,7 @@ func TestParity_Dispatch_ArgvSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read go stub log: %v", err)
 	}
-	goArgvSeq := strings.TrimSpace(string(goLogBytes))
+	goArgvSeq := normalizeText(strings.TrimSpace(string(goLogBytes)), tempHomeGo)
 
 	argvMatched := (pyArgvSeq == goArgvSeq)
 	codeMatched := (pyCode == 0 && goCode == 0)
@@ -482,7 +554,7 @@ func TestParity_Dispatch_ArgvSequence(t *testing.T) {
 	var pyObj, goObj any
 	_ = json.Unmarshal([]byte(pyOut), &pyObj)
 	_ = json.Unmarshal([]byte(goOut), &goObj)
-	jsonMatched := reflect.DeepEqual(pyObj, goObj)
+	jsonMatched := reflect.DeepEqual(normalizeJSON(pyObj, tempHomePy), normalizeJSON(goObj, tempHomeGo))
 
 	allMatched := argvMatched && codeMatched && jsonMatched
 	recordResult("Dispatch_ArgvSequence", "dispatch (argv seq)", pyCode, goCode, allMatched, "")
@@ -490,6 +562,587 @@ func TestParity_Dispatch_ArgvSequence(t *testing.T) {
 	if !allMatched {
 		t.Fatalf("dispatch mismatch:\nPyCode=%d GoCode=%d\nArgv Match: %v\nPy Argv:\n%s\nGo Argv:\n%s\nPy JSON:\n%s\nGo JSON:\n%s\n",
 			pyCode, goCode, argvMatched, pyArgvSeq, goArgvSeq, pyOut, goOut)
+	}
+}
+
+func TestParity_Config_Show(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy)
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "config", "show")
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "config", "show")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Config_Show", "config show", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("config show mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Config_Get(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env, "config", "get", "worker_agent")
+	goOut, _, goCode := runCLI(goBin, false, "", env, "config", "get", "worker_agent")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Config_Get", "config get worker_agent", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("config get mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Config_Set(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env, "config", "set", "worker_agent", "opencode")
+	goOut, _, goCode := runCLI(goBin, false, "", env, "config", "set", "worker_agent", "opencode")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Config_Set", "config set worker_agent", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("config set mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Projects_List(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy)
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "projects")
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "projects")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Projects_List", "projects", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("projects list mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Projects_Query(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy)
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "projects", "--query", "doc")
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "projects", "--query", "doc")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Projects_Query", "projects --query doc", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("projects query mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Projects_Roots(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy)
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "projects", "roots")
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "projects", "roots")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Projects_Roots", "projects roots", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("projects roots mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Projects_AddRemoveRoot(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy)
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo)
+
+	newRootPy := filepath.Join(tempHomePy, "new-root")
+	_ = os.MkdirAll(newRootPy, 0755)
+
+	newRootGo := filepath.Join(tempHomeGo, "new-root")
+	_ = os.MkdirAll(newRootGo, 0755)
+
+	// Add root
+	pyOutAdd, _, pyCodeAdd := runCLI(pyScript, true, "", envPy, "projects", "add-root", newRootPy)
+	goOutAdd, _, goCodeAdd := runCLI(goBin, false, "", envGo, "projects", "add-root", newRootGo)
+
+	var pyObjAdd, goObjAdd any
+	_ = json.Unmarshal([]byte(pyOutAdd), &pyObjAdd)
+	_ = json.Unmarshal([]byte(goOutAdd), &goObjAdd)
+
+	pyNormAdd := normalizeJSON(pyObjAdd, tempHomePy)
+	goNormAdd := normalizeJSON(goObjAdd, tempHomeGo)
+
+	matchedAdd := (pyCodeAdd == goCodeAdd && reflect.DeepEqual(pyNormAdd, goNormAdd))
+	recordResult("Projects_AddRoot", "projects add-root", pyCodeAdd, goCodeAdd, matchedAdd, "")
+
+	// Remove root
+	pyOutRm, _, pyCodeRm := runCLI(pyScript, true, "", envPy, "projects", "remove-root", newRootPy)
+	goOutRm, _, goCodeRm := runCLI(goBin, false, "", envGo, "projects", "remove-root", newRootGo)
+
+	var pyObjRm, goObjRm any
+	_ = json.Unmarshal([]byte(pyOutRm), &pyObjRm)
+	_ = json.Unmarshal([]byte(goOutRm), &goObjRm)
+
+	pyNormRm := normalizeJSON(pyObjRm, tempHomePy)
+	goNormRm := normalizeJSON(goObjRm, tempHomeGo)
+
+	matchedRm := (pyCodeRm == goCodeRm && reflect.DeepEqual(pyNormRm, goNormRm))
+	recordResult("Projects_RemoveRoot", "projects remove-root", pyCodeRm, goCodeRm, matchedRm, "")
+
+	if !matchedAdd || !matchedRm {
+		t.Fatalf("add/remove root mismatch: add=%v rm=%v", matchedAdd, matchedRm)
+	}
+}
+
+func TestParity_EnsureSession(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy, "PATH="+stubDirPy+":"+os.Getenv("PATH"))
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo, "PATH="+stubDirGo+":"+os.Getenv("PATH"))
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "ensure-session", "-p", "docnotate")
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "ensure-session", "-p", "docnotate")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("EnsureSession", "ensure-session -p doc", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("ensure-session mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Task_Start(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+
+	// Run Python task start
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub_rex_py.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	envPy := append(os.Environ(),
+		"HOME="+tempHomePy,
+		"BUDDY_DIR="+buddyDirPy,
+		"PATH="+stubDirPy+":"+os.Getenv("PATH"),
+	)
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy,
+		"task", "start", "-p", "docnotate", "-t", "feat-test", "--prompt", "test prompt")
+
+	// Run Go task start
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub_rex_go.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	envGo := append(os.Environ(),
+		"HOME="+tempHomeGo,
+		"BUDDY_DIR="+buddyDirGo,
+		"PATH="+stubDirGo+":"+os.Getenv("PATH"),
+	)
+	goOut, _, goCode := runCLI(goBin, false, "", envGo,
+		"task", "start", "-p", "docnotate", "-t", "feat-test", "--prompt", "test prompt")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Task_Start", "task start -p doc -t feat", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("task start mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Task_Update(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	envPy := append(os.Environ(), "HOME="+tempHomePy, "BUDDY_DIR="+buddyDirPy, "PATH="+stubDirPy+":"+os.Getenv("PATH"))
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo, "BUDDY_DIR="+buddyDirGo, "PATH="+stubDirGo+":"+os.Getenv("PATH"))
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy,
+		"task", "update", "-p", "docnotate", "-t", "auth", "-s", "running", "-m", "In progress")
+	goOut, _, goCode := runCLI(goBin, false, "", envGo,
+		"task", "update", "-p", "docnotate", "-t", "auth", "-s", "running", "-m", "In progress")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Task_Update", "task update -p doc -t auth", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("task update mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Task_Close(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"task", "close", "-p", "docnotate", "-t", "auth")
+	// For Go, re-add task to state so it can close it too
+	fixturePath := filepath.Join("..", "..", "testdata", "fixtures", "parity_state.json")
+	stateData, _ := os.ReadFile(fixturePath)
+	_ = os.WriteFile(filepath.Join(buddyDir, "state.json"), stateData, 0644)
+
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"task", "close", "-p", "docnotate", "-t", "auth")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Task_Close", "task close -p doc -t auth", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("task close mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Send_Text(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"send", "-p", "docnotate", "-t", "auth", "--text", "hello world")
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"send", "-p", "docnotate", "-t", "auth", "--text", "hello world")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Send_Text", "send --text ...", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("send text mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Send_Key(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"send", "-p", "docnotate", "-t", "auth", "--key", "enter")
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"send", "-p", "docnotate", "-t", "auth", "--key", "enter")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Send_Key", "send --key enter", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("send key mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Focus(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"focus", "-w", "window:auth", "-s", "session:rex-docnotate")
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"focus", "-w", "window:auth", "-s", "session:rex-docnotate")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Focus", "focus -w win -s sess", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("focus mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Demo(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"demo", "-p", "docnotate", "-t", "auth", "--cmd", "npm run dev")
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"demo", "-p", "docnotate", "-t", "auth", "--cmd", "npm run dev")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Demo", "demo -p doc -t auth --cmd", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("demo mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Notify(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"notify", "-m", "Test notification message", "--no-sound")
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"notify", "-m", "Test notification message", "--no-sound")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Notify", "notify -m ... --no-sound", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("notify mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Diagnose(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHome, buddyDir := setupTempBuddyEnv(t)
+	stubLog := filepath.Join(tempHome, "stub.log")
+	stubDir := createStubRex(t, stubLog)
+
+	env := append(os.Environ(),
+		"HOME="+tempHome,
+		"BUDDY_DIR="+buddyDir,
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+	)
+
+	pyOut, _, pyCode := runCLI(pyScript, true, "", env,
+		"diagnose", "-p", "docnotate", "-t", "auth", "-n", "50")
+	goOut, _, goCode := runCLI(goBin, false, "", env,
+		"diagnose", "-p", "docnotate", "-t", "auth", "-n", "50")
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyObj, goObj))
+	recordResult("Diagnose", "diagnose -p doc -t auth", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("diagnose mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Batch(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+	tempHomePy, buddyDirPy := setupTempBuddyEnv(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub_rex_py.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	envPy := append(os.Environ(),
+		"HOME="+tempHomePy,
+		"BUDDY_DIR="+buddyDirPy,
+		"PATH="+stubDirPy+":"+os.Getenv("PATH"),
+	)
+
+	batchJSON := `[{"project": "docnotate", "task": "batch-1", "prompt": "batch prompt"}]`
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "batch", "--json", batchJSON)
+
+	tempHomeGo, buddyDirGo := setupTempBuddyEnv(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub_rex_go.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	envGo := append(os.Environ(),
+		"HOME="+tempHomeGo,
+		"BUDDY_DIR="+buddyDirGo,
+		"PATH="+stubDirGo+":"+os.Getenv("PATH"),
+	)
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "batch", "--json", batchJSON)
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Batch", "batch --json ...", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("batch mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
+	}
+}
+
+func TestParity_Init(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+
+	tempHomePy, err := os.MkdirTemp("", "init-py-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempHomePy)
+	envPy := append(os.Environ(), "HOME="+tempHomePy)
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy, "init")
+
+	tempHomeGo, err := os.MkdirTemp("", "init-go-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempHomeGo)
+	envGo := append(os.Environ(), "HOME="+tempHomeGo)
+	goOut, _, goCode := runCLI(goBin, false, "", envGo, "init")
+
+	var pyObj, goObj map[string]any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	matched := (pyCode == goCode && pyObj["status"] == "ok" && goObj["status"] == "ok")
+	recordResult("Init", "init", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("init mismatch: pyCode=%d goCode=%d\nPy:\n%s\nGo:\n%s\n", pyCode, goCode, pyOut, goOut)
 	}
 }
 

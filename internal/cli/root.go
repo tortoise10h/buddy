@@ -48,14 +48,27 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.CompletionOptions.DisableDefaultCmd = true
 	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &ExitError{Code: 2, Err: err}
 	})
 
-	rootCmd.AddCommand(newContextInjectCmd())
-	rootCmd.AddCommand(newStatusCmd())
-	rootCmd.AddCommand(newCaptureCmd())
+	rootCmd.AddCommand(newInitCmd())
+	rootCmd.AddCommand(newConfigCmd())
+	rootCmd.AddCommand(newProjectsCmd())
+	rootCmd.AddCommand(newEnsureSessionCmd())
 	rootCmd.AddCommand(newDispatchCmd())
+	rootCmd.AddCommand(newTaskCmd())
+	rootCmd.AddCommand(newCaptureCmd())
+	rootCmd.AddCommand(newSendCmd())
+	rootCmd.AddCommand(newDemoCmd())
+	rootCmd.AddCommand(newFocusCmd())
+	rootCmd.AddCommand(newStatusCmd())
+	rootCmd.AddCommand(newWatchCmd())
+	rootCmd.AddCommand(newNotifyCmd())
+	rootCmd.AddCommand(newDiagnoseCmd())
+	rootCmd.AddCommand(newBatchCmd())
+	rootCmd.AddCommand(newContextInjectCmd())
 	rootCmd.AddCommand(newVersionCmd())
 }
 
