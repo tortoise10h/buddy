@@ -13,7 +13,6 @@ type DispatchRequest struct {
 	TaskSlug    string
 	Prompt      string
 	AgentCmd    []string
-	PlanFirst   bool
 }
 
 // DispatchResult represents the outcome of a task dispatch operation.

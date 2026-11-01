@@ -6,6 +6,9 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/config"
+	"github.com/tortoise10h/buddy/internal/engine"
+	"github.com/tortoise10h/buddy/internal/project"
 	"github.com/tortoise10h/buddy/internal/state"
 )
 
@@ -27,24 +30,123 @@ func newTaskCmd() *cobra.Command {
 
 func newTaskStartCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		agent   string
-		prompt  string
+		projectName string
+		taskSlug    string
+		agentName   string
+		prompt      string
+		engineName  string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start a new feature task tab in project session",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("[buddy-ctl] task start: skeleton called with args %v\n", args)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if projectName == "" {
+				return fmt.Errorf("missing required --project (-p) argument")
+			}
+			if taskSlug == "" {
+				if prompt != "" {
+					taskSlug = project.DeriveSlug("", prompt, projectName)
+				} else {
+					return fmt.Errorf("missing required --task (-t) argument")
+				}
+			}
+
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				return err
+			}
+			st, err := state.LoadState()
+			if err != nil {
+				return err
+			}
+
+			projName, projPath, err := project.ResolveProject(projectName, cfg, st)
+			if err != nil {
+				return err
+			}
+
+			slug := project.DeriveSlug(taskSlug, prompt, projName)
+
+			if engineName == "" {
+				engineName = cfg.DefaultEngine
+				if engineName == "" {
+					engineName = "rex"
+				}
+			}
+			eng, err := getEngine(engineName)
+			if err != nil {
+				return err
+			}
+
+			if agentName == "" {
+				agentName = cfg.GetEffectiveWorkerAgent()
+			}
+			agentCmd, _, _ := cfg.GetAgentCommand(agentName)
+
+			res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{
+				ProjectName: projName,
+				ProjectPath: projPath,
+				TaskSlug:    slug,
+				Prompt:      prompt,
+				AgentCmd:    agentCmd,
+			})
+			if err != nil {
+				return fmt.Errorf("task start failed: %w", err)
+			}
+
+			preview := "Started via CLI"
+			if prompt != "" {
+				preview = prompt
+				if len(preview) > 60 {
+					preview = preview[:60] + "..."
+				}
+			}
+
+			var initialPrompt *string
+			if prompt != "" {
+				initialPrompt = &prompt
+			}
+
+			err = state.MutateState(func(s *state.State) error {
+				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
+					TaskSlug:      slug,
+					Engine:        engineName,
+					WindowID:      res.WindowID,
+					WindowLabel:   slug,
+					AgentBlockID:  res.BlockID,
+					Agent:         agentName,
+					Cwd:           projPath,
+					Status:        "running",
+					InitialPrompt: initialPrompt,
+					LastSummary:   preview,
+				})
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("failed to record task in state: %w", err)
+			}
+
+			resp := map[string]any{
+				"status":         "started",
+				"project":        projName,
+				"task":           slug,
+				"picked_up":      res.PickedUp,
+				"window_id":      res.WindowID,
+				"agent_block_id": res.BlockID,
+				"agent":          agentName,
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(resp)
 		},
 	}
 
-	cmd.Flags().StringVarP(&project, "project", "p", "", "Project name")
-	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
-	cmd.Flags().StringVar(&agent, "agent", "", "Agent to run (agy, pi, opencode)")
+	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Project name or path")
+	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
+	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch")
 	cmd.Flags().StringVar(&prompt, "prompt", "", "Initial prompt for worker agent")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }
