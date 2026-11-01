@@ -65,6 +65,26 @@ DEFAULT_CONFIG = {
             "submit_delay_ms": 1500,
             "submit_key": "enter"
         },
+        "claude": {
+            "command": ["claude"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
+        "codex": {
+            "command": ["codex"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
+        "cursor": {
+            "command": ["cursor"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
+        "gemini": {
+            "command": ["gemini"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
         "agy-argon": {
             "command": ["agy", "--model", "gemini-4-argon-high"],
             "submit_delay_ms": 1500,

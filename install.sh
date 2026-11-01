@@ -225,47 +225,18 @@ done
 echo ""
 echo "Configuring Buddy agents..."
 
+# Harness candidates, filtered to those actually installed on this machine.
+# Keep in sync with DEFAULT_CONFIG["agents"] in skills/buddy/scripts/buddy-ctl.
+HARNESS_CANDIDATES=("agy" "pi" "opencode" "claude" "codex" "cursor" "gemini")
+
 AVAILABLE_AGENTS=()
-AGENT_SUMMARIES=()
-
-AGENTS_RAW=$(python3 "$LOCAL_BIN/buddy-ctl" config get agents 2>/dev/null || true)
-while IFS=$'\t' read -r a_name a_cmd; do
-    if [ -n "$a_name" ]; then
-        AVAILABLE_AGENTS+=("$a_name")
-        AGENT_SUMMARIES+=("$a_cmd")
+for h in "${HARNESS_CANDIDATES[@]}"; do
+    if command -v "$h" >/dev/null 2>&1; then
+        AVAILABLE_AGENTS+=("$h")
     fi
-done < <(python3 -c '
-import json, sys
-try:
-    raw = sys.stdin.read()
-    data = json.loads(raw).get("value", {})
-    for k in sorted(data.keys()):
-        cmd = data[k].get("command", [k])
-        # Only offer harnesses: len(command) == 1 and command[0] == agent key
-        if isinstance(cmd, list) and len(cmd) == 1 and cmd[0] == k:
-            cmd_str = " ".join(cmd)
-            print(f"{k}\t{cmd_str}")
-except Exception:
-    pass
-' <<< "$AGENTS_RAW" 2>/dev/null || true)
-
-# Fallback if discovery returned nothing: harness-only default set
+done
 if [ ${#AVAILABLE_AGENTS[@]} -eq 0 ]; then
-    DEFAULT_HARNESS_SET=("agy" "pi" "opencode" "claude" "codex" "cursor" "gemini")
-    FILTERED_HARNESS_SET=()
-    for h in "${DEFAULT_HARNESS_SET[@]}"; do
-        if command -v "$h" >/dev/null 2>&1; then
-            FILTERED_HARNESS_SET+=("$h")
-        fi
-    done
-    if [ ${#FILTERED_HARNESS_SET[@]} -gt 0 ]; then
-        AVAILABLE_AGENTS=("${FILTERED_HARNESS_SET[@]}")
-    else
-        AVAILABLE_AGENTS=("${DEFAULT_HARNESS_SET[@]}")
-    fi
-    for a in "${AVAILABLE_AGENTS[@]}"; do
-        AGENT_SUMMARIES+=("$a")
-    done
+    AVAILABLE_AGENTS=("${HARNESS_CANDIDATES[@]}")
 fi
 
 # Detect existing configured agents to preserve choices on re-install
@@ -326,8 +297,8 @@ if [ "$IS_NONINTERACTIVE" -eq 1 ]; then
     fi
 else
     echo "Available agent harnesses:"
-    for i in "${!AVAILABLE_AGENTS[@]}"; do
-        echo "  • ${AVAILABLE_AGENTS[$i]}: ${AGENT_SUMMARIES[$i]}"
+    for a in "${AVAILABLE_AGENTS[@]}"; do
+        echo "  • $a"
     done
     echo ""
 

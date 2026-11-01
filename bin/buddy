@@ -58,7 +58,7 @@ while [ $# -gt 0 ]; do
             CHOSEN_AGENT="${1#*=}"
             shift
             ;;
-        agy|pi|opencode|agy-argon|agy-flash|opencode-flash)
+        agy|pi|opencode|claude|codex|cursor|gemini|agy-argon|agy-flash|opencode-flash)
             if [ -z "$CHOSEN_AGENT" ]; then
                 CHOSEN_AGENT="$1"
             else
