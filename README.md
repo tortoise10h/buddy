@@ -109,13 +109,13 @@ During installation, Buddy prompts you for:
    - Hit **Enter** to accept the default (`~/Dev/Personal/Projects`).
    - Enter multiple paths separated by commas or spaces, or add more iteratively when prompted.
    - Non-existent directories are validated with an option to auto-create them.
-2. **Orchestrator and Worker agents**:
-   - Buddy dynamically discovers configured agents from `agents` (e.g. `agy`, `agy-argon`, `agy-flash`, `opencode`, `opencode-flash`, `pi`) and prompts you to select both roles.
+2. **Orchestrator and Worker agent harnesses**:
+   - Buddy dynamically discovers installed agent harnesses from `agents` (e.g. `agy`, `opencode`, `pi`) and prompts you to select the harness for each role. Each harness starts with that agent's own default model.
    - Hit **Enter** to accept the default (`agy`, or previously configured values on re-install).
-   - Unknown agent names are validated with re-prompting.
+   - Unknown harness names are validated with re-prompting.
 
 - Re-running `install.sh` on an existing installation automatically detects and preserves your configured roots and agent choices.
-- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` (and optionally `BUDDY_PROJECTS_ROOTS="dir1:dir2"`, `BUDDY_ORCHESTRATOR_AGENT="opencode-flash"`, `BUDDY_WORKER_AGENT="agy"`).
+- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` (and optionally `BUDDY_PROJECTS_ROOTS="dir1:dir2"`, `BUDDY_ORCHESTRATOR_AGENT="opencode"`, `BUDDY_WORKER_AGENT="agy"`).
 
 This:
 1. Links `bin/buddy` and `buddy-ctl` -> `~/.local/bin/`
@@ -141,20 +141,47 @@ Buddy cleanly decouples the agent running the control tower from the agents perf
    - Executes code modifications, tests, and feature work in project tabs.
 
 ### Example: Opencode Orchestrator with Agy Workers
-A common setup is using `opencode-flash` to coordinate the Buddy session while using `agy` (or a model variant like `agy-flash`) for worker tasks:
+A common setup is using `opencode` to coordinate the Buddy session while using `agy` for worker tasks:
 
 ```json
 {
-  "orchestrator_agent": "opencode-flash",
+  "orchestrator_agent": "opencode",
   "worker_agent": "agy"
 }
 ```
 
 Or configure via `buddy-ctl`:
 ```sh
-buddy-ctl config set orchestrator_agent opencode-flash
+buddy-ctl config set orchestrator_agent opencode
 buddy-ctl config set worker_agent agy
 ```
+
+### Pinning a Model (Model Variants)
+The install picker intentionally offers agent harnesses only (using each harness's own default model).
+
+To pin an agent to a specific model:
+1. Add an entry to the `agents` map in `~/.buddy/config.json` with the model arguments in its `command` array:
+   ```json
+   {
+     "agents": {
+       "agy-flash": {
+         "command": ["agy", "--model", "gemini-3.8-flash-medium"],
+         "submit_delay_ms": 1500,
+         "submit_key": "enter"
+       }
+     }
+   }
+   ```
+2. You can then select that pinned model on demand via `--agent`:
+   ```sh
+   buddy --agent agy-flash
+   buddy-ctl dispatch --project docnotate --agent agy-flash --prompt "Refactor auth"
+   ```
+   Or set it as the persistent default for either role:
+   ```sh
+   buddy-ctl config set worker_agent agy-flash
+   buddy-ctl config set orchestrator_agent agy-flash
+   ```
 
 ### Command Array Resolution
 Both settings resolve their full command array from `config.agents.<name>.command`. Variant agents configured with command arguments (such as `agy-flash` -> `["agy", "--model", "gemini-3.8-flash-medium"]`) are executed as full argument arrays rather than a single string.
@@ -163,12 +190,12 @@ Both settings resolve their full command array from `config.agents.<name>.comman
 - **Orchestrator Agent**:
   1. Explicit CLI argument (`buddy --agent <name>`, `buddy -a <name>`, or `buddy <name>`)
   2. `BUDDY_AGENT` environment variable
-  3. `config.orchestrator_agent`
+  3. `config.orchestrator_agent` (set via `install.sh`, `buddy-ctl config set`, or config file)
   4. `config.default_agent` (legacy fallback)
   5. Fallback default: `"agy"`
 - **Worker Agent**:
   1. Explicit CLI argument (`buddy-ctl dispatch --agent <name>`, `buddy-ctl task start --agent <name>`)
-  2. `config.worker_agent`
+  2. `config.worker_agent` (set via `install.sh`, `buddy-ctl config set`, or config file)
   3. `config.default_agent` (legacy fallback)
   4. Fallback default: `"agy"`
 

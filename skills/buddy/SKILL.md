@@ -281,23 +281,28 @@ Buddy cleanly separates two distinct agent roles:
    - Writes code, runs tests, and executes task-specific commands.
 
 ### Concrete Example: Opencode Orchestrator with Agy Workers
-You can configure `opencode-flash` to run the control tower while using `agy` as the worker agent:
+You can configure `opencode` to run the control tower while using `agy` as the worker agent:
 
 ```json
 {
-  "orchestrator_agent": "opencode-flash",
+  "orchestrator_agent": "opencode",
   "worker_agent": "agy"
 }
 ```
 
 Or update using `buddy-ctl`:
 ```sh
-buddy-ctl config set orchestrator_agent opencode-flash
+buddy-ctl config set orchestrator_agent opencode
 buddy-ctl config set worker_agent agy
 ```
 
+### Pinning a Model (Model Variants)
+The install prompt narrows agent choices to base harnesses. To use a model-pinned variant:
+1. Add an entry to `agents` in `~/.buddy/config.json` with the model args in its `command` array (e.g. `"agy-flash": {"command": ["agy", "--model", "gemini-3.8-flash-medium"]}`).
+2. Select it with `--agent` (`buddy-ctl dispatch --agent agy-flash`) or set it as a persistent default (`buddy-ctl config set worker_agent agy-flash`).
+
 ### Precedence & Compatibility
-- **Orchestrator**: explicit CLI `--agent` / `-a` > `BUDDY_AGENT` env var > `config.orchestrator_agent` > `config.default_agent` (legacy) > `"agy"`
-- **Worker**: explicit CLI `--agent` / `-a` > `config.worker_agent` > `config.default_agent` (legacy) > `"agy"`
+- **Orchestrator**: explicit CLI `--agent` / `-a` > `BUDDY_AGENT` env var > `config.orchestrator_agent` (set via `install.sh`, `buddy-ctl config set`, or config file) > `config.default_agent` (legacy) > `"agy"`
+- **Worker**: explicit CLI `--agent` / `-a` > `config.worker_agent` (set via `install.sh`, `buddy-ctl config set`, or config file) > `config.default_agent` (legacy) > `"agy"`
 - **Command Array Resolution**: Agents resolve their full command array from `config.agents.<name>.command` (e.g. `agy-flash` -> `["agy", "--model", "gemini-3.8-flash-medium"]`), ensuring variant flags are passed directly without word-splitting errors.
 - **Backward Compatibility**: Existing configuration files containing only `default_agent` remain fully supported as a fallback for both roles.

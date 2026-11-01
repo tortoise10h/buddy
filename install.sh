@@ -241,16 +241,31 @@ try:
     data = json.loads(raw).get("value", {})
     for k in sorted(data.keys()):
         cmd = data[k].get("command", [k])
-        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-        print(f"{k}\t{cmd_str}")
+        # Only offer harnesses: len(command) == 1 and command[0] == agent key
+        if isinstance(cmd, list) and len(cmd) == 1 and cmd[0] == k:
+            cmd_str = " ".join(cmd)
+            print(f"{k}\t{cmd_str}")
 except Exception:
     pass
 ' <<< "$AGENTS_RAW" 2>/dev/null || true)
 
-# Fallback if discovery returned nothing
+# Fallback if discovery returned nothing: harness-only default set
 if [ ${#AVAILABLE_AGENTS[@]} -eq 0 ]; then
-    AVAILABLE_AGENTS=("agy" "agy-argon" "agy-flash" "opencode" "opencode-flash" "pi")
-    AGENT_SUMMARIES=("agy" "agy --model gemini-4-argon-high" "agy --model gemini-3.8-flash-medium" "opencode" "opencode" "pi")
+    DEFAULT_HARNESS_SET=("agy" "pi" "opencode" "claude" "codex" "cursor" "gemini")
+    FILTERED_HARNESS_SET=()
+    for h in "${DEFAULT_HARNESS_SET[@]}"; do
+        if command -v "$h" >/dev/null 2>&1; then
+            FILTERED_HARNESS_SET+=("$h")
+        fi
+    done
+    if [ ${#FILTERED_HARNESS_SET[@]} -gt 0 ]; then
+        AVAILABLE_AGENTS=("${FILTERED_HARNESS_SET[@]}")
+    else
+        AVAILABLE_AGENTS=("${DEFAULT_HARNESS_SET[@]}")
+    fi
+    for a in "${AVAILABLE_AGENTS[@]}"; do
+        AGENT_SUMMARIES+=("$a")
+    done
 fi
 
 # Detect existing configured agents to preserve choices on re-install
@@ -285,6 +300,12 @@ is_valid_agent() {
             return 0
         fi
     done
+    if [ -n "$EXISTING_ORCH" ] && [ "$target" = "$EXISTING_ORCH" ]; then
+        return 0
+    fi
+    if [ -n "$EXISTING_WORKER" ] && [ "$target" = "$EXISTING_WORKER" ]; then
+        return 0
+    fi
     return 1
 }
 
@@ -304,7 +325,7 @@ if [ "$IS_NONINTERACTIVE" -eq 1 ]; then
         CHOSEN_WORKER="$DEFAULT_WORKER"
     fi
 else
-    echo "Available agents:"
+    echo "Available agent harnesses:"
     for i in "${!AVAILABLE_AGENTS[@]}"; do
         echo "  • ${AVAILABLE_AGENTS[$i]}: ${AGENT_SUMMARIES[$i]}"
     done
@@ -312,26 +333,26 @@ else
 
     # Orchestrator prompt
     while true; do
-        read -r -p "Orchestrator agent (runs Buddy control tower) [$DEFAULT_ORCH]: " input_orch
+        read -r -p "Orchestrator harness (runs Buddy control tower) [$DEFAULT_ORCH]: " input_orch
         input_orch="${input_orch:-$DEFAULT_ORCH}"
         input_orch="$(echo "$input_orch" | tr -d '[:space:]')"
         if is_valid_agent "$input_orch"; then
             CHOSEN_ORCH="$input_orch"
             break
         fi
-        echo "✖ Unknown agent '$input_orch'. Please choose from: $(IFS=', '; echo "${AVAILABLE_AGENTS[*]}")"
+        echo "✖ Unknown agent harness '$input_orch'. Please choose from: $(IFS=', '; echo "${AVAILABLE_AGENTS[*]}")"
     done
 
     # Worker prompt
     while true; do
-        read -r -p "Worker agent (default for new task tabs) [$DEFAULT_WORKER]: " input_worker
+        read -r -p "Worker harness (default for new task tabs) [$DEFAULT_WORKER]: " input_worker
         input_worker="${input_worker:-$DEFAULT_WORKER}"
         input_worker="$(echo "$input_worker" | tr -d '[:space:]')"
         if is_valid_agent "$input_worker"; then
             CHOSEN_WORKER="$input_worker"
             break
         fi
-        echo "✖ Unknown agent '$input_worker'. Please choose from: $(IFS=', '; echo "${AVAILABLE_AGENTS[*]}")"
+        echo "✖ Unknown agent harness '$input_worker'. Please choose from: $(IFS=', '; echo "${AVAILABLE_AGENTS[*]}")"
     done
 fi
 
