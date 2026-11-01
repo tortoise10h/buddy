@@ -1,9 +1,13 @@
 package main
 
 import (
-	"fmt"
+	"os"
+
+	"github.com/tortoise10h/buddy/internal/cli"
 )
 
 func main() {
-	fmt.Println("hello world from buddy-ctl")
+	if err := cli.Execute(); err != nil {
+		os.Exit(1)
+	}
 }

@@ -1,8 +1,11 @@
-VERSION ?= v0.1.0
+VERSION ?= v0.1.0-dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-LDFLAGS := -s -w
+LDFLAGS := -s -w \
+	-X 'github.com/tortoise10h/buddy/internal/cli.Version=$(VERSION)' \
+	-X 'github.com/tortoise10h/buddy/internal/cli.Commit=$(COMMIT)' \
+	-X 'github.com/tortoise10h/buddy/internal/cli.Date=$(DATE)'
 
 .PHONY: all build test vet clean
 
