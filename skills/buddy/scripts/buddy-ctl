@@ -4,17 +4,25 @@ buddy-ctl — Command-line controller for Buddy, the multi-project Rex terminal 
 """
 
 import argparse
+import base64
 import datetime
 import hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 import pathlib
 from pathlib import Path
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 
 BUDDY_DIR = Path(os.path.expanduser("~/.buddy"))
 CONFIG_PATH = BUDDY_DIR / "config.json"
@@ -23,10 +31,13 @@ STATE_SEEN_PATH = BUDDY_DIR / ".state_seen.json"
 AGENTS_MD_PATH = BUDDY_DIR / "AGENTS.md"
 HOOKS_DIR = BUDDY_DIR / ".agents"
 HOOKS_PATH = HOOKS_DIR / "hooks.json"
+T3_MCP_OAUTH_PATH = BUDDY_DIR / "t3_mcp_oauth.json"
+T3_SESSION_PATH = BUDDY_DIR / "t3_session.json"
 
 DEFAULT_CONFIG = {
     "version": 1,
     "buddy_session_name": "Buddy",
+    "worker_backend": "rex",
     "default_agent": "agy",
     "projects_roots": [
         # Fallback default project root; can be overridden during install/init via --projects-root,
@@ -58,6 +69,18 @@ DEFAULT_CONFIG = {
             "command": ["opencode"],
             "submit_delay_ms": 1500,
             "submit_key": "enter"
+        }
+    },
+    "t3code": {
+        "bin": "t3",
+        "state_dir": "~/.t3",
+        "server_url": None,
+        "default_runtime_mode": "full-access",
+        "default_worktree_base_ref": "HEAD",
+        "agent_aliases": {
+            "agy": "antigravity",
+            "agy-argon": "antigravity/gemini-4-argon-high",
+            "agy-flash": "antigravity/gemini-3.8-flash-medium"
         }
     }
 }
@@ -206,6 +229,723 @@ def run_rex(args: list[str], timeout: float = 10.0, check: bool = True) -> subpr
     return res
 
 
+def die(message: str, code: int = 1) -> None:
+    print(json.dumps({"error": message, "status": "error"}, indent=2), file=sys.stderr)
+    sys.exit(code)
+
+
+def resolve_worker_backend(args: argparse.Namespace | None = None, cfg: dict | None = None, task_entry: dict | None = None) -> str:
+    """Resolves worker backend: task entry backend > --worker-backend CLI flag > BUDDY_WORKER_BACKEND env > config.worker_backend > 'rex'."""
+    if task_entry and task_entry.get("backend"):
+        b = str(task_entry["backend"]).lower().strip()
+        if b in {"rex", "t3code"}:
+            return b
+    if args and getattr(args, "worker_backend", None):
+        b = str(args.worker_backend).lower().strip()
+        if b in {"rex", "t3code"}:
+            return b
+        die(f"Invalid --worker-backend '{b}'. Supported values: rex, t3code")
+    env_b = os.environ.get("BUDDY_WORKER_BACKEND", "").lower().strip()
+    if env_b in {"rex", "t3code"}:
+        return env_b
+    if cfg is None:
+        cfg = load_config()
+    cfg_b = str(cfg.get("worker_backend", "rex")).lower().strip()
+    if cfg_b in {"rex", "t3code"}:
+        return cfg_b
+    return "rex"
+
+
+def get_t3_bin(cfg: dict | None = None) -> str:
+    """Resolves t3 executable path checking PATH, ~/.local/bin/t3, and /Users/sunday/.local/bin/t3."""
+    if cfg is None:
+        cfg = load_config()
+    bin_name = cfg.get("t3code", {}).get("bin", "t3")
+    path = shutil.which(bin_name)
+    if path:
+        return path
+    user_local = Path(os.path.expanduser("~/.local/bin")) / bin_name
+    if user_local.is_file() and os.access(user_local, os.X_OK):
+        return str(user_local)
+    fallback_path = Path("/Users/sunday/.local/bin") / bin_name
+    if fallback_path.is_file() and os.access(fallback_path, os.X_OK):
+        return str(fallback_path)
+    return bin_name
+
+
+def get_t3_server_info(cfg: dict | None = None) -> dict:
+    """Discovers T3 Code server origin from config or ~/.t3 runtime state."""
+    if cfg is None:
+        cfg = load_config()
+    server_url = cfg.get("t3code", {}).get("server_url")
+    if server_url:
+        return {"origin": server_url.rstrip("/")}
+    state_dir_raw = cfg.get("t3code", {}).get("state_dir", "~/.t3")
+    state_dir = Path(os.path.expanduser(state_dir_raw))
+    for candidate in [
+        state_dir / "userdata" / "server-runtime.json",
+        state_dir / "server-runtime.json"
+    ]:
+        if candidate.is_file():
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and "origin" in data:
+                        return data
+            except Exception:
+                pass
+    return {"origin": "http://127.0.0.1:3773"}
+
+
+def check_t3_preflight(cfg: dict | None = None) -> None:
+    """Validates that t3 binary is available and T3 Code server is responsive."""
+    if cfg is None:
+        cfg = load_config()
+    t3_bin = get_t3_bin(cfg)
+    bin_found = bool(shutil.which(t3_bin) or (os.path.isfile(t3_bin) and os.access(t3_bin, os.X_OK)))
+    if not bin_found:
+        die(f"T3 Code CLI '{t3_bin}' not found on PATH or ~/.local/bin/t3. Install T3 Code or check your configuration.")
+    info = get_t3_server_info(cfg)
+    origin = info.get("origin", "http://127.0.0.1:3773")
+    req = urllib.request.Request(f"{origin}/.well-known/t3/environment")
+    try:
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            if resp.status != 200:
+                die(f"T3 Code server at {origin} returned HTTP {resp.status}. Start the T3 Code desktop app or run 't3'.")
+    except Exception as e:
+        die(f"T3 Code server at {origin} is unreachable ({e}). Start the T3 Code desktop app or run 't3'.")
+
+
+def get_t3_session_token(cfg: dict | None = None) -> str:
+    """Returns a cached headless token for zero-OAuth /api/* requests, auto-issuing via t3 auth session issue if expired."""
+    if cfg is None:
+        cfg = load_config()
+    now_ms = int(time.time() * 1000)
+    if T3_SESSION_PATH.is_file():
+        try:
+            with open(T3_SESSION_PATH, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+                if cached.get("access_token") and cached.get("expires_at_ms", 0) > now_ms + 60000:
+                    return cached["access_token"]
+        except Exception:
+            pass
+    t3_bin = get_t3_bin(cfg)
+    cmd = [
+        t3_bin, "auth", "session", "issue",
+        "--ttl", "365d",
+        "--token-only"
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10.0)
+    if res.returncode != 0:
+        err = res.stderr.strip() or res.stdout.strip()
+        raise RuntimeError(f"Failed to issue headless T3 session token: {err}")
+    token = res.stdout.strip()
+    T3_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    exp_ms = now_ms + (360 * 24 * 3600 * 1000)
+    tmp = T3_SESSION_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"access_token": token, "issued_at_ms": now_ms, "expires_at_ms": exp_ms}, f, indent=2)
+    os.replace(tmp, T3_SESSION_PATH)
+    try:
+        os.chmod(T3_SESSION_PATH, 0o600)
+    except Exception:
+        pass
+    return token
+
+
+def t3_http_get(path: str, cfg: dict | None = None, timeout: float = 5.0) -> dict:
+    """Performs a GET against T3 Code's localhost HTTP API using the zero-OAuth session token."""
+    if cfg is None:
+        cfg = load_config()
+    info = get_t3_server_info(cfg)
+    origin = info.get("origin", "http://127.0.0.1:3773")
+    token = get_t3_session_token(cfg)
+    url = f"{origin}{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "x-t3-orchestration-protocol": "2"
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read().decode("utf-8")
+            return json.loads(data) if data else {}
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            if T3_SESSION_PATH.is_file():
+                try:
+                    T3_SESSION_PATH.unlink()
+                except Exception:
+                    pass
+            token = get_t3_session_token(cfg)
+            headers["Authorization"] = f"Bearer {token}"
+            req2 = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req2, timeout=timeout) as resp2:
+                data = resp2.read().decode("utf-8")
+                return json.loads(data) if data else {}
+        raise
+
+
+class T3McpAuthRequiredError(Exception):
+    def __init__(self, message: str, status_code: int = 401):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def get_mcp_auth_error_message() -> str:
+    return (
+        "Error: T3 Code /mcp OAuth token is missing or expired (30-day TTL; HTTP 401 invalid_mcp_credential).\n"
+        "Buddy requires an active 'Full access' /mcp OAuth session to launch workers and answer worker questions.\n"
+        "To re-pair (required roughly once every 30 days), run:\n"
+        "  buddy-ctl t3 auth login\n"
+        "Then select 'Full access' in the T3 Code browser prompt and retry your command."
+    )
+
+
+def load_t3_mcp_oauth() -> dict | None:
+    if not T3_MCP_OAUTH_PATH.is_file():
+        return None
+    try:
+        with open(T3_MCP_OAUTH_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "access_token" in data:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def save_t3_mcp_oauth(oauth_data: dict) -> None:
+    T3_MCP_OAUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = T3_MCP_OAUTH_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(oauth_data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, T3_MCP_OAUTH_PATH)
+    try:
+        os.chmod(T3_MCP_OAUTH_PATH, 0o600)
+    except Exception:
+        pass
+
+
+def t3_mcp_call(tool_name: str, arguments: dict, cfg: dict | None = None, timeout: float = 20.0) -> dict:
+    """Invokes an MCP tool via POST /mcp using the 30-day OAuth token."""
+    if cfg is None:
+        cfg = load_config()
+    oauth = load_t3_mcp_oauth()
+    if not oauth or not oauth.get("access_token"):
+        raise T3McpAuthRequiredError(get_mcp_auth_error_message())
+    
+    now_ts = int(time.time())
+    expires_at = oauth.get("expires_at", 0)
+    if expires_at and now_ts >= expires_at:
+        raise T3McpAuthRequiredError(get_mcp_auth_error_message())
+
+    info = get_t3_server_info(cfg)
+    origin = info.get("origin", "http://127.0.0.1:3773")
+    url = f"{origin}/mcp"
+    token = oauth["access_token"]
+    payload = {
+        "jsonrpc": "2.0",
+        "id": int(time.time() * 1000) % 1000000,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            if "error" in resp_data:
+                err = resp_data["error"]
+                err_msg = err.get("message", json.dumps(err))
+                raise RuntimeError(f"MCP tool '{tool_name}' failed: {err_msg}")
+            result = resp_data.get("result", {})
+            if result.get("isError"):
+                content = result.get("content", [])
+                texts = [c.get("text", "") for c in content if isinstance(c, dict)]
+                raise RuntimeError(f"MCP tool '{tool_name}' returned error: {' '.join(texts)}")
+            content = result.get("content", [])
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    try:
+                        parsed = json.loads(c.get("text", ""))
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        pass
+            return result
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise T3McpAuthRequiredError(get_mcp_auth_error_message())
+        err_body = e.read().decode("utf-8")
+        raise RuntimeError(f"HTTP {e.code} during MCP tool '{tool_name}': {err_body}")
+
+
+def resolve_t3_model_selection(
+    agent_spec: str | None,
+    cfg: dict,
+    project_id: str | None = None
+) -> tuple[dict | None, str]:
+    if not agent_spec or agent_spec.lower() in {"default", "none"}:
+        return None, "default"
+
+    aliases = cfg.get("t3code", {}).get("agent_aliases", {})
+    expanded = aliases.get(agent_spec, agent_spec)
+
+    if "/" in expanded:
+        provider, model = expanded.split("/", 1)
+        provider = provider.strip()
+        model = model.strip()
+        if not provider or not model:
+            die(f"Invalid agent specification '{agent_spec}': expected <provider>/<model>")
+        return {"instanceId": provider, "model": model}, f"{provider}/{model}"
+
+    known_providers = {"antigravity", "claude", "codex", "cursor", "grok", "fx", "opencode", "pi", "muse", "acp-registry"}
+    bare = expanded.lower().strip()
+    if bare in known_providers:
+        # Check if project has default model for this provider in /api/projects
+        try:
+            p_data = t3_http_get("/api/projects", cfg)
+            for p in p_data.get("projects", []):
+                if p.get("id") == project_id:
+                    def_model = p.get("defaultModelSelection")
+                    if def_model and def_model.get("instanceId") == bare:
+                        return def_model, f"{bare}/{def_model.get('model', '')}"
+        except Exception:
+            pass
+
+        die(
+            f"Provider '{bare}' requires a model slug in T3 Code.\n"
+            f"Pass '--agent <provider>/<model>' (e.g. '--agent {bare}/<model>') or configure an alias under t3code.agent_aliases in ~/.buddy/config.json."
+        )
+
+    die(
+        f"Error: Agent '{agent_spec}' has no matching provider mapping for T3 Code.\n"
+        f"Configured aliases: {', '.join(sorted(aliases.keys()))}\n"
+        f"Pass '--agent <provider>/<model>' (e.g. '--agent antigravity/gemini-4-argon-high') or add an alias under t3code.agent_aliases in ~/.buddy/config.json."
+    )
+
+
+def ensure_t3_project(project_name: str, project_path: str, cfg: dict, state: dict) -> str:
+    proj_state = state.get("projects", {}).get(project_name, {})
+    if proj_state.get("t3_project_id"):
+        return proj_state["t3_project_id"]
+
+    norm_path = os.path.realpath(os.path.expanduser(project_path))
+    try:
+        data = t3_http_get("/api/projects", cfg)
+        for p in data.get("projects", []):
+            p_root = os.path.realpath(os.path.expanduser(p.get("workspaceRoot", "")))
+            if p_root == norm_path:
+                p_id = p["id"]
+                if project_name not in state.setdefault("projects", {}):
+                    state["projects"][project_name] = {
+                        "name": project_name,
+                        "project_path": project_path,
+                        "backend": "t3code",
+                        "t3_project_id": p_id,
+                        "tasks": {}
+                    }
+                else:
+                    state["projects"][project_name]["t3_project_id"] = p_id
+                save_state(state)
+                return p_id
+    except Exception:
+        pass
+
+    t3_bin = get_t3_bin(cfg)
+    cmd = [t3_bin, "project", "add", project_path, "--title", project_name]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10.0)
+    if res.returncode != 0:
+        err = res.stderr.strip() or res.stdout.strip()
+        raise RuntimeError(f"Failed to add project to T3 Code: {err}")
+
+    data = t3_http_get("/api/projects", cfg)
+    for p in data.get("projects", []):
+        p_root = os.path.realpath(os.path.expanduser(p.get("workspaceRoot", "")))
+        if p_root == norm_path:
+            p_id = p["id"]
+            if project_name not in state.setdefault("projects", {}):
+                state["projects"][project_name] = {
+                    "name": project_name,
+                    "project_path": project_path,
+                    "backend": "t3code",
+                    "t3_project_id": p_id,
+                    "tasks": {}
+                }
+            else:
+                state["projects"][project_name]["t3_project_id"] = p_id
+            save_state(state)
+            return p_id
+
+    raise RuntimeError(f"Could not resolve T3 project ID for '{project_name}' at {project_path}")
+
+
+def dispatch_t3_task(
+    project_name: str,
+    project_path: str,
+    task_slug: str,
+    prompt: str,
+    agent_spec: str | None,
+    plan_first: bool,
+    worktree: bool,
+    branch: str | None,
+    cfg: dict,
+    state: dict
+) -> dict:
+    check_t3_preflight(cfg)
+    p_id = ensure_t3_project(project_name, project_path, cfg, state)
+
+    proj_tasks = state.setdefault("projects", {}).setdefault(project_name, {}).setdefault("tasks", {})
+    if task_slug in proj_tasks:
+        existing = proj_tasks[task_slug]
+        if existing.get("backend") == "t3code" and existing.get("thread_id"):
+            th_id = existing["thread_id"]
+            try:
+                th_chk = t3_http_get(f"/api/orchestration/threads/{th_id}", cfg)
+                th_info = th_chk.get("thread", th_chk)
+                if th_info.get("status") in {"running", "waiting", "starting"}:
+                    return {
+                        "status": "already_running",
+                        "project": project_name,
+                        "task": task_slug,
+                        "thread_id": th_id,
+                        "worker_backend": "t3code"
+                    }
+            except Exception:
+                pass
+
+    model_sel, agent_label = resolve_t3_model_selection(agent_spec, cfg, p_id)
+    ws_strategy = None
+    wt_branch = branch
+    if worktree:
+        wt_branch = wt_branch or f"feat/{task_slug}"
+        ws_strategy = {
+            "type": "worktree",
+            "baseRef": cfg.get("t3code", {}).get("default_worktree_base_ref", "HEAD"),
+            "branch": wt_branch
+        }
+
+    if plan_first:
+        prompt_text = (
+            f"Please inspect the codebase and create a detailed implementation plan for the following task. "
+            f"Before writing any code, outline your plan and list any clarifying questions or trade-offs for the user.\n\n"
+            f"Task: {prompt}"
+        )
+    else:
+        prompt_text = prompt
+
+    launch_args = {
+        "projectId": p_id,
+        "title": f"{project_name}/{task_slug}",
+        "message": prompt_text,
+        "runtimeMode": cfg.get("t3code", {}).get("default_runtime_mode", "full-access")
+    }
+    if model_sel:
+        launch_args["modelSelection"] = model_sel
+    if ws_strategy:
+        launch_args["workspaceStrategy"] = ws_strategy
+
+    try:
+        launch_res = t3_mcp_call("t3_thread_launch", launch_args, cfg)
+    except T3McpAuthRequiredError as e:
+        print(json.dumps({"error": str(e), "status": "mcp_auth_required"}, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    thread_id = launch_res.get("threadId")
+    if not thread_id:
+        die(f"Failed to launch thread in T3 Code: {launch_res}")
+    run_id = launch_res.get("runId")
+
+    picked_up = bool(run_id)
+    status = launch_res.get("status") or "running"
+    worktree_path = None
+    resolved_branch = wt_branch
+    poll_start = time.time()
+    while time.time() - poll_start < 1.5:
+        try:
+            th_data = t3_http_get(f"/api/orchestration/threads/{thread_id}", cfg)
+            th_info = th_data.get("thread", th_data)
+            cur_status = th_info.get("status")
+            if cur_status:
+                status = cur_status
+            if th_info.get("worktreePath"):
+                worktree_path = th_info.get("worktreePath")
+            if th_info.get("branch"):
+                resolved_branch = th_info.get("branch")
+            if cur_status in {"running", "waiting", "completed", "starting"}:
+                picked_up = True
+                break
+            elif cur_status in {"failed", "cancelled"}:
+                picked_up = False
+                status = "error"
+                break
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+    task_entry = {
+        "task_slug": task_slug,
+        "backend": "t3code",
+        "thread_id": thread_id,
+        "project_id": p_id,
+        "active_run_id": run_id,
+        "agent": agent_label,
+        "cwd": worktree_path or project_path,
+        "worktree_path": worktree_path,
+        "branch": resolved_branch,
+        "status": "planning" if plan_first else status,
+        "initial_prompt": prompt,
+        "last_summary": f"T3 thread {thread_id} ({status})",
+        "dev_host_handle": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    }
+    proj_tasks[task_slug] = task_entry
+    save_state(state)
+
+    return {
+        "status": "dispatched",
+        "worker_backend": "t3code",
+        "project": project_name,
+        "task": task_slug,
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "picked_up": picked_up,
+        "preview": f"T3 thread {thread_id} ({status})",
+        "agent": agent_label,
+        "worktree_path": worktree_path,
+        "branch": resolved_branch
+    }
+
+
+def generate_pkce() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "code" in qs:
+            self.server.code = qs["code"][0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            html = """<!DOCTYPE html>
+<html>
+<head><title>Buddy Paired</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; padding: 60px 20px; background: #0f141c; color: #e6edf3;">
+  <h2 style="color: #58a6ff;">✔ Buddy Paired Successfully</h2>
+  <p style="color: #8b949e; font-size: 16px;">T3 Code MCP authorization complete. You can close this tab and return to your terminal.</p>
+</body>
+</html>"""
+            self.wfile.write(html.encode("utf-8"))
+        elif "error" in qs:
+            self.server.error = qs["error"][0]
+            self.send_response(400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            err_desc = qs.get("error_description", ["Authorization failed"])[0]
+            html = f"""<!DOCTYPE html>
+<html>
+<head><title>Buddy Pairing Error</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; padding: 60px 20px; background: #0f141c; color: #e6edf3;">
+  <h2 style="color: #f85149;">✖ Pairing Failed</h2>
+  <p style="color: #8b949e; font-size: 16px;">{err_desc}</p>
+</body>
+</html>"""
+            self.wfile.write(html.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+def cmd_t3_auth_login(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    check_t3_preflight(cfg)
+    info = get_t3_server_info(cfg)
+    origin = info.get("origin", "http://127.0.0.1:3773")
+
+    # Find ephemeral port
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    redirect_uri = f"http://127.0.0.1:{port}/callback"
+
+    # Register client
+    reg_url = f"{origin}/oauth/mcp/register"
+    reg_payload = {
+        "client_name": "Buddy Control Tower",
+        "redirect_uris": [redirect_uri, "http://127.0.0.1/callback"],
+        "token_endpoint_auth_method": "none"
+    }
+    reg_req = urllib.request.Request(
+        reg_url,
+        data=json.dumps(reg_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(reg_req, timeout=5.0) as resp:
+            reg_data = json.loads(resp.read().decode("utf-8"))
+            client_id = reg_data.get("client_id")
+    except Exception as e:
+        die(f"Failed to register OAuth client with T3 Code: {e}")
+
+    verifier, challenge = generate_pkce()
+    state_param = secrets.token_urlsafe(16)
+
+    query_params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "scope": "orchestration:read orchestration:operate",
+        "state": state_param
+    }
+    auth_url = f"{origin}/oauth/mcp/authorize?{urllib.parse.urlencode(query_params)}"
+
+    print(f"=== Pairing Buddy with T3 Code ===")
+    print("Please approve Buddy in your browser and select 'Full access'.")
+    print(f"Authorization URL:\n  {auth_url}\n")
+
+    no_browser = getattr(args, "no_browser", False)
+    if not no_browser:
+        try:
+            webbrowser.open(auth_url)
+        except Exception:
+            pass
+
+    server = HTTPServer(("127.0.0.1", port), _OAuthCallbackHandler)
+    server.code = None
+    server.error = None
+    server.timeout = 180.0
+
+    print("Waiting for browser approval (timeout in 3 minutes)...")
+    while server.code is None and server.error is None:
+        server.handle_request()
+
+    if server.error:
+        die(f"OAuth authorization denied or failed: {server.error}")
+    if not server.code:
+        die("OAuth authorization timed out.")
+
+    code = server.code
+
+    # Exchange code for token
+    token_url = f"{origin}/oauth/mcp/token"
+    token_payload = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": verifier
+    }
+    token_req = urllib.request.Request(
+        token_url,
+        data=json.dumps(token_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(token_req, timeout=5.0) as resp:
+            token_data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        die(f"Failed to exchange authorization code for token: {e}")
+
+    now_ts = int(time.time())
+    expires_in = token_data.get("expires_in", 2592000)
+    expires_at = now_ts + expires_in
+    scope = token_data.get("scope", "")
+
+    save_t3_mcp_oauth({
+        "access_token": token_data["access_token"],
+        "token_type": token_data.get("token_type", "Bearer"),
+        "origin": origin,
+        "issued_at": now_ts,
+        "expires_at": expires_at,
+        "expires_in": expires_in,
+        "scope": scope
+    })
+
+    if "orchestration.operate" not in scope:
+        print("[⚠️ WARNING] Granted scope lacks 'orchestration.operate' (Read-Only access).")
+        print("Buddy requires 'Full access' to answer worker questions.")
+        print("Re-run 'buddy-ctl t3 auth login' and select 'Full access'.")
+    else:
+        print(f"[✔] Successfully paired Buddy with T3 Code (expires in ~{round(expires_in / 86400, 1)} days).")
+
+
+def cmd_t3_auth_status(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    info = get_t3_server_info(cfg)
+    origin = info.get("origin", "http://127.0.0.1:3773")
+
+    server_online = False
+    try:
+        req = urllib.request.Request(f"{origin}/.well-known/t3/environment")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            server_online = (resp.status == 200)
+    except Exception:
+        server_online = False
+
+    session_valid = False
+    try:
+        tok = get_t3_session_token(cfg)
+        session_valid = bool(tok)
+    except Exception:
+        session_valid = False
+
+    oauth = load_t3_mcp_oauth()
+    oauth_valid = False
+    days_remaining = 0
+    expires_at_iso = None
+    scope = ""
+    if oauth and oauth.get("access_token"):
+        now_ts = int(time.time())
+        exp_ts = oauth.get("expires_at", 0)
+        scope = oauth.get("scope", "")
+        if exp_ts > now_ts:
+            oauth_valid = True
+            days_remaining = round((exp_ts - now_ts) / 86400.0, 1)
+            expires_at_iso = datetime.datetime.fromtimestamp(exp_ts).astimezone().isoformat()
+
+    status_data = {
+        "server_origin": origin,
+        "server_online": server_online,
+        "headless_session_token": {
+            "valid": session_valid,
+            "path": str(T3_SESSION_PATH)
+        },
+        "mcp_oauth_session": {
+            "valid": oauth_valid,
+            "days_remaining": days_remaining if oauth_valid else 0,
+            "expires_at": expires_at_iso,
+            "scope": scope,
+            "path": str(T3_MCP_OAUTH_PATH)
+        }
+    }
+    print(json.dumps(status_data, indent=2))
+
+
 def now_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat()
 
@@ -220,6 +960,10 @@ def load_config() -> dict:
             for k, v in DEFAULT_CONFIG.items():
                 if k not in data:
                     data[k] = v
+                elif isinstance(v, dict) and isinstance(data[k], dict):
+                    for sub_k, sub_v in v.items():
+                        if sub_k not in data[k]:
+                            data[k][sub_k] = sub_v
             return data
     except Exception:
         return dict(DEFAULT_CONFIG)
@@ -976,6 +1720,26 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     else:
         task_slug = derive_task_slug(args.prompt, project_name)
 
+    worker_backend = resolve_worker_backend(args, cfg)
+    use_wt = args.worktree or cfg.get("use_worktree_by_default", False)
+    branch = args.branch
+
+    if worker_backend == "t3code":
+        res = dispatch_t3_task(
+            project_name=project_name,
+            project_path=project_path,
+            task_slug=task_slug,
+            prompt=args.prompt,
+            agent_spec=args.agent,
+            plan_first=args.plan_first,
+            worktree=use_wt,
+            branch=branch,
+            cfg=cfg,
+            state=state
+        )
+        print(json.dumps(res, indent=2))
+        return
+
     # Ensure project session exists
     sess_id = ensure_project_session(project_name, project_path, state)
 
@@ -1112,21 +1876,29 @@ def cmd_task_start(args: argparse.Namespace) -> None:
 
     project_name, project_path = resolve_project(args.project, cfg)
 
+    task_slug = args.task.strip()
+    worker_backend = resolve_worker_backend(args, cfg)
+    use_wt = args.worktree or cfg.get("use_worktree_by_default", False)
+    branch = args.branch
+
+    if worker_backend == "t3code":
+        res = dispatch_t3_task(
+            project_name=project_name,
+            project_path=project_path,
+            task_slug=task_slug,
+            prompt=args.prompt or "",
+            agent_spec=args.agent,
+            plan_first=args.plan_first,
+            worktree=use_wt,
+            branch=branch,
+            cfg=cfg,
+            state=state
+        )
+        print(json.dumps(res, indent=2))
+        return
+
     # Ensure project session exists
     sess_id = ensure_project_session(project_name, project_path, state)
-
-    # Agent selection
-    agent_name = args.agent or cfg.get("default_agent", "agy")
-    agent_info = cfg.get("agents", {}).get(agent_name, {
-        "command": [agent_name],
-        "submit_delay_ms": 1500,
-        "submit_key": "enter"
-    })
-    agent_cmd = agent_info.get("command", [agent_name])
-    submit_delay_ms = agent_info.get("submit_delay_ms", 1500)
-    submit_key = agent_info.get("submit_key", "enter")
-
-    task_slug = args.task.strip()
 
     # CWD & worktree handling
     use_wt = args.worktree or cfg.get("use_worktree_by_default", False)
@@ -1256,6 +2028,95 @@ def cmd_capture(args: argparse.Namespace) -> None:
         print(json.dumps({"error": f"Task '{task_slug}' not found in project '{project_name}'"}, indent=2), file=sys.stderr)
         sys.exit(1)
 
+    task_backend = resolve_worker_backend(args, cfg, task)
+    if task_backend == "t3code":
+        thread_id = task.get("thread_id")
+        if not thread_id:
+            die(f"Missing thread_id for t3code task '{task_slug}'")
+        th_data = {}
+        try:
+            th_data = t3_http_get(f"/api/orchestration/threads/{thread_id}", cfg)
+        except Exception:
+            t3_bin = get_t3_bin(cfg)
+            res_show = subprocess.run([t3_bin, "thread", "show", thread_id, "--json"], capture_output=True, text=True)
+            if res_show.returncode == 0:
+                try:
+                    th_data = json.loads(res_show.stdout)
+                except Exception:
+                    pass
+
+        th_info = th_data.get("thread", th_data)
+        if not th_info or not th_info.get("threadId", th_info.get("id")):
+            task["status"] = "missing"
+            task["last_summary"] = "Thread not found in T3 Code"
+            task["updated_at"] = now_iso()
+            save_state(state)
+            print(json.dumps({
+                "status": "missing",
+                "error": "Thread not found in T3 Code",
+                "output": ""
+            }, indent=2))
+            return
+
+        t3_status = th_info.get("status", "running")
+        pending_count = th_info.get("pendingRequestCount", 0)
+        if pending_count > 0 or t3_status == "waiting":
+            buddy_status = "waiting_for_input"
+        elif t3_status == "completed":
+            buddy_status = "ready_for_demo"
+        elif t3_status in {"failed", "cancelled", "rolled_back"}:
+            buddy_status = "error"
+        elif t3_status == "interrupted":
+            buddy_status = "stopped"
+        else:
+            buddy_status = t3_status
+        task["status"] = buddy_status
+
+        output_lines = []
+        output_lines.append(f"[T3 Code Thread] ID: {thread_id} | Status: {buddy_status} (T3: {t3_status})")
+        output_lines.append(f"Worktree: {task.get('worktree_path') or 'root'} | Branch: {task.get('branch') or 'main'} | Pending Requests: {pending_count}")
+
+        if pending_count > 0:
+            try:
+                reqs = t3_mcp_call("t3_pending_request", {"threadId": thread_id, "action": "list"}, cfg)
+                q_ids = reqs.get("requestIds", [])
+                for q_id in q_ids:
+                    q_data = t3_mcp_call("t3_pending_request", {"threadId": thread_id, "action": "read", "requestId": q_id}, cfg)
+                    for q in q_data.get("questions", []):
+                        output_lines.append(f"❓ Question: {q.get('question', q)}")
+            except Exception as e:
+                output_lines.append(f"❓ Pending input required ({e})")
+
+        messages = th_data.get("messages", [])
+        if messages:
+            output_lines.append("--- Recent Messages ---")
+            for m in messages[-20:]:
+                role = m.get("role", "unknown")
+                text = m.get("text", "")
+                output_lines.append(f"[{role}]: {text}")
+
+        limit = args.lines or cfg.get("capture_lines", 120)
+        final_lines = output_lines[-limit:]
+        final_output = "\n".join(final_lines)
+
+        task["last_summary"] = final_lines[-1] if final_lines else f"T3 thread {thread_id} ({buddy_status})"
+        task["updated_at"] = now_iso()
+        save_state(state)
+
+        if args.raw:
+            print(final_output)
+            return
+
+        print(json.dumps({
+            "project": project_name,
+            "task": task_slug,
+            "status": buddy_status,
+            "last_summary": task.get("last_summary"),
+            "lines_count": len(final_lines),
+            "output": final_output
+        }, indent=2))
+        return
+
     block_id = task.get("agent_block_id")
     if not sess_id or not block_id:
         print(json.dumps({"error": "Missing session_id or agent_block_id for task"}, indent=2), file=sys.stderr)
@@ -1328,6 +2189,104 @@ def cmd_send(args: argparse.Namespace) -> None:
     if not task:
         print(json.dumps({"error": f"Task '{task_slug}' not found"}, indent=2), file=sys.stderr)
         sys.exit(1)
+
+    task_backend = resolve_worker_backend(args, cfg, task)
+    if task_backend == "t3code":
+        thread_id = task.get("thread_id")
+        if not thread_id:
+            die(f"Missing thread_id for t3code task '{task_slug}'")
+
+        if args.key:
+            key_norm = args.key.lower().strip()
+            if key_norm in {"ctrl+c", "esc", "escape"}:
+                try:
+                    t3_mcp_call("t3_thread_interrupt", {"threadId": thread_id, "stop": True}, cfg)
+                    task["status"] = "stopped"
+                    task["last_summary"] = f"Interrupted via {args.key}"
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    print(json.dumps({
+                        "status": "interrupted",
+                        "project": project_name,
+                        "task": task_slug
+                    }, indent=2))
+                    return
+                except T3McpAuthRequiredError as e:
+                    print(json.dumps({"error": str(e), "status": "mcp_auth_required"}, indent=2), file=sys.stderr)
+                    sys.exit(1)
+            else:
+                die(f"Raw key '{args.key}' is not supported for t3code tasks. Only ctrl+c and esc are supported.")
+
+        if args.text is not None:
+            pending_count = 0
+            try:
+                th_data = t3_http_get(f"/api/orchestration/threads/{thread_id}", cfg)
+                th_info = th_data.get("thread", th_data)
+                pending_count = th_info.get("pendingRequestCount", 0)
+            except Exception:
+                pass
+
+            if pending_count > 0:
+                try:
+                    list_res = t3_mcp_call("t3_pending_request", {"threadId": thread_id, "action": "list"}, cfg)
+                    req_ids = list_res.get("requestIds", [])
+                    if req_ids:
+                        req_id = req_ids[0]
+                        read_res = t3_mcp_call("t3_pending_request", {"threadId": thread_id, "action": "read", "requestId": req_id}, cfg)
+                        questions = read_res.get("questions", [])
+                        q_id = questions[0].get("id", "answer") if questions else "answer"
+                        try:
+                            parsed = json.loads(args.text)
+                            answers = parsed if isinstance(parsed, dict) else {q_id: args.text}
+                        except Exception:
+                            answers = {q_id: args.text}
+                        t3_mcp_call("t3_pending_request", {"threadId": thread_id, "action": "respond", "requestId": req_id, "answers": answers}, cfg)
+                        task["status"] = "running"
+                        task["last_summary"] = f"Answered question: {args.text[:60]}"
+                        task["updated_at"] = now_iso()
+                        save_state(state)
+                        print(json.dumps({
+                            "status": "answered",
+                            "project": project_name,
+                            "task": task_slug,
+                            "requestId": req_id
+                        }, indent=2))
+                        return
+                    else:
+                        die("Thread is waiting, but no answerable user_input request was found (it may be a permission approval).")
+                except T3McpAuthRequiredError as e:
+                    print(json.dumps({"error": str(e), "status": "mcp_auth_required"}, indent=2), file=sys.stderr)
+                    sys.exit(1)
+            else:
+                try:
+                    t3_mcp_call("t3_thread_send", {"threadId": thread_id, "message": args.text, "mode": "queue"}, cfg)
+                    task["status"] = "running"
+                    task["last_summary"] = f"Sent: {args.text[:60]}"
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    print(json.dumps({
+                        "status": "sent",
+                        "project": project_name,
+                        "task": task_slug
+                    }, indent=2))
+                    return
+                except T3McpAuthRequiredError:
+                    t3_bin = get_t3_bin(cfg)
+                    res_cli = subprocess.run([t3_bin, "thread", "send", thread_id, args.text, "--json"], capture_output=True, text=True)
+                    if res_cli.returncode == 0:
+                        task["status"] = "running"
+                        task["last_summary"] = f"Sent (CLI): {args.text[:60]}"
+                        task["updated_at"] = now_iso()
+                        save_state(state)
+                        print(json.dumps({
+                            "status": "sent",
+                            "project": project_name,
+                            "task": task_slug
+                        }, indent=2))
+                        return
+                    else:
+                        print(json.dumps({"error": get_mcp_auth_error_message(), "status": "mcp_auth_required"}, indent=2), file=sys.stderr)
+                        sys.exit(1)
 
     block_id = task.get("agent_block_id")
     if not sess_id or not block_id:
@@ -1414,6 +2373,37 @@ def cmd_task_close(args: argparse.Namespace) -> None:
         print(json.dumps({"status": "not_found", "message": f"Task '{task_slug}' not in state"}, indent=2))
         return
 
+    task_backend = resolve_worker_backend(args, cfg, task)
+    if task_backend == "t3code":
+        thread_id = task.get("thread_id")
+        if thread_id:
+            try:
+                t3_mcp_call("t3_thread_interrupt", {"threadId": thread_id, "stop": True}, cfg, timeout=5.0)
+            except Exception:
+                pass
+            try:
+                t3_mcp_call("t3_thread_organize", {"threadId": thread_id, "action": "archive"}, cfg, timeout=5.0)
+            except Exception:
+                pass
+
+        # Close host dev server window if present
+        dev_handle = task.get("dev_host_handle") or {}
+        if dev_handle and dev_handle.get("backend") == "rex":
+            d_sess = dev_handle.get("session_id")
+            d_win = dev_handle.get("window_id")
+            if d_sess and d_win:
+                run_rex(["window", "close", "-s", d_sess, d_win], timeout=5.0, check=False)
+
+        del proj["tasks"][task_slug]
+        save_state(state)
+
+        print(json.dumps({
+            "status": "closed",
+            "project": project_name,
+            "task": task_slug
+        }, indent=2))
+        return
+
     win_id = task.get("window_id")
     if sess_id and win_id:
         run_rex(["window", "close", "-s", sess_id, win_id], timeout=5.0, check=False)
@@ -1461,19 +2451,35 @@ def focus_rex_window(sess_id: str | None = None, win_id: str | None = None) -> N
 
 
 def cmd_focus(args: argparse.Namespace) -> None:
+    cfg = load_config()
     state = load_state()
     proj = None
     sess_id = None
     win_id = None
 
     if args.project:
-        proj = resolve_project(state, args.project)
-        sess_id = proj.get("rex_session_id")
-        if args.task:
+        project_name, _ = resolve_project(args.project, cfg)
+        proj = state.get("projects", {}).get(project_name)
+        task = None
+        if args.task and proj:
             task = proj.get("tasks", {}).get(args.task)
             if not task:
-                die(f"Task '{args.task}' not found in project '{proj.get('name')}'")
-            win_id = task.get("window_id")
+                die(f"Task '{args.task}' not found in project '{proj.get('name', project_name)}'")
+
+        task_backend = resolve_worker_backend(args, cfg, task or proj)
+        if task_backend == "t3code":
+            print(json.dumps({
+                "status": "noop",
+                "supported": False,
+                "worker_backend": "t3code",
+                "reason": "focus is unsupported for t3code tasks (t3 app only focuses project workspace, not thread)"
+            }, indent=2))
+            return
+
+        if proj:
+            sess_id = proj.get("rex_session_id")
+            if task:
+                win_id = task.get("window_id")
     elif args.window:
         win_id = args.window
         sess_id = args.session
@@ -1504,12 +2510,77 @@ def cmd_demo(args: argparse.Namespace) -> None:
         print(json.dumps({"error": f"Project '{project_name}' not found"}, indent=2), file=sys.stderr)
         sys.exit(1)
 
-    sess_id = proj.get("rex_session_id")
     task = proj.get("tasks", {}).get(task_slug)
     if not task:
         print(json.dumps({"error": f"Task '{task_slug}' not found"}, indent=2), file=sys.stderr)
         sys.exit(1)
 
+    task_backend = resolve_worker_backend(args, cfg, task)
+    if task_backend == "t3code":
+        demo_cwd = task.get("worktree_path") or task.get("cwd") or proj.get("project_path")
+        if not args.cmd or args.focus_only:
+            print(json.dumps({
+                "status": "noop",
+                "worker_backend": "t3code",
+                "thread_id": task.get("thread_id"),
+                "cwd": demo_cwd,
+                "reason": "focus is unsupported for t3code tasks (t3 app only focuses project workspace, never a threadId); pass --cmd to run dev server in host terminal"
+            }, indent=2))
+            return
+
+        # Cross-host demo: run dev server in Rex (host terminal) at thread worktree
+        dev_handle = task.get("dev_host_handle") or {}
+        sess_id = dev_handle.get("session_id") or proj.get("rex_session_id")
+        if not sess_id:
+            sess_id = ensure_project_session(project_name, proj.get("project_path", demo_cwd), state)
+        win_id = dev_handle.get("window_id")
+        needs_spawn = True
+        if win_id and sess_id:
+            chk = run_rex(["window", "inspect", "-s", sess_id, win_id, "--json"], timeout=5.0, check=False)
+            if chk.returncode == 0:
+                needs_spawn = False
+
+        if needs_spawn:
+            new_win_cmd = [
+                "window", "new",
+                "-s", sess_id,
+                f"{task_slug}-demo",
+                "-c", demo_cwd,
+                "--keep-open",
+                "--focus=false",
+                "--json",
+                "--",
+                "sh", "-c", args.cmd
+            ]
+            res_win = run_rex(new_win_cmd, timeout=10.0)
+            win_data = json.loads(res_win.stdout)
+            win_id = win_data.get("window_id")
+            block_ids = win_data.get("block_ids", [])
+            dev_block_id = block_ids[0] if block_ids else None
+            task["dev_host_handle"] = {
+                "backend": "rex",
+                "session_id": sess_id,
+                "window_id": win_id,
+                "dev_block_id": dev_block_id
+            }
+            save_state(state)
+
+        focus_rex_window(sess_id, win_id)
+
+        print(json.dumps({
+            "status": "launched",
+            "worker_backend": "t3code",
+            "host_backend": "rex",
+            "project": project_name,
+            "task": task_slug,
+            "cwd": demo_cwd,
+            "cmd": args.cmd,
+            "dev_host_handle": task.get("dev_host_handle"),
+            "caveat": "Dev server is running in host terminal (Rex) at thread worktree path, separate from T3 Code worker UI."
+        }, indent=2))
+        return
+
+    sess_id = proj.get("rex_session_id")
     win_id = task.get("window_id")
     agent_block_id = task.get("agent_block_id")
 
@@ -1567,20 +2638,53 @@ def cmd_status(args: argparse.Namespace) -> None:
             
             # 1. Verify tracked projects still exist in Rex
             for p_name, p_data in list(state.get("projects", {}).items()):
+                if p_data.get("backend") == "t3code":
+                    continue
                 s_id = p_data.get("rex_session_id")
                 if s_id not in live_sessions:
                     for t_name, t_data in p_data.get("tasks", {}).items():
-                        t_data["status"] = "missing"
-                        t_data["last_summary"] = "Rex session not found"
+                        if t_data.get("backend") != "t3code":
+                            t_data["status"] = "missing"
+                            t_data["last_summary"] = "Rex session not found"
                 else:
                     # Check windows
                     w_res = run_rex(["window", "ls", "-s", s_id, "--json"], timeout=5.0, check=False)
                     if w_res.returncode == 0:
                         w_ids = {w.get("window_id") for w in json.loads(w_res.stdout).get("windows", [])}
                         for t_name, t_data in p_data.get("tasks", {}).items():
-                            if t_data.get("window_id") not in w_ids:
+                            if t_data.get("backend") != "t3code" and t_data.get("window_id") not in w_ids:
                                 t_data["status"] = "missing"
                                 t_data["last_summary"] = "Window closed in Rex"
+
+            # Reconcile T3 tasks
+            try:
+                t3_shell = t3_http_get("/api/orchestration/shell", cfg, timeout=3.0)
+                t3_threads = {t.get("id"): t for t in t3_shell.get("threads", []) if t.get("id")}
+                for p_name, p_data in list(state.get("projects", {}).items()):
+                    for t_name, t_data in list(p_data.get("tasks", {}).items()):
+                        if t_data.get("backend") == "t3code":
+                            th_id = t_data.get("thread_id")
+                            if th_id:
+                                if th_id not in t3_threads:
+                                    t_data["status"] = "missing"
+                                    t_data["last_summary"] = "Thread archived or deleted in T3 Code"
+                                else:
+                                    th_info = t3_threads[th_id]
+                                    th_stat = th_info.get("status", "running")
+                                    pending_count = th_info.get("pendingRequestCount", 0)
+                                    if pending_count > 0 or th_stat == "waiting":
+                                        t_data["status"] = "waiting_for_input"
+                                    elif th_stat == "completed":
+                                        t_data["status"] = "ready_for_demo"
+                                    elif th_stat in {"failed", "cancelled", "rolled_back"}:
+                                        t_data["status"] = "error"
+                                    elif th_stat == "interrupted":
+                                        t_data["status"] = "stopped"
+                                    else:
+                                        t_data["status"] = th_stat
+                                    t_data["updated_at"] = now_iso()
+            except Exception:
+                pass
 
             # 2. Discover untracked live Rex sessions matching project roots
             roots = [Path(r) for r in cfg.get("projects_roots", [])]
@@ -1769,35 +2873,47 @@ def cmd_watch(args: argparse.Namespace) -> None:
             print(json.dumps({"error": f"Project '{project_name}' not found"}, indent=2), file=sys.stderr)
             sys.exit(1)
 
-        sess_id = proj.get("rex_session_id")
         task = proj.get("tasks", {}).get(task_slug)
         if not task:
             print(json.dumps({"error": f"Task '{task_slug}' not found"}, indent=2), file=sys.stderr)
             sys.exit(1)
 
-        block_id = task.get("agent_block_id")
-        if not sess_id or not block_id:
-            print(json.dumps({"error": "Missing session_id or block_id"}, indent=2), file=sys.stderr)
-            sys.exit(1)
+        task_backend = resolve_worker_backend(args, cfg, task)
 
-        while True:
-            elapsed = time.time() - start_time
-            if elapsed > timeout:
-                print(json.dumps({
-                    "event": "timeout",
-                    "project": project_name,
-                    "task": task_slug,
-                    "summary": f"Watch timed out after {int(elapsed)}s",
-                    "elapsed_seconds": int(elapsed)
-                }, indent=2))
-                return
+        if task_backend == "t3code":
+            thread_id = task.get("thread_id")
+            if not thread_id:
+                print(json.dumps({"error": f"Missing thread_id for t3code task '{task_slug}'"}, indent=2), file=sys.stderr)
+                sys.exit(1)
 
-            cap_res = run_rex(["capture", "-s", sess_id, "-b", block_id, "--trim", "--unwrap"], timeout=6.0, check=False)
-            if cap_res.returncode != 0:
-                w_res = run_rex(["window", "ls", "-s", sess_id, "--json"], timeout=5.0, check=False)
-                if w_res.returncode != 0:
+            while True:
+                elapsed = time.time() - start_time
+                if elapsed > timeout:
+                    print(json.dumps({
+                        "event": "timeout",
+                        "project": project_name,
+                        "task": task_slug,
+                        "summary": f"Watch timed out after {int(elapsed)}s",
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
+
+                th_data = {}
+                try:
+                    th_data = t3_http_get(f"/api/orchestration/threads/{thread_id}", cfg, timeout=3.0)
+                except Exception:
+                    t3_bin = get_t3_bin(cfg)
+                    res_show = subprocess.run([t3_bin, "thread", "show", thread_id, "--json"], capture_output=True, text=True)
+                    if res_show.returncode == 0:
+                        try:
+                            th_data = json.loads(res_show.stdout)
+                        except Exception:
+                            pass
+
+                th_info = th_data.get("thread", th_data)
+                if not th_info or not (th_info.get("threadId") or th_info.get("id")):
                     task["status"] = "missing"
-                    task["last_summary"] = "Rex session not found"
+                    task["last_summary"] = "Thread not found in T3 Code"
                     task["updated_at"] = now_iso()
                     save_state(state)
                     if "missing" in until_events or "any" in until_events:
@@ -1805,15 +2921,107 @@ def cmd_watch(args: argparse.Namespace) -> None:
                             "event": "missing",
                             "project": project_name,
                             "task": task_slug,
-                            "summary": "Rex session not found"
+                            "summary": "Thread not found in T3 Code"
                         }, indent=2))
                         return
                 else:
-                    windows = json.loads(w_res.stdout).get("windows", [])
-                    win_exists = any(w.get("window_id") == task.get("window_id") for w in windows)
-                    if not win_exists:
+                    t3_status = th_info.get("status", "running")
+                    pending_count = th_info.get("pendingRequestCount", 0)
+                    last_msg = ""
+                    messages = th_info.get("messages", [])
+                    if messages:
+                        last_msg = messages[-1].get("content") or messages[-1].get("text", "")
+
+                    if ("input" in until_events or "any" in until_events) and (pending_count > 0 or t3_status == "waiting"):
+                        summary = last_msg or "Worker agent is waiting for input or confirmation in T3 Code"
+                        task["status"] = "waiting_for_input"
+                        task["last_summary"] = summary
+                        task["updated_at"] = now_iso()
+                        save_state(state)
+                        if notify_enabled:
+                            send_desktop_notification(
+                                title="Buddy Orchestrator",
+                                subtitle=f"{project_name}/{task_slug} (Input Needed)",
+                                message=summary,
+                                sound="Glass",
+                                cfg=cfg
+                            )
+                        print(json.dumps({
+                            "event": "waiting_for_input",
+                            "project": project_name,
+                            "task": task_slug,
+                            "summary": summary,
+                            "last_output": last_msg,
+                            "elapsed_seconds": int(elapsed)
+                        }, indent=2))
+                        return
+
+                    if ("demo" in until_events or "done" in until_events or "any" in until_events) and (t3_status == "completed"):
+                        summary = last_msg or "Worker finished task; ready for demo"
+                        task["status"] = "ready_for_demo"
+                        task["last_summary"] = summary
+                        task["updated_at"] = now_iso()
+                        save_state(state)
+                        if notify_enabled:
+                            send_desktop_notification(
+                                title="Buddy Orchestrator",
+                                subtitle=f"{project_name}/{task_slug} (Ready for Demo)",
+                                message=summary,
+                                sound="Glass",
+                                cfg=cfg
+                            )
+                        print(json.dumps({
+                            "event": "ready_for_demo",
+                            "project": project_name,
+                            "task": task_slug,
+                            "summary": summary,
+                            "last_output": last_msg,
+                            "elapsed_seconds": int(elapsed)
+                        }, indent=2))
+                        return
+
+                    if ("error" in until_events or "any" in until_events) and (t3_status in {"failed", "cancelled", "rolled_back"}):
+                        summary = last_msg or f"Worker agent stopped with status '{t3_status}'"
+                        task["status"] = "error"
+                        task["last_summary"] = summary
+                        task["updated_at"] = now_iso()
+                        save_state(state)
+                        print(json.dumps({
+                            "event": "error",
+                            "project": project_name,
+                            "task": task_slug,
+                            "summary": summary,
+                            "last_output": last_msg,
+                            "elapsed_seconds": int(elapsed)
+                        }, indent=2))
+                        return
+
+                time.sleep(interval)
+        else:
+            sess_id = proj.get("rex_session_id")
+            block_id = task.get("agent_block_id")
+            if not sess_id or not block_id:
+                print(json.dumps({"error": "Missing session_id or block_id"}, indent=2), file=sys.stderr)
+                sys.exit(1)
+
+            while True:
+                elapsed = time.time() - start_time
+                if elapsed > timeout:
+                    print(json.dumps({
+                        "event": "timeout",
+                        "project": project_name,
+                        "task": task_slug,
+                        "summary": f"Watch timed out after {int(elapsed)}s",
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
+
+                cap_res = run_rex(["capture", "-s", sess_id, "-b", block_id, "--trim", "--unwrap"], timeout=6.0, check=False)
+                if cap_res.returncode != 0:
+                    w_res = run_rex(["window", "ls", "-s", sess_id, "--json"], timeout=5.0, check=False)
+                    if w_res.returncode != 0:
                         task["status"] = "missing"
-                        task["last_summary"] = "Task tab closed in Rex"
+                        task["last_summary"] = "Rex session not found"
                         task["updated_at"] = now_iso()
                         save_state(state)
                         if "missing" in until_events or "any" in until_events:
@@ -1821,98 +3029,114 @@ def cmd_watch(args: argparse.Namespace) -> None:
                                 "event": "missing",
                                 "project": project_name,
                                 "task": task_slug,
-                                "summary": "Task tab closed in Rex"
+                                "summary": "Rex session not found"
                             }, indent=2))
                             return
+                    else:
+                        windows = json.loads(w_res.stdout).get("windows", [])
+                        win_exists = any(w.get("window_id") == task.get("window_id") for w in windows)
+                        if not win_exists:
+                            task["status"] = "missing"
+                            task["last_summary"] = "Task tab closed in Rex"
+                            task["updated_at"] = now_iso()
+                            save_state(state)
+                            if "missing" in until_events or "any" in until_events:
+                                print(json.dumps({
+                                    "event": "missing",
+                                    "project": project_name,
+                                    "task": task_slug,
+                                    "summary": "Task tab closed in Rex"
+                                }, indent=2))
+                                return
 
-            text = cap_res.stdout
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-            tail_lines = lines[-20:] if len(lines) >= 20 else lines
-            tail_text = "\n".join(tail_lines)
+                text = cap_res.stdout
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                tail_lines = lines[-20:] if len(lines) >= 20 else lines
+                tail_text = "\n".join(tail_lines)
 
-            # 1. Check for input needed
-            if ("input" in until_events or "any" in until_events) and input_regex.search(tail_text):
-                matching_line = ""
-                for l in reversed(tail_lines):
-                    if input_regex.search(l):
-                        matching_line = l
-                        break
-                summary = matching_line or "Worker agent is waiting for input or confirmation"
-                task["status"] = "waiting_for_input"
-                task["last_summary"] = summary
-                task["updated_at"] = now_iso()
-                save_state(state)
-                if notify_enabled:
-                    send_desktop_notification(
-                        title="Buddy Orchestrator",
-                        subtitle=f"{project_name}/{task_slug} (Input Needed)",
-                        message=summary,
-                        sound="Glass",
-                        cfg=cfg
-                    )
-                print(json.dumps({
-                    "event": "waiting_for_input",
-                    "project": project_name,
-                    "task": task_slug,
-                    "summary": summary,
-                    "last_output": tail_text,
-                    "elapsed_seconds": int(elapsed)
-                }, indent=2))
-                return
+                # 1. Check for input needed
+                if ("input" in until_events or "any" in until_events) and input_regex.search(tail_text):
+                    matching_line = ""
+                    for l in reversed(tail_lines):
+                        if input_regex.search(l):
+                            matching_line = l
+                            break
+                    summary = matching_line or "Worker agent is waiting for input or confirmation"
+                    task["status"] = "waiting_for_input"
+                    task["last_summary"] = summary
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    if notify_enabled:
+                        send_desktop_notification(
+                            title="Buddy Orchestrator",
+                            subtitle=f"{project_name}/{task_slug} (Input Needed)",
+                            message=summary,
+                            sound="Glass",
+                            cfg=cfg
+                        )
+                    print(json.dumps({
+                        "event": "waiting_for_input",
+                        "project": project_name,
+                        "task": task_slug,
+                        "summary": summary,
+                        "last_output": tail_text,
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
 
-            # 2. Check for demo / done
-            if ("demo" in until_events or "done" in until_events or "any" in until_events) and demo_regex.search(tail_text):
-                matching_line = ""
-                for l in reversed(tail_lines):
-                    if demo_regex.search(l):
-                        matching_line = l
-                        break
-                summary = matching_line or "Worker finished task; ready for demo"
-                task["status"] = "ready_for_demo"
-                task["last_summary"] = summary
-                task["updated_at"] = now_iso()
-                save_state(state)
-                if notify_enabled:
-                    send_desktop_notification(
-                        title="Buddy Orchestrator",
-                        subtitle=f"{project_name}/{task_slug} (Ready for Demo)",
-                        message=summary,
-                        sound="Glass",
-                        cfg=cfg
-                    )
-                print(json.dumps({
-                    "event": "ready_for_demo",
-                    "project": project_name,
-                    "task": task_slug,
-                    "summary": summary,
-                    "last_output": tail_text,
-                    "elapsed_seconds": int(elapsed)
-                }, indent=2))
-                return
+                # 2. Check for demo / done
+                if ("demo" in until_events or "done" in until_events or "any" in until_events) and demo_regex.search(tail_text):
+                    matching_line = ""
+                    for l in reversed(tail_lines):
+                        if demo_regex.search(l):
+                            matching_line = l
+                            break
+                    summary = matching_line or "Worker finished task; ready for demo"
+                    task["status"] = "ready_for_demo"
+                    task["last_summary"] = summary
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    if notify_enabled:
+                        send_desktop_notification(
+                            title="Buddy Orchestrator",
+                            subtitle=f"{project_name}/{task_slug} (Ready for Demo)",
+                            message=summary,
+                            sound="Glass",
+                            cfg=cfg
+                        )
+                    print(json.dumps({
+                        "event": "ready_for_demo",
+                        "project": project_name,
+                        "task": task_slug,
+                        "summary": summary,
+                        "last_output": tail_text,
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
 
-            # 3. Check for fatal error
-            if ("error" in until_events or "any" in until_events) and error_regex.search(tail_text):
-                matching_line = ""
-                for l in reversed(tail_lines):
-                    if error_regex.search(l):
-                        matching_line = l
-                        break
-                summary = matching_line or "Worker agent encountered an error"
-                task["status"] = "error"
-                task["last_summary"] = summary
-                task["updated_at"] = now_iso()
-                save_state(state)
-                print(json.dumps({
-                    "event": "error",
-                    "project": project_name,
-                    "task": task_slug,
-                    "summary": summary,
-                    "last_output": tail_text,
-                    "elapsed_seconds": int(elapsed)
-                }, indent=2))
-                return
+                # 3. Check for fatal error
+                if ("error" in until_events or "any" in until_events) and error_regex.search(tail_text):
+                    matching_line = ""
+                    for l in reversed(tail_lines):
+                        if error_regex.search(l):
+                            matching_line = l
+                            break
+                    summary = matching_line or "Worker agent encountered an error"
+                    task["status"] = "error"
+                    task["last_summary"] = summary
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    print(json.dumps({
+                        "event": "error",
+                        "project": project_name,
+                        "task": task_slug,
+                        "summary": summary,
+                        "last_output": tail_text,
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
 
-            time.sleep(interval)
+                time.sleep(interval)
 
     # --- WATCH ALL MODE ---
     empty_streak = 0
@@ -1952,6 +3176,90 @@ def cmd_watch(args: argparse.Namespace) -> None:
 
         empty_streak = 0
         for p_name, sess_id, t_slug, task in active_candidates:
+            t_backend = task.get("backend", "rex")
+            if t_backend == "t3code":
+                th_id = task.get("thread_id")
+                if not th_id:
+                    continue
+                try:
+                    th_data = t3_http_get(f"/api/orchestration/threads/{th_id}", cfg, timeout=2.0)
+                except Exception:
+                    continue
+                th_info = th_data.get("thread", th_data)
+                if not th_info:
+                    continue
+                th_stat = th_info.get("status", "running")
+                pending_count = th_info.get("pendingRequestCount", 0)
+                last_msg = ""
+                messages = th_info.get("messages", [])
+                if messages:
+                    last_msg = messages[-1].get("content") or messages[-1].get("text", "")
+
+                if ("input" in until_events or "any" in until_events) and (pending_count > 0 or th_stat == "waiting"):
+                    summary = last_msg or "Worker agent is waiting for input or confirmation in T3 Code"
+                    task["status"] = "waiting_for_input"
+                    task["last_summary"] = summary
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    if notify_enabled:
+                        send_desktop_notification(
+                            title="Buddy Orchestrator",
+                            subtitle=f"{p_name}/{t_slug} (Input Needed)",
+                            message=summary,
+                            sound="Glass",
+                            cfg=cfg
+                        )
+                    print(json.dumps({
+                        "event": "waiting_for_input",
+                        "project": p_name,
+                        "task": t_slug,
+                        "summary": summary,
+                        "last_output": last_msg,
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
+
+                if ("demo" in until_events or "done" in until_events or "any" in until_events) and (th_stat == "completed"):
+                    summary = last_msg or "Worker finished task; ready for demo"
+                    task["status"] = "ready_for_demo"
+                    task["last_summary"] = summary
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    if notify_enabled:
+                        send_desktop_notification(
+                            title="Buddy Orchestrator",
+                            subtitle=f"{p_name}/{t_slug} (Ready for Demo)",
+                            message=summary,
+                            sound="Glass",
+                            cfg=cfg
+                        )
+                    print(json.dumps({
+                        "event": "ready_for_demo",
+                        "project": p_name,
+                        "task": t_slug,
+                        "summary": summary,
+                        "last_output": last_msg,
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
+
+                if ("error" in until_events or "any" in until_events) and (th_stat in {"failed", "cancelled", "rolled_back"}):
+                    summary = last_msg or f"Worker agent stopped with status '{th_stat}'"
+                    task["status"] = "error"
+                    task["last_summary"] = summary
+                    task["updated_at"] = now_iso()
+                    save_state(state)
+                    print(json.dumps({
+                        "event": "error",
+                        "project": p_name,
+                        "task": t_slug,
+                        "summary": summary,
+                        "last_output": last_msg,
+                        "elapsed_seconds": int(elapsed)
+                    }, indent=2))
+                    return
+                continue
+
             block_id = task.get("agent_block_id")
             if not sess_id or not block_id:
                 continue
@@ -2049,7 +3357,6 @@ def cmd_watch(args: argparse.Namespace) -> None:
 
         time.sleep(interval)
 
-
 def cmd_diagnose(args: argparse.Namespace) -> None:
     """Diagnostician helper: Analyzes full terminal log for errors and stack traces."""
     cfg = load_config()
@@ -2068,6 +3375,34 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
     if not task:
         print(json.dumps({"error": f"Task '{task_slug}' not found"}, indent=2), file=sys.stderr)
         sys.exit(1)
+
+    task_backend = resolve_worker_backend(args, cfg, task)
+    if task_backend == "t3code":
+        thread_id = task.get("thread_id")
+        if not thread_id:
+            die(f"Missing thread_id for t3code task '{task_slug}'")
+        th_data = {}
+        try:
+            th_data = t3_http_get(f"/api/orchestration/threads/{thread_id}", cfg)
+        except Exception:
+            pass
+        th_info = th_data.get("thread", th_data)
+        last_error = th_info.get("lastError")
+        errors = []
+        if last_error:
+            errors.append({"line": 1, "text": str(last_error), "context": str(last_error)})
+        messages = th_data.get("messages", [])
+        tail_lines = [f"[{m.get('role')}]: {m.get('text', '')[:100]}" for m in messages[-30:]]
+        print(json.dumps({
+            "project": project_name,
+            "task": task_slug,
+            "total_lines_analyzed": len(messages),
+            "has_errors": bool(errors),
+            "error_snippets_count": len(errors),
+            "errors": errors,
+            "tail_lines": tail_lines
+        }, indent=2))
+        return
 
     block_id = task.get("agent_block_id")
     if not sess_id or not block_id:
@@ -2265,6 +3600,30 @@ def cmd_context_inject(args: argparse.Namespace) -> None:
         except Exception:
             pass
 
+                # Check T3 MCP OAuth token status if worker_backend is t3code or active t3 tasks exist
+        has_t3 = (cfg.get("worker_backend") == "t3code")
+        if not has_t3:
+            for p_data in active_projects.values():
+                for t_data in p_data.get("tasks", {}).values():
+                    if t_data.get("backend") == "t3code":
+                        has_t3 = True
+                        break
+                if has_t3:
+                    break
+
+        if has_t3:
+            t3_oauth = load_t3_mcp_oauth()
+            if not t3_oauth or not t3_oauth.get("access_token"):
+                nudges.append("• 🔑 T3 MCP OAuth token missing. Run 'buddy-ctl t3 auth login' to pair Buddy with T3 Code for question relay.")
+            else:
+                exp_ts = t3_oauth.get("expires_at", 0)
+                now_ts = int(time.time())
+                if exp_ts <= now_ts:
+                    nudges.append("• 🔑 T3 MCP OAuth token has EXPIRED. Run 'buddy-ctl t3 auth login' to re-authenticate question relay.")
+                elif exp_ts - now_ts < 72 * 3600:
+                    hours_left = max(1, int((exp_ts - now_ts) / 3600))
+                    nudges.append(f"• 🔑 T3 MCP OAuth token expires in {hours_left}h. Run 'buddy-ctl t3 auth login' to refresh.")
+
         tasks_str = "; ".join(task_summaries) if task_summaries else "None active"
         default_agent = cfg.get("default_agent", "agy")
 
@@ -2344,6 +3703,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_disp.add_argument("--plan-first", action="store_true", help="Wrap prompt to instruct worker agent to plan first")
     p_disp.add_argument("--worktree", action="store_true", help="Create an isolated git worktree")
     p_disp.add_argument("--branch", "-b", help="Branch name for worktree")
+    p_disp.add_argument("--worker-backend", choices=["rex", "t3code"], help="Worker backend to use (rex, t3code; default: config.worker_backend or rex)")
 
     # task start
     p_ts = subparsers.add_parser("task", help="Task management")
@@ -2357,6 +3717,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--branch", "-b", help="Branch name for worktree")
     p_start.add_argument("--prompt", help="Initial prompt to send to the worker agent")
     p_start.add_argument("--plan-first", action="store_true", help="Wrap prompt to instruct worker agent to plan first")
+    p_start.add_argument("--worker-backend", choices=["rex", "t3code"], help="Worker backend to use (rex, t3code; default: config.worker_backend or rex)")
 
     # task update
     p_up = ts_sub.add_parser("update", help="Update task status or summary in state cache")
@@ -2405,6 +3766,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_stat.add_argument("--project", "-p", help="Filter by project name")
     p_stat.add_argument("--sync", action="store_true", help="Reconcile cache with live Rex sessions")
     p_stat.add_argument("--format", "-f", choices=["json", "table", "brief"], default="json", help="Output format")
+    p_stat.add_argument("--worker-backend", choices=["rex", "t3code"], help="Filter tasks by worker backend")
 
     # watch
     p_watch = subparsers.add_parser("watch", help="Watchdog monitor: Polls worker agent pane(s) until input needed, finished, or error")
@@ -2416,6 +3778,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--until", "-u", default="input,demo,done,error,missing", help="Comma-separated events to watch for: input,demo,done,error,missing,any")
     p_watch.add_argument("--notify", action="store_true", default=True, help="Send desktop notification on event (default: true)")
     p_watch.add_argument("--no-notify", action="store_false", dest="notify", help="Disable desktop notification")
+    p_watch.add_argument("--worker-backend", choices=["rex", "t3code"], help="Worker backend for watched task")
 
     # notify
     p_notify = subparsers.add_parser("notify", help="Send native macOS desktop notification")
@@ -2438,6 +3801,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # context-inject
     p_ci = subparsers.add_parser("context-inject", help="PreInvocation hook handler (internal)")
+
+    # t3 (T3 Code worker-backend management)
+    p_t3 = subparsers.add_parser("t3", help="T3 Code worker-backend integration management")
+    t3_sub = p_t3.add_subparsers(dest="t3_action", help="T3 action")
+
+    p_t3_auth = t3_sub.add_parser("auth", help="T3 Code authentication management")
+    t3_auth_sub = p_t3_auth.add_subparsers(dest="t3_auth_action", help="T3 auth action")
+
+    p_t3_login = t3_auth_sub.add_parser("login", help="Interactive browser OAuth login for T3 Code MCP relay (30-day token)")
+    p_t3_login.add_argument("--no-browser", action="store_true", help="Print auth URL only, do not auto-open browser")
+
+    p_t3_status = t3_auth_sub.add_parser("status", help="Show T3 Code server and token status")
+
+    # Convenience aliases under t3 directly: 'buddy-ctl t3 login' & 'buddy-ctl t3 status'
+    p_t3_login_alias = t3_sub.add_parser("login", help="Alias for 'auth login'")
+    p_t3_login_alias.add_argument("--no-browser", action="store_true", help="Print auth URL only, do not auto-open browser")
+    p_t3_status_alias = t3_sub.add_parser("status", help="Alias for 'auth status'")
 
     return parser
 
@@ -2477,6 +3857,23 @@ def main() -> None:
             cmd_task_close(args)
         else:
             parser.parse_args(["task", "--help"])
+            sys.exit(0)
+    elif args.subcommand == "t3":
+        if args.t3_action == "auth":
+            if args.t3_auth_action == "login":
+                cmd_t3_auth_login(args)
+            elif args.t3_auth_action == "status":
+                cmd_t3_auth_status(args)
+            else:
+                parser.parse_args(["t3", "auth", "--help"])
+                sys.exit(0)
+        elif args.t3_action in {"login", "status"}:
+            if args.t3_action == "login":
+                cmd_t3_auth_login(args)
+            elif args.t3_action == "status":
+                cmd_t3_auth_status(args)
+        else:
+            parser.parse_args(["t3", "--help"])
             sys.exit(0)
     elif args.subcommand in dispatch:
         dispatch[args.subcommand](args)
