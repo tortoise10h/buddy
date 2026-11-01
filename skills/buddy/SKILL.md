@@ -240,7 +240,7 @@ When the user confirms the task is accepted and done:
 | `buddy-ctl projects add-root <path>` | Add a new project root directory to configuration. |
 | `buddy-ctl projects remove-root <path>` | Remove a project root directory from configuration. |
 | `buddy-ctl config show` | View current Buddy configuration. |
-| `buddy-ctl config set <key> <val>` | Change configuration (e.g. `default_agent pi`). |
+| `buddy-ctl config set <key> <val>` | Change configuration (e.g. `orchestrator_agent opencode-flash`, `worker_agent agy`). |
 | `buddy-ctl ensure-session -p <proj>` | Ensure Rex session exists for a project. |
 | `buddy-ctl task start -p <proj> -t <slug>` | Spawn worker agent in a new task tab. |
 | `buddy-ctl capture -p <proj> -t <slug>` | Read last 120 lines from worker pane. |
@@ -266,3 +266,38 @@ When the user confirms the task is accepted and done:
 - `ready_for_demo`: Implementation complete; awaiting review or demo.
 - `done`: Task accepted and completed.
 - `missing`: Tab or session was closed in Rex (auto-detected on capture).
+
+---
+
+## 6. Agent Roles & Configuration
+
+Buddy cleanly separates two distinct agent roles:
+
+1. **Orchestrator Agent** (`orchestrator_agent`, default: `"agy"`):
+   - Runs the central Buddy control session in Rex (`bin/buddy`).
+   - Acts as dispatcher, status monitor, and Q&A relay.
+2. **Worker Agent** (`worker_agent`, default: `"agy"`):
+   - The default agent used when spawning new feature or bugfix tabs (`buddy-ctl dispatch`, `buddy-ctl task start`).
+   - Writes code, runs tests, and executes task-specific commands.
+
+### Concrete Example: Opencode Orchestrator with Agy Workers
+You can configure `opencode-flash` to run the control tower while using `agy` as the worker agent:
+
+```json
+{
+  "orchestrator_agent": "opencode-flash",
+  "worker_agent": "agy"
+}
+```
+
+Or update using `buddy-ctl`:
+```sh
+buddy-ctl config set orchestrator_agent opencode-flash
+buddy-ctl config set worker_agent agy
+```
+
+### Precedence & Compatibility
+- **Orchestrator**: explicit CLI `--agent` / `-a` > `BUDDY_AGENT` env var > `config.orchestrator_agent` > `config.default_agent` (legacy) > `"agy"`
+- **Worker**: explicit CLI `--agent` / `-a` > `config.worker_agent` > `config.default_agent` (legacy) > `"agy"`
+- **Command Array Resolution**: Agents resolve their full command array from `config.agents.<name>.command` (e.g. `agy-flash` -> `["agy", "--model", "gemini-3.8-flash-medium"]`), ensuring variant flags are passed directly without word-splitting errors.
+- **Backward Compatibility**: Existing configuration files containing only `default_agent` remain fully supported as a fallback for both roles.
