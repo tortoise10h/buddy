@@ -858,12 +858,14 @@ def cmd_t3_auth_login(args: argparse.Namespace) -> None:
         "client_id": client_id,
         "code": code,
         "redirect_uri": redirect_uri,
-        "code_verifier": verifier
+        "code_verifier": verifier,
+        "resource": f"{origin}/mcp"
     }
+    token_body = urllib.parse.urlencode(token_payload).encode("utf-8")
     token_req = urllib.request.Request(
         token_url,
-        data=json.dumps(token_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
+        data=token_body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}
     )
     try:
         with urllib.request.urlopen(token_req, timeout=5.0) as resp:
@@ -886,8 +888,8 @@ def cmd_t3_auth_login(args: argparse.Namespace) -> None:
         "scope": scope
     })
 
-    if "orchestration.operate" not in scope:
-        print("[⚠️ WARNING] Granted scope lacks 'orchestration.operate' (Read-Only access).")
+    if "orchestration:operate" not in scope and "orchestration.operate" not in scope:
+        print("[⚠️ WARNING] Granted scope lacks 'orchestration:operate' (Read-Only access).")
         print("Buddy requires 'Full access' to answer worker questions.")
         print("Re-run 'buddy-ctl t3 auth login' and select 'Full access'.")
     else:
