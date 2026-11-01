@@ -23,7 +23,7 @@ func newCaptureCmd() *cobra.Command {
 		Use:   "capture",
 		Short: "Capture output from worker agent pane in O(1)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, _, blkID, projName, taskSlug, err := resolveTarget(project, task, session, "", block)
+			sessID, _, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, session, "", block)
 			if err != nil {
 				return err
 			}
@@ -31,7 +31,10 @@ func newCaptureCmd() *cobra.Command {
 				return fmt.Errorf("missing session_id or agent_block_id (specify --project/--task or -s/-b)")
 			}
 
-			eng := getDefaultEngine()
+			eng, err := getEngine(engName)
+			if err != nil {
+				return err
+			}
 			out, err := eng.Capture(cmd.Context(), sessID, blkID, lines)
 			if err != nil {
 				return err

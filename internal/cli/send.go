@@ -24,7 +24,7 @@ func newSendCmd() *cobra.Command {
 		Use:   "send",
 		Short: "Send text or keys to worker agent pane",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, _, blkID, projName, taskSlug, err := resolveTarget(project, task, session, "", block)
+			sessID, _, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, session, "", block)
 			if err != nil {
 				return err
 			}
@@ -32,7 +32,10 @@ func newSendCmd() *cobra.Command {
 				return fmt.Errorf("missing session_id or agent_block_id (specify --project/--task or -s/-b)")
 			}
 
-			eng := getDefaultEngine()
+			eng, err := getEngine(engName)
+			if err != nil {
+				return err
+			}
 			input := backend.Input{
 				Text:  text,
 				Key:   key,

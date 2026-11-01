@@ -84,7 +84,7 @@ func newTaskCloseCmd() *cobra.Command {
 		Use:   "close",
 		Short: "Close task tab in Rex and update state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, _, projName, taskSlug, err := resolveTarget(project, task, session, window, "")
+			sessID, winID, _, projName, taskSlug, engName, err := resolveTarget(project, task, session, window, "")
 			if err != nil {
 				return err
 			}
@@ -92,7 +92,10 @@ func newTaskCloseCmd() *cobra.Command {
 				return fmt.Errorf("missing session_id or window_id for task '%s'", task)
 			}
 
-			eng := getDefaultEngine()
+			eng, err := getEngine(engName)
+			if err != nil {
+				return err
+			}
 			if err := eng.Close(cmd.Context(), sessID, winID); err != nil {
 				return err
 			}

@@ -20,7 +20,7 @@ func newDemoCmd() *cobra.Command {
 		Use:   "demo",
 		Short: "Focus task tab in Rex and optionally launch dev server split",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, blkID, projName, taskSlug, err := resolveTarget(project, task, "", "", "")
+			sessID, winID, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, "", "", "")
 			if err != nil {
 				return err
 			}
@@ -28,7 +28,10 @@ func newDemoCmd() *cobra.Command {
 				return fmt.Errorf("missing session_id or window_id for task '%s'", task)
 			}
 
-			eng := getDefaultEngine()
+			eng, err := getEngine(engName)
+			if err != nil {
+				return err
+			}
 			if err := eng.Focus(cmd.Context(), sessID, winID); err != nil {
 				return err
 			}

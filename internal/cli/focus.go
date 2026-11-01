@@ -19,12 +19,15 @@ func newFocusCmd() *cobra.Command {
 		Use:   "focus",
 		Short: "Focus a project tab, task tab, or window in Rex",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, _, _, _, err := resolveTarget(project, task, session, window, "")
+			sessID, winID, _, _, _, engName, err := resolveTarget(project, task, session, window, "")
 			if err != nil {
 				return err
 			}
 
-			eng := getDefaultEngine()
+			eng, err := getEngine(engName)
+			if err != nil {
+				return err
+			}
 			if err := eng.Focus(cmd.Context(), sessID, winID); err != nil {
 				return err
 			}

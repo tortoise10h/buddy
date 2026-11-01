@@ -10,6 +10,7 @@ import (
 
 type TaskState struct {
 	TaskSlug      string  `json:"task_slug"`
+	Engine        string  `json:"engine,omitempty"`
 	WindowID      string  `json:"window_id"`
 	WindowLabel   string  `json:"window_label"`
 	AgentBlockID  string  `json:"agent_block_id"`
@@ -23,6 +24,13 @@ type TaskState struct {
 	LastSummary   string  `json:"last_summary,omitempty"`
 	CreatedAt     string  `json:"created_at,omitempty"`
 	UpdatedAt     string  `json:"updated_at,omitempty"`
+}
+
+func (t *TaskState) GetEngine() string {
+	if t.Engine != "" {
+		return t.Engine
+	}
+	return "rex"
 }
 
 type ProjectState struct {
