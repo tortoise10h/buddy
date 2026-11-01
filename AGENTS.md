@@ -157,3 +157,5 @@ When the user wants to start tasks across multiple projects at once:
 - `buddy-ctl notify --message "..." [--title "..."] [--subtitle "..."] [--sound Glass]`: Send native macOS desktop notification.
 - `buddy-ctl diagnose --project <proj> --task <slug> [--lines 300]`: Extract and parse error snippets from worker pane.
 - `buddy-ctl batch (--json '...' | --file <path>)`: Batch start multiple tasks across projects.
+- `buddy-ctl t3 auth login [--no-browser]`: Interactive browser OAuth login for T3 Code MCP relay (30-day token).
+- `buddy-ctl t3 auth status`: Show T3 Code server and token status.

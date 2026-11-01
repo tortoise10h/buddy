@@ -238,3 +238,5 @@ python3 "$LOCAL_BIN/buddy-ctl" init "${INIT_ARGS[@]}"
 
 echo "=== Buddy installation complete! ==="
 echo "You can now run 'buddy' from anywhere or use 'buddy-ctl' commands."
+echo "Optional: To use T3 Code as your worker backend, set worker_backend in ~/.buddy/config.json and run:"
+echo "  buddy-ctl t3 auth login"

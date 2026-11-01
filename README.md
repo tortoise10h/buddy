@@ -176,9 +176,37 @@ buddy-ctl diagnose --project docnotate --task inline-comments --lines 300
 # Batch dispatch tasks across multiple projects
 buddy-ctl batch --json '[{"project":"docnotate","task":"feat-a","prompt":"..."},{"project":"daily-catch","task":"feat-b","prompt":"..."}]'
 
+# T3 Code Authentication & Status (when worker_backend: "t3code")
+buddy-ctl t3 auth login
+buddy-ctl t3 auth status
+
 # Clean up task tab when finished
 buddy-ctl task close --project docnotate --task inline-comments
 ```
+
+---
+
+## Worker Backends: Rex (Default) & T3 Code
+
+Buddy supports multiple worker backends configured via `~/.buddy/config.json`:
+- `worker_backend: "rex"` (default): Runs worker agents inside dedicated Rex tabs and windows.
+- `worker_backend: "t3code"`: Runs worker tasks inside [T3 Code](https://github.com/pingdotgg/t3code) threads while keeping the Buddy control tower in Rex.
+
+### T3 Code Setup
+1. Set `"worker_backend": "t3code"` in `~/.buddy/config.json` (or pass `--worker-backend t3code` per command).
+2. Pair Buddy with T3 Code for MCP question relay (valid for 30 days):
+   ```sh
+   buddy-ctl t3 auth login
+   ```
+3. Pass-through models: Specify any provider and model supported by your T3 Code instance:
+   ```sh
+   buddy-ctl dispatch --project docnotate --prompt "Refactor auth" --agent antigravity/gemini-4-argon-high
+   ```
+   Or define aliases in `~/.buddy/config.json` under `t3code.agent_aliases`.
+
+Caveats under T3 Code:
+- `buddy-ctl focus`: Not supported for thread tabs (returns a clear no-op summary).
+- `buddy-ctl demo --cmd "..."`: Dev server runs in the host terminal (Rex) at the thread worktree path.
 
 ---
 

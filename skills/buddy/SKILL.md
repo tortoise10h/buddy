@@ -254,6 +254,8 @@ When the user confirms the task is accepted and done:
 | `buddy-ctl notify -m "..." [--title "..."]` | Send native macOS desktop notification with sound. |
 | `buddy-ctl diagnose -p <proj> -t <slug>` | Diagnostician: extracts error snippets and recent commands. |
 | `buddy-ctl batch (--json '...' \| --file <path>)` | Batch start multiple tasks across projects. |
+| `buddy-ctl t3 auth login [--no-browser]` | Interactive browser OAuth login for T3 Code MCP relay (30-day token). |
+| `buddy-ctl t3 auth status` | Show T3 Code server and token status. |
 
 ---
 
