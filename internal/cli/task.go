@@ -166,6 +166,11 @@ func newTaskStartCmd() *cobra.Command {
 				return err
 			}
 
+			var initialPrompt any = nil
+			if cmd.Flags().Changed("prompt") {
+				initialPrompt = flagPrompt
+			}
+
 			now := state.NowISO()
 			taskEntry := map[string]any{
 				"task_slug":      taskSlug,
@@ -178,7 +183,7 @@ func newTaskStartCmd() *cobra.Command {
 				"worktree_path":  wtPath,
 				"branch":         branch,
 				"status":         "starting",
-				"initial_prompt": flagPrompt,
+				"initial_prompt": initialPrompt,
 				"last_summary":   "Task started",
 				"created_at":     now,
 				"updated_at":     now,

@@ -142,6 +142,29 @@ func setupTempBuddyEnv(t *testing.T) (tempHome, buddyDir string) {
 	return tempHome, buddyDir
 }
 
+func setupTempBuddyEnvWithGitRepo(t *testing.T) (tempHome, buddyDir, repoPath string) {
+	tempHome, buddyDir = setupTempBuddyEnv(t)
+	projectsDir := filepath.Join(tempHome, "projects")
+	repoPath = filepath.Join(projectsDir, "myrepo")
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", repoPath}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\nOutput: %s", args, err, string(out))
+		}
+	}
+
+	runGit("init")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test User")
+	runGit("commit", "--allow-empty", "-m", "init")
+
+	return tempHome, buddyDir, repoPath
+}
+
 func createStubRex(t *testing.T, logFile string) (stubDir string) {
 	stubDir, err := os.MkdirTemp("", "buddy-parity-stub-*")
 	if err != nil {
@@ -162,22 +185,24 @@ if not args:
 
 cmd = args[0]
 if cmd == "ls":
-    print(json.dumps({"sessions": [{"session_id": "session:rex-docnotate", "label": "docnotate", "cwd": "/tmp/test-docnotate"}]}))
+    print(json.dumps({"sessions": [
+        {"session_id": "session:rex-docnotate", "label": "docnotate", "cwd": "/tmp/test-docnotate"},
+        {"session_id": "session:rex-myrepo", "label": "myrepo", "cwd": "/tmp/test-myrepo"}
+    ]}))
     sys.exit(0)
 
 if cmd == "session" and len(args) > 1 and args[1] == "inspect":
     sess_id = args[2]
-    print(json.dumps({"session_id": sess_id, "label": "docnotate", "cwd": "/tmp/test-docnotate"}))
+    label = sess_id.split(":")[-1]
+    print(json.dumps({"session_id": sess_id, "label": label, "cwd": "/tmp/test"}))
     sys.exit(0)
 
 if cmd == "window":
     sub = args[1]
     if sub == "inspect":
         win_id = args[4] if len(args) > 4 else args[2]
-        if win_id == "window:auth":
-            print(json.dumps({"window_id": win_id, "label": "auth", "block_ids": ["block:auth"]}))
-            sys.exit(0)
-        sys.exit(1)
+        print(json.dumps({"window_id": win_id, "label": "auth", "block_ids": ["block:auth"]}))
+        sys.exit(0)
     if sub == "new":
         task_slug = args[3] if len(args) > 3 else "test-task"
         print(json.dumps({"window_id": "window:dispatched-1", "block_ids": ["block:dispatched-1"], "label": task_slug}))
@@ -213,7 +238,8 @@ if cmd == "-C":
     sys.exit(0)
 
 if cmd == "new":
-    print(json.dumps({"session_id": "session:rex-docnotate", "label": args[1]}))
+    label = args[1] if len(args) > 1 else "default"
+    print(json.dumps({"session_id": f"session:rex-{label}", "label": label}))
     sys.exit(0)
 
 sys.exit(0)
@@ -1183,5 +1209,193 @@ func TestParity_UnknownFlag_ExitCode2(t *testing.T) {
 
 	if !matched {
 		t.Fatalf("unknown flag exit code mismatch: py=%d go=%d", pyCode, goCode)
+	}
+}
+
+func TestParity_Task_Start_Worktree(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+
+	// Run Python task start --worktree
+	tempHomePy, buddyDirPy, repoPy := setupTempBuddyEnvWithGitRepo(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub_rex_py.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	envPy := append(os.Environ(),
+		"HOME="+tempHomePy,
+		"BUDDY_DIR="+buddyDirPy,
+		"PATH="+stubDirPy+":"+os.Getenv("PATH"),
+	)
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy,
+		"task", "start", "-p", "myrepo", "-t", "wt-feat", "--worktree")
+
+	// Run Go task start --worktree
+	tempHomeGo, buddyDirGo, repoGo := setupTempBuddyEnvWithGitRepo(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub_rex_go.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	envGo := append(os.Environ(),
+		"HOME="+tempHomeGo,
+		"BUDDY_DIR="+buddyDirGo,
+		"PATH="+stubDirGo+":"+os.Getenv("PATH"),
+	)
+	goOut, _, goCode := runCLI(goBin, false, "", envGo,
+		"task", "start", "-p", "myrepo", "-t", "wt-feat", "--worktree")
+
+	var pyObj, goObj map[string]any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyTask, _ := pyObj["task"].(map[string]any)
+	goTask, _ := goObj["task"].(map[string]any)
+
+	// Verify Python worktree convention
+	expectedWtSuffix := filepath.Join("projects", "myrepo-wt-wt-feat")
+	pyWt, _ := pyTask["worktree_path"].(string)
+	if !strings.HasSuffix(pyWt, expectedWtSuffix) || pyTask["branch"] != "feat/wt-feat" || pyTask["cwd"] != pyWt {
+		t.Fatalf("python worktree conventions unexpected: %v", pyTask)
+	}
+
+	// Verify Go worktree convention
+	goWt, _ := goTask["worktree_path"].(string)
+	if !strings.HasSuffix(goWt, expectedWtSuffix) || goTask["branch"] != "feat/wt-feat" || goTask["cwd"] != goWt {
+		t.Fatalf("go worktree conventions unexpected: %v", goTask)
+	}
+
+	// Verify real git worktrees were created
+	pyListCmd := exec.Command("git", "-C", repoPy, "worktree", "list")
+	pyListOut, _ := pyListCmd.CombinedOutput()
+	if !strings.Contains(string(pyListOut), "myrepo-wt-wt-feat") {
+		t.Fatalf("git worktree list in python repo does not contain worktree:\n%s", string(pyListOut))
+	}
+
+	goListCmd := exec.Command("git", "-C", repoGo, "worktree", "list")
+	goListOut, _ := goListCmd.CombinedOutput()
+	if !strings.Contains(string(goListOut), "myrepo-wt-wt-feat") {
+		t.Fatalf("git worktree list in go repo does not contain worktree:\n%s", string(goListOut))
+	}
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Task_Start_Worktree", "task start --worktree", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("task start worktree mismatch:\nPy:\n%s\nGo:\n%s\n", pyOut, goOut)
+	}
+}
+
+func TestParity_Task_Start_Worktree_ReuseExistingBranch(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+
+	// Setup Python repo with pre-existing branch
+	tempHomePy, buddyDirPy, repoPy := setupTempBuddyEnvWithGitRepo(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub_rex_py.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	_ = exec.Command("git", "-C", repoPy, "branch", "feat/wt-reuse").Run()
+	envPy := append(os.Environ(),
+		"HOME="+tempHomePy,
+		"BUDDY_DIR="+buddyDirPy,
+		"PATH="+stubDirPy+":"+os.Getenv("PATH"),
+	)
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy,
+		"task", "start", "-p", "myrepo", "-t", "wt-reuse", "--worktree")
+
+	// Setup Go repo with pre-existing branch
+	tempHomeGo, buddyDirGo, repoGo := setupTempBuddyEnvWithGitRepo(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub_rex_go.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	_ = exec.Command("git", "-C", repoGo, "branch", "feat/wt-reuse").Run()
+	envGo := append(os.Environ(),
+		"HOME="+tempHomeGo,
+		"BUDDY_DIR="+buddyDirGo,
+		"PATH="+stubDirGo+":"+os.Getenv("PATH"),
+	)
+	goOut, _, goCode := runCLI(goBin, false, "", envGo,
+		"task", "start", "-p", "myrepo", "-t", "wt-reuse", "--worktree")
+
+	var pyObj, goObj map[string]any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyTask, _ := pyObj["task"].(map[string]any)
+	goTask, _ := goObj["task"].(map[string]any)
+
+	if pyTask["branch"] != "feat/wt-reuse" || goTask["branch"] != "feat/wt-reuse" {
+		t.Fatalf("reused branch mismatch: py=%v go=%v", pyTask["branch"], goTask["branch"])
+	}
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == 0 && goCode == 0 && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Task_Start_Worktree_Reuse", "task start --worktree (reuse)", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("task start reuse branch mismatch:\nPy:\n%s\nGo:\n%s\n", pyOut, goOut)
+	}
+}
+
+func TestParity_Dispatch_Worktree(t *testing.T) {
+	_, pyScript, goBin := getPaths(t)
+
+	// Run Python dispatch --worktree --branch
+	tempHomePy, buddyDirPy, repoPy := setupTempBuddyEnvWithGitRepo(t)
+	stubLogPy := filepath.Join(tempHomePy, "stub_rex_py.log")
+	stubDirPy := createStubRex(t, stubLogPy)
+	envPy := append(os.Environ(),
+		"HOME="+tempHomePy,
+		"BUDDY_DIR="+buddyDirPy,
+		"PATH="+stubDirPy+":"+os.Getenv("PATH"),
+	)
+	pyOut, _, pyCode := runCLI(pyScript, true, "", envPy,
+		"dispatch", "-p", "myrepo", "-m", "worktree prompt", "-t", "wt-disp", "--worktree", "--branch", "custom-branch")
+
+	// Run Go dispatch --worktree --branch
+	tempHomeGo, buddyDirGo, repoGo := setupTempBuddyEnvWithGitRepo(t)
+	stubLogGo := filepath.Join(tempHomeGo, "stub_rex_go.log")
+	stubDirGo := createStubRex(t, stubLogGo)
+	envGo := append(os.Environ(),
+		"HOME="+tempHomeGo,
+		"BUDDY_DIR="+buddyDirGo,
+		"PATH="+stubDirGo+":"+os.Getenv("PATH"),
+	)
+	goOut, _, goCode := runCLI(goBin, false, "", envGo,
+		"dispatch", "-p", "myrepo", "-m", "worktree prompt", "-t", "wt-disp", "--worktree", "--branch", "custom-branch")
+
+	// Read Rex argv logs
+	pyLog, _ := os.ReadFile(stubLogPy)
+	goLog, _ := os.ReadFile(stubLogGo)
+
+	pyNormLog := normalizeText(string(pyLog), tempHomePy)
+	goNormLog := normalizeText(string(goLog), tempHomeGo)
+
+	// Rex window new should be called with -c pointing to the worktree path
+	expectedSubstr := "myrepo-wt-wt-disp"
+	if !strings.Contains(pyNormLog, expectedSubstr) || !strings.Contains(goNormLog, expectedSubstr) {
+		t.Fatalf("rex argv does not spawn in worktree cwd:\nPy Log:\n%s\nGo Log:\n%s\n", pyNormLog, goNormLog)
+	}
+
+	// Verify worktree list shows custom-branch in both repos
+	pyListOut, _ := exec.Command("git", "-C", repoPy, "worktree", "list").CombinedOutput()
+	if !strings.Contains(string(pyListOut), "custom-branch") {
+		t.Fatalf("custom branch not in python worktree list: %s", string(pyListOut))
+	}
+
+	goListOut, _ := exec.Command("git", "-C", repoGo, "worktree", "list").CombinedOutput()
+	if !strings.Contains(string(goListOut), "custom-branch") {
+		t.Fatalf("custom branch not in go worktree list: %s", string(goListOut))
+	}
+
+	var pyObj, goObj any
+	_ = json.Unmarshal([]byte(pyOut), &pyObj)
+	_ = json.Unmarshal([]byte(goOut), &goObj)
+
+	pyNorm := normalizeJSON(pyObj, tempHomePy)
+	goNorm := normalizeJSON(goObj, tempHomeGo)
+
+	matched := (pyCode == goCode && reflect.DeepEqual(pyNorm, goNorm))
+	recordResult("Dispatch_Worktree", "dispatch --worktree", pyCode, goCode, matched, "")
+
+	if !matched {
+		t.Fatalf("dispatch worktree mismatch:\nPy:\n%s\nGo:\n%s\n", pyOut, goOut)
 	}
 }
