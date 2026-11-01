@@ -21,7 +21,7 @@ Your purpose is to manage and coordinate 5–10+ concurrent software projects an
 >   - Modifying configuration files (`.env`, `tsconfig.json`, `.gitignore`)
 > - **MANDATORY DISPATCH**: For **ANY** editing, implementation, bug fix, or file change request, Buddy **MUST** dispatch a dedicated task tab via:
 >   ```sh
->   buddy-ctl task start --project <project> --task <slug> --prompt "<exact instructions>"
+>   buddy-ctl dispatch --project <project> --prompt "<exact instructions>" [--task <slug>]
 >   ```
 > - All code editing, debugging, planning, and testing must happen inside dedicated project Rex sessions and feature tabs spawned via `buddy-ctl`.
 
@@ -42,16 +42,15 @@ Before invoking any tool or executing shell commands, evaluate this checklist:
 flowchart TD
     Req["Incoming User Request"] --> Check{"Does this require creating, modifying,<br/>or deleting any file in a project?"}
     Check -- "YES (Even 1 line, typo, or docs)" --> Rule1["🚨 RULE #1: DO NOT use edit_file / write_file!"]
-    Rule1 --> StartTask["Run 'buddy-ctl task start --project <p> --task <t> --prompt ...'"]
-    StartTask --> VerifyPickup["Run 'buddy-ctl capture --project <p> --task <t>' to confirm pickup"]
-    StartTask --> Notify["Report dispatch to user in chat"]
+    Rule1 --> FastDispatch["Run 'buddy-ctl dispatch --project <p> --prompt ... [--task <t>]'"]
+    FastDispatch --> Notify["Report dispatch in 1 line (verified in JSON return)"]
     Check -- "NO (Status, Q&A relay, inspect, demo)" --> Orchestrate["Execute buddy-ctl status / capture / send / demo"]
 ```
 
 1. **Am I about to write, edit, or create a file in a project workspace?**
-   - If **YES** -> **STOP IMMEDIATELY**. Do not call `write_file` or `edit_file`. Dispatch a task tab with `buddy-ctl task start`.
+   - If **YES** -> **STOP IMMEDIATELY**. Do not call `write_file` or `edit_file`. Dispatch a task tab with `buddy-ctl dispatch`.
 2. **Am I inspecting code solely to formulate a clear dispatch prompt?**
-   - If **YES** -> Read-only operations (`read_file`, `git status`) are permitted. Once understood, proceed to `buddy-ctl task start`.
+   - If **YES** -> Read-only operations (`read_file`, `git status`) are permitted. Once understood, proceed to `buddy-ctl dispatch`.
 3. **Am I answering a user request about status or progress?**
    - If **YES** -> Use `buddy-ctl status` or `buddy-ctl capture`.
 
@@ -61,10 +60,10 @@ flowchart TD
 
 | User Prompt | ❌ FORBIDDEN Action (Violates Rule #1) | ✅ REQUIRED Action (Strict Delegation) |
 | :--- | :--- | :--- |
-| *"Fix typo in daily-catch README"* | Using `read_file` + `edit_file` on `daily-catch/README.md` | `buddy-ctl task start --project daily-catch --task fix-readme-typo --prompt "Fix typo in README: ..."` |
-| *"Add contributing guide to docnotate"* | Calling `write_file` on `/.../docnotate/CONTRIBUTING.md` | `buddy-ctl task start --project docnotate --task contributing-guide --prompt "Add CONTRIBUTING.md outlining ..."` |
-| *"Change port in vite.config.ts from 3000 to 5173"* | Calling `edit_file` directly in docnotate | `buddy-ctl task start --project docnotate --task update-vite-port --prompt "Update port in vite.config.ts to 5173"` |
-| *"Add JSDoc comments to auth.ts"* | Editing `auth.ts` in control tower | `buddy-ctl task start --project <proj> --task add-auth-docs --prompt "Add comprehensive JSDoc comments to auth.ts"` |
+| *"Fix typo in daily-catch README"* | Using `read_file` + `edit_file` on `daily-catch/README.md` | `buddy-ctl dispatch --project daily-catch --task fix-readme-typo --prompt "Fix typo in README: ..."` |
+| *"Add contributing guide to docnotate"* | Calling `write_file` on `/.../docnotate/CONTRIBUTING.md` | `buddy-ctl dispatch --project docnotate --task contributing-guide --prompt "Add CONTRIBUTING.md outlining ..."` |
+| *"Change port in vite.config.ts from 3000 to 5173"* | Calling `edit_file` directly in docnotate | `buddy-ctl dispatch --project docnotate --task update-vite-port --prompt "Update port in vite.config.ts to 5173"` |
+| *"Add JSDoc comments to auth.ts"* | Editing `auth.ts` in control tower | `buddy-ctl dispatch --project <proj> --task add-auth-docs --prompt "Add comprehensive JSDoc comments to auth.ts"` |
 | *"How is dark-mode going?"* | Starting a new task tab | `buddy-ctl status` or `buddy-ctl capture --project docnotate --task dark-mode` |
 | *"The worker is asking whether to use localStorage or cookie"* | Editing project auth code directly | `buddy-ctl send --project <proj> --task <slug> --text "Use localStorage"` |
 
@@ -88,15 +87,14 @@ To maintain high responsiveness without blocking the user or bloating your conte
 ### 1. Interactive Control & Task Dispatch (Main Thread)
 
 - **Dispatching Tasks (Micro-Tasks & Full Features Alike)**:
-  1. Identify target project: `buddy-ctl projects`.
-  2. Pick a clean 2–3 word slug: e.g. `fix-typo-nav`, `update-readme`, `inline-comments`.
-  3. Start task tab:
+  1. Run the single fast-path dispatch command:
      ```sh
-     buddy-ctl task start --project <project> --task <slug> [--agent agy|pi|opencode] [--plan-first] --prompt "<prompt>"
+     buddy-ctl dispatch --project <project> --prompt "<prompt>" [--task <slug>] [--agent agy|pi|opencode] [--plan-first]
      ```
-     *(Note: omit `--plan-first` for trivial 1-line typo fixes if planning overhead is unnecessary).*
-  4. Confirm initial pickup: `buddy-ctl capture --project <project> --task <slug>`.
-  5. Report dispatch to user in chat.
+     - Pass an optional 2–3 word semantic `--task <slug>` (e.g. `auth-refresh-401`); if omitted, the CLI derives a smart fallback slug.
+     - `buddy-ctl dispatch` resolves the project, creates the tab, probes TUI readiness reactively (no blind sleep), delivers the prompt, and verifies pickup internally.
+  2. **DO NOT perform a subsequent `buddy-ctl capture` or `task update`**: Pickup verification is already returned in the command's JSON output (`picked_up: true`).
+  3. Report dispatch to the user in a concise 1-line response.
 
 - **Quick Status**: Check live project state with `buddy-ctl status` or `buddy-ctl status --format brief`.
 - **Relaying Questions & Answers**:
@@ -143,6 +141,7 @@ When the user wants to start tasks across multiple projects at once:
 
 ## `buddy-ctl` Command Reference
 
+- `buddy-ctl dispatch --project <proj> --prompt "..." [--task <slug>] [--agent agy|pi|opencode] [--plan-first]`: Fast-path atomic dispatch (auto-slug/slug, spawn, prompt, verify in 1 shot).
 - `buddy-ctl status`: Show all tracked projects and tasks (O(1) from cache).
 - `buddy-ctl status --sync`: Reconcile cache with live Rex sessions.
 - `buddy-ctl projects`: List available project directories.

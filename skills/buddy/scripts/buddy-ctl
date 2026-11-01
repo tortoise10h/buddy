@@ -5,6 +5,7 @@ buddy-ctl — Command-line controller for Buddy, the multi-project Rex terminal 
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -608,6 +609,347 @@ def cmd_ensure_session(args: argparse.Namespace) -> None:
     }, indent=2))
 
 
+# --- Fast-Path Dispatch Helpers ---
+
+SLUG_STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+    "aren't", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
+    "but", "by", "can't", "cannot", "could", "couldn't", "did", "didn't", "do", "does", "doesn't",
+    "doing", "don't", "down", "during", "each", "few", "for", "from", "further", "had", "hadn't",
+    "has", "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here",
+    "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll",
+    "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's",
+    "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off", "on",
+    "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out", "over", "own",
+    "same", "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't", "so", "some",
+    "such", "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then",
+    "there", "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this",
+    "those", "through", "to", "too", "under", "until", "up", "very", "was", "wasn't", "we",
+    "we'd", "we'll", "we're", "we've", "were", "weren't", "what", "what's", "when", "when's",
+    "where", "where's", "which", "while", "who", "who's", "whom", "why", "why's", "with",
+    "won't", "would", "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your",
+    "yours", "yourself", "yourselves", "please", "can", "could", "would", "look", "take",
+    "hey", "buddy", "make", "sure", "want", "need", "go", "ahead", "help"
+}
+
+CONVERSATIONAL_PREFIX_RE = re.compile(
+    r"^(?:in\s+[\w-]+\s*,?\s*)?"
+    r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?|"
+    r"please\s+|"
+    r"let'?s\s+|"
+    r"help\s+me\s+|"
+    r"i\s+(?:want|need)\s+to\s+|"
+    r"we\s+need\s+to\s+|"
+    r"go\s+ahead\s+and\s+|"
+    r"take\s+a\s+look\s+at\s+(?:the\s+)?(?:and\s+)?|"
+    r"check\s+(?:out\s+)?(?:the\s+)?|"
+    r"hey\s+buddy\s*,?\s*)+",
+    re.IGNORECASE
+)
+
+
+def derive_task_slug(prompt: str, project_name: str = "") -> str:
+    """Fallback slug derivation when --task is omitted:
+    1. Strip conversational preambles
+    2. Extract first 2-3 meaningful words
+    3. Sanitize to [a-z0-9-], cap at 24 chars, append 4-char hex hash
+    4. Fall back to <project>-task-<short-hash> as last resort
+    """
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:4]
+
+    cleaned = prompt.strip()
+    while True:
+        m = CONVERSATIONAL_PREFIX_RE.match(cleaned)
+        if m:
+            cleaned = cleaned[m.end():].strip()
+        else:
+            break
+
+    words = [
+        w for w in re.findall(r"[a-zA-Z0-9]+", cleaned.lower())
+        if w not in SLUG_STOP_WORDS and len(w) > 1
+    ]
+
+    base = "-".join(words[:3]) if words else ""
+    base = re.sub(r"[^a-z0-9-]+", "-", base).strip("-")
+    if base:
+        base = base[:24].rstrip("-")
+        return f"{base}-{prompt_hash}"
+
+    proj_slug = re.sub(r"[^a-z0-9-]+", "-", (project_name or "proj").lower()).strip("-")
+    return f"{proj_slug}-task-{prompt_hash}"
+
+
+def ensure_project_session(project_name: str, project_path: str, state: dict) -> str:
+    """Ensure a Rex session exists for the project and return sess_id."""
+    if project_name in state.get("projects", {}) and state["projects"][project_name].get("rex_session_id"):
+        sess_id = state["projects"][project_name]["rex_session_id"]
+        res_chk = run_rex(["session", "inspect", sess_id, "--json"], timeout=3.0, check=False)
+        if res_chk.returncode == 0:
+            return sess_id
+
+    res = run_rex(["ls", "--json"], timeout=5.0, check=False)
+    sess_id = None
+    if res.returncode == 0:
+        for s in json.loads(res.stdout).get("sessions", []):
+            if s.get("label", "").lower() == project_name.lower():
+                sess_id = s.get("session_id")
+                break
+
+    if not sess_id:
+        res_new = run_rex(["new", project_name, "-c", project_path, "--window", "shell", "--json"])
+        sess_id = json.loads(res_new.stdout).get("session_id")
+
+    if project_name not in state["projects"]:
+        state["projects"][project_name] = {
+            "name": project_name,
+            "project_path": project_path,
+            "rex_session_id": sess_id,
+            "rex_session_label": project_name,
+            "tasks": {}
+        }
+    else:
+        state["projects"][project_name]["rex_session_id"] = sess_id
+    save_state(state)
+    return sess_id
+
+
+def probe_tui_readiness(sess_id: str, block_id: str, max_timeout: float = 3.0, poll_interval: float = 0.1) -> bool:
+    """Polls Rex block output until the agent TUI signals it is ready to receive input,
+    avoiding the blind sleep race.
+    """
+    readiness_indicators = [
+        "? for shortcuts",
+        "auto ·",
+        "Ask anything",
+        "Type a message",
+        "Gemini",
+        "OpenCode",
+        "Anthropic",
+        "Claude",
+    ]
+    prompt_line_re = re.compile(r"^[>❯]\s*$", re.MULTILINE)
+
+    start = time.time()
+    while time.time() - start < max_timeout:
+        res = run_rex(["capture", "-s", sess_id, "-b", block_id, "--trim", "--unwrap"], timeout=2.0, check=False)
+        if res.returncode == 0 and res.stdout:
+            out = res.stdout
+            if any(ind in out for ind in readiness_indicators) or prompt_line_re.search(out):
+                time.sleep(0.1)
+                return True
+        time.sleep(poll_interval)
+    return False
+
+
+def verify_block_pickup(sess_id: str, block_id: str, prompt_snippet: str, max_timeout: float = 1.8, poll_interval: float = 0.15) -> tuple[bool, str]:
+    """Verifies that the agent block picked up the prompt, returning (picked_up, preview_summary)."""
+    activity_indicators = [
+        "thinking",
+        "thought",
+        "explor",
+        "analyz",
+        "read",
+        "edit",
+        "ran ",
+        "●",
+        "○",
+        "▸",
+        "task complete"
+    ]
+    activity_re = re.compile("|".join(activity_indicators), re.IGNORECASE)
+
+    start = time.time()
+    last_preview = ""
+    clean_snippet = prompt_snippet.strip().lower()[:30]
+
+    while time.time() - start < max_timeout:
+        res = run_rex(["capture", "-s", sess_id, "-b", block_id, "--trim", "--unwrap"], timeout=2.0, check=False)
+        if res.returncode == 0 and res.stdout:
+            lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+            if lines:
+                last_preview = lines[-1] if len(lines) == 1 else f"{lines[-2]} | {lines[-1]}"
+            out_lower = res.stdout.lower()
+            if (clean_snippet and clean_snippet in out_lower) or activity_re.search(res.stdout):
+                return True, last_preview[:120]
+        time.sleep(poll_interval)
+
+    return False, (last_preview[:120] if last_preview else "Prompt dispatched (verification pending)")
+
+
+def send_prompt_smart(
+    sess_id: str,
+    block_id: str,
+    prompt_text: str,
+    agent_name: str = "agy",
+    submit_key: str = "enter",
+    submit_delay_ms: int = 1500
+) -> tuple[bool, str]:
+    """Delivers a prompt with reactive TUI readiness probing and pickup verification."""
+    ready = probe_tui_readiness(sess_id, block_id, max_timeout=max(3.0, submit_delay_ms / 1000.0 + 1.0))
+    if not ready:
+        time.sleep(min(1.0, submit_delay_ms / 1000.0))
+
+    run_rex(["send", "-s", sess_id, "-b", block_id, prompt_text], timeout=5.0)
+    run_rex(["send-key", "-s", sess_id, "-b", block_id, submit_key], timeout=5.0)
+
+    prompt_start = prompt_text.splitlines()[0] if prompt_text else ""
+    picked_up, preview = verify_block_pickup(sess_id, block_id, prompt_start, max_timeout=1.8)
+    return picked_up, preview
+
+
+def cmd_dispatch(args: argparse.Namespace) -> None:
+    """Fast-path atomic dispatch:
+    Resolves project, determines slug (explicit primary, smart fallback),
+    spawns Rex window, delivers prompt via reactive TUI probing,
+    and verifies pickup internally in 1 shot.
+    """
+    cfg = load_config()
+    state = load_state()
+
+    if not args.prompt:
+        print(json.dumps({"error": "Missing required --prompt argument"}, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    project_name, project_path = resolve_project(args.project, cfg)
+
+    # Slugging strategy: explicit primary, smart fallback
+    if getattr(args, "task", None) and args.task.strip():
+        raw_slug = args.task.strip()
+        task_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw_slug).strip("-").lower()
+    else:
+        task_slug = derive_task_slug(args.prompt, project_name)
+
+    # Ensure project session exists
+    sess_id = ensure_project_session(project_name, project_path, state)
+
+    # Agent selection
+    agent_name = args.agent or cfg.get("default_agent", "agy")
+    agent_info = cfg.get("agents", {}).get(agent_name, {
+        "command": [agent_name],
+        "submit_delay_ms": 1500,
+        "submit_key": "enter"
+    })
+    agent_cmd = agent_info.get("command", [agent_name])
+    submit_delay_ms = agent_info.get("submit_delay_ms", 1500)
+    submit_key = agent_info.get("submit_key", "enter")
+
+    # CWD & worktree handling
+    use_wt = args.worktree or cfg.get("use_worktree_by_default", False)
+    cwd = project_path
+    wt_path = None
+    branch = args.branch
+
+    if use_wt:
+        parent_dir = Path(project_path).parent
+        wt_path = str(parent_dir / f"{Path(project_path).name}-wt-{task_slug}")
+        if not branch:
+            branch = f"feat/{task_slug}"
+        if not os.path.exists(wt_path):
+            try:
+                subprocess.run(
+                    ["git", "-C", project_path, "worktree", "add", "-b", branch, wt_path],
+                    capture_output=True, text=True, check=True
+                )
+            except subprocess.CalledProcessError:
+                subprocess.run(
+                    ["git", "-C", project_path, "worktree", "add", wt_path, branch],
+                    capture_output=True, text=True, check=False
+                )
+        cwd = wt_path
+
+    # Check if task already exists and is live
+    proj_tasks = state["projects"][project_name].setdefault("tasks", {})
+    if task_slug in proj_tasks:
+        existing = proj_tasks[task_slug]
+        w_id = existing.get("window_id")
+        if w_id:
+            check_w = run_rex(["window", "inspect", "-s", sess_id, w_id, "--json"], timeout=5.0, check=False)
+            if check_w.returncode == 0:
+                print(json.dumps({
+                    "status": "already_running",
+                    "project": project_name,
+                    "task": task_slug,
+                    "window_id": w_id,
+                    "agent_block_id": existing.get("agent_block_id")
+                }, indent=2))
+                return
+
+    # Create new window in Rex
+    new_win_cmd = [
+        "window", "new",
+        "-s", sess_id,
+        task_slug,
+        "-c", cwd,
+        "--keep-open",
+        "--focus=false",
+        "--json",
+        "--"
+    ] + agent_cmd
+
+    res_win = run_rex(new_win_cmd, timeout=10.0)
+    win_data = json.loads(res_win.stdout)
+    window_id = win_data.get("window_id")
+    block_ids = win_data.get("block_ids", [])
+    agent_block_id = block_ids[0] if block_ids else None
+
+    task_entry = {
+        "task_slug": task_slug,
+        "window_id": window_id,
+        "window_label": task_slug,
+        "agent_block_id": agent_block_id,
+        "dev_block_id": None,
+        "agent": agent_name,
+        "cwd": cwd,
+        "worktree_path": wt_path,
+        "branch": branch,
+        "status": "starting",
+        "initial_prompt": args.prompt,
+        "last_summary": "Task dispatched",
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    }
+    proj_tasks[task_slug] = task_entry
+    save_state(state)
+
+    picked_up = False
+    preview = ""
+    if agent_block_id:
+        if args.plan_first:
+            prompt_text = (
+                f"Please inspect the codebase and create a detailed implementation plan for the following task. "
+                f"Before writing any code, outline your plan and list any clarifying questions or trade-offs for the user.\n\n"
+                f"Task: {args.prompt}"
+            )
+        else:
+            prompt_text = args.prompt
+
+        picked_up, preview = send_prompt_smart(
+            sess_id=sess_id,
+            block_id=agent_block_id,
+            prompt_text=prompt_text,
+            agent_name=agent_name,
+            submit_key=submit_key,
+            submit_delay_ms=submit_delay_ms
+        )
+
+        task_entry["status"] = "planning" if args.plan_first else "running"
+        task_entry["last_summary"] = preview if preview else "Prompt delivered"
+        task_entry["updated_at"] = now_iso()
+        save_state(state)
+
+    print(json.dumps({
+        "status": "dispatched",
+        "project": project_name,
+        "task": task_slug,
+        "picked_up": picked_up,
+        "preview": preview,
+        "window_id": window_id,
+        "agent_block_id": agent_block_id,
+        "agent": agent_name
+    }, indent=2))
+
+
 def cmd_task_start(args: argparse.Namespace) -> None:
     cfg = load_config()
     state = load_state()
@@ -746,15 +1088,17 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         else:
             prompt_text = args.prompt
 
-        # Delay to allow TUI agent to initialize
-        time.sleep(submit_delay_ms / 1000.0)
-
-        # Send prompt
-        run_rex(["send", "-s", sess_id, "-b", agent_block_id, prompt_text], timeout=5.0)
-        run_rex(["send-key", "-s", sess_id, "-b", agent_block_id, submit_key], timeout=5.0)
+        picked_up, preview = send_prompt_smart(
+            sess_id=sess_id,
+            block_id=agent_block_id,
+            prompt_text=prompt_text,
+            agent_name=agent_name,
+            submit_key=submit_key,
+            submit_delay_ms=submit_delay_ms
+        )
 
         task_entry["status"] = "planning" if args.plan_first else "running"
-        task_entry["last_summary"] = "Initial prompt sent to worker agent"
+        task_entry["last_summary"] = preview if preview else "Initial prompt sent to worker agent"
         task_entry["updated_at"] = now_iso()
         save_state(state)
 
@@ -1808,7 +2152,7 @@ def cmd_context_inject(args: argparse.Namespace) -> None:
             f"[Buddy Live State] Default agent: {default_agent} | "
             f"Active projects: {len(active_projects)} | Tasks: {tasks_str}. "
             f"🚨 ZERO-TOLERANCE GUARDRAIL (RULE #1): NEVER edit project files, docs, or code in this session. "
-            f"Even for minor edits, typos, or READMEs, ALWAYS dispatch a task tab via 'buddy-ctl task start'."
+            f"Even for minor edits, typos, or READMEs, ALWAYS dispatch a task tab via 'buddy-ctl dispatch'."
             f"{nudge_banner}"
         )
 
@@ -1850,6 +2194,16 @@ def build_parser() -> argparse.ArgumentParser:
     # ensure-session
     p_ens = subparsers.add_parser("ensure-session", help="Ensure a Rex session exists for a project")
     p_ens.add_argument("--project", "-p", required=True, help="Project name or directory path")
+
+    # dispatch (fast-path atomic task dispatch)
+    p_disp = subparsers.add_parser("dispatch", help="Fast-path atomic task dispatch: auto-slugs/uses slug, spawns, delivers prompt reactively, and verifies pickup in 1 shot")
+    p_disp.add_argument("--project", "-p", required=True, help="Project name or directory path")
+    p_disp.add_argument("--prompt", "-m", required=True, help="Task prompt to execute")
+    p_disp.add_argument("--task", "-t", help="Task slug (optional: caller-supplied 2-3 word slug is primary, smart fallback derived if omitted)")
+    p_disp.add_argument("--agent", "-a", help="Agent CLI to launch (agy, pi, opencode; default: config.default_agent)")
+    p_disp.add_argument("--plan-first", action="store_true", help="Wrap prompt to instruct worker agent to plan first")
+    p_disp.add_argument("--worktree", action="store_true", help="Create an isolated git worktree")
+    p_disp.add_argument("--branch", "-b", help="Branch name for worktree")
 
     # task start
     p_ts = subparsers.add_parser("task", help="Task management")
@@ -1961,6 +2315,7 @@ def main() -> None:
         "config": cmd_config,
         "projects": cmd_projects,
         "ensure-session": cmd_ensure_session,
+        "dispatch": cmd_dispatch,
         "capture": cmd_capture,
         "send": cmd_send,
         "demo": cmd_demo,

@@ -136,6 +136,9 @@ buddy-ctl status --sync
 # List available projects under ~/Dev/Personal/Projects
 buddy-ctl projects
 
+# Fast-path atomic dispatch (auto-slug, spawn, prompt, verify in 1 shot)
+buddy-ctl dispatch --project docnotate --prompt "Add shortcut to resolve comments" [--task inline-comments]
+
 # Start a new task tab with worker agent (agy by default)
 buddy-ctl task start --project docnotate --task inline-comments --plan-first --prompt "Add shortcut to resolve comments"
 
