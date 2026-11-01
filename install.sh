@@ -221,7 +221,125 @@ for r in "${COLLECTED_ROOTS[@]}"; do
     echo "  • $r"
 done
 
-# 5. Initialize ~/.buddy Control Tower & symlink workspace rules
+# 5. Agent selection configuration
+echo ""
+echo "Configuring Buddy agents..."
+
+AVAILABLE_AGENTS=()
+AGENT_SUMMARIES=()
+
+AGENTS_RAW=$(python3 "$LOCAL_BIN/buddy-ctl" config get agents 2>/dev/null || true)
+while IFS=$'\t' read -r a_name a_cmd; do
+    if [ -n "$a_name" ]; then
+        AVAILABLE_AGENTS+=("$a_name")
+        AGENT_SUMMARIES+=("$a_cmd")
+    fi
+done < <(python3 -c '
+import json, sys
+try:
+    raw = sys.stdin.read()
+    data = json.loads(raw).get("value", {})
+    for k in sorted(data.keys()):
+        cmd = data[k].get("command", [k])
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        print(f"{k}\t{cmd_str}")
+except Exception:
+    pass
+' <<< "$AGENTS_RAW" 2>/dev/null || true)
+
+# Fallback if discovery returned nothing
+if [ ${#AVAILABLE_AGENTS[@]} -eq 0 ]; then
+    AVAILABLE_AGENTS=("agy" "agy-argon" "agy-flash" "opencode" "opencode-flash" "pi")
+    AGENT_SUMMARIES=("agy" "agy --model gemini-4-argon-high" "agy --model gemini-3.8-flash-medium" "opencode" "opencode" "pi")
+fi
+
+# Detect existing configured agents to preserve choices on re-install
+EXISTING_ORCH=""
+EXISTING_WORKER=""
+if [ -f "$CONFIG_FILE" ]; then
+    EXISTING_AGENTS_RAW=$(python3 -c "
+import json
+try:
+    with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    legacy = cfg.get('default_agent')
+    orch = cfg.get('orchestrator_agent') or legacy or ''
+    worker = cfg.get('worker_agent') or legacy or ''
+    print(f'{orch}\t{worker}')
+except Exception:
+    pass
+" 2>/dev/null || true)
+    if [ -n "$EXISTING_AGENTS_RAW" ]; then
+        EXISTING_ORCH="$(echo "$EXISTING_AGENTS_RAW" | cut -f1)"
+        EXISTING_WORKER="$(echo "$EXISTING_AGENTS_RAW" | cut -f2)"
+    fi
+fi
+
+DEFAULT_ORCH="${EXISTING_ORCH:-agy}"
+DEFAULT_WORKER="${EXISTING_WORKER:-agy}"
+
+is_valid_agent() {
+    local target="$1"
+    for a in "${AVAILABLE_AGENTS[@]}"; do
+        if [ "$a" = "$target" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+CHOSEN_ORCH=""
+CHOSEN_WORKER=""
+
+if [ "$IS_NONINTERACTIVE" -eq 1 ]; then
+    if [ -n "${BUDDY_ORCHESTRATOR_AGENT:-}" ]; then
+        CHOSEN_ORCH="$BUDDY_ORCHESTRATOR_AGENT"
+    else
+        CHOSEN_ORCH="$DEFAULT_ORCH"
+    fi
+
+    if [ -n "${BUDDY_WORKER_AGENT:-}" ]; then
+        CHOSEN_WORKER="$BUDDY_WORKER_AGENT"
+    else
+        CHOSEN_WORKER="$DEFAULT_WORKER"
+    fi
+else
+    echo "Available agents:"
+    for i in "${!AVAILABLE_AGENTS[@]}"; do
+        echo "  • ${AVAILABLE_AGENTS[$i]}: ${AGENT_SUMMARIES[$i]}"
+    done
+    echo ""
+
+    # Orchestrator prompt
+    while true; do
+        read -r -p "Orchestrator agent (runs Buddy control tower) [$DEFAULT_ORCH]: " input_orch
+        input_orch="${input_orch:-$DEFAULT_ORCH}"
+        input_orch="$(echo "$input_orch" | tr -d '[:space:]')"
+        if is_valid_agent "$input_orch"; then
+            CHOSEN_ORCH="$input_orch"
+            break
+        fi
+        echo "✖ Unknown agent '$input_orch'. Please choose from: $(IFS=', '; echo "${AVAILABLE_AGENTS[*]}")"
+    done
+
+    # Worker prompt
+    while true; do
+        read -r -p "Worker agent (default for new task tabs) [$DEFAULT_WORKER]: " input_worker
+        input_worker="${input_worker:-$DEFAULT_WORKER}"
+        input_worker="$(echo "$input_worker" | tr -d '[:space:]')"
+        if is_valid_agent "$input_worker"; then
+            CHOSEN_WORKER="$input_worker"
+            break
+        fi
+        echo "✖ Unknown agent '$input_worker'. Please choose from: $(IFS=', '; echo "${AVAILABLE_AGENTS[*]}")"
+    done
+fi
+
+echo "✔ Agents configured:"
+echo "  • Orchestrator: $CHOSEN_ORCH"
+echo "  • Worker: $CHOSEN_WORKER"
+
+# 6. Initialize ~/.buddy Control Tower & symlink workspace rules
 echo "Initializing ~/.buddy Control Tower..."
 mkdir -p "$HOME/.buddy/.agents"
 ln -sf "$REPO_DIR/AGENTS.md" "$HOME/.buddy/AGENTS.md"
@@ -233,6 +351,7 @@ INIT_ARGS=()
 for r in "${COLLECTED_ROOTS[@]}"; do
     INIT_ARGS+=(--projects-root "$r")
 done
+INIT_ARGS+=(--orchestrator-agent "$CHOSEN_ORCH" --worker-agent "$CHOSEN_WORKER")
 
 python3 "$LOCAL_BIN/buddy-ctl" init "${INIT_ARGS[@]}"
 
