@@ -95,37 +95,89 @@ Buddy solves the 3 core multi-project orchestration challenges:
 
 ---
 
-## Installation
+## Prerequisites
 
-Clone and run the installer:
+| Requirement | Purpose | Notes |
+| :--- | :--- | :--- |
+| **macOS** | Host Operating System | macOS 12+ (Apple Silicon or Intel). Linux supported for CLI operations; Rex terminal multiplexer is currently macOS-native. |
+| **Rex** | Terminal Multiplexer & GUI Server | Required for multi-session and multi-window tab management. |
+| **Agent CLI** | AI Agent Harness | At least one supported agent installed (`agy`, `opencode`, `pi`, `claude`, etc.). |
+| **Git** | Version Control & Worktrees | Required for repository tracking and isolated task worktrees. |
+
+---
+
+## Installing
+
+### One-liner (recommended for prebuilt release)
+
+Download and install the prebuilt binary and agent integrations directly from GitHub Releases:
 
 ```sh
-cd /Users/sunday/Dev/Personal/Projects/buddy
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/tortoise10h/buddy/main/install.sh | bash
 ```
 
-During installation, Buddy prompts you for:
-1. **Project root directories** where your repositories live (e.g. `~/Dev/Personal/Projects`, `~/Dev/Work/repos`, `~/Code/oss`):
-   - Hit **Enter** to accept the default (`~/Dev/Personal/Projects`).
-   - Enter multiple paths separated by commas or spaces, or add more iteratively when prompted.
-   - Non-existent directories are validated with an option to auto-create them.
-2. **Orchestrator and Worker agent harnesses**:
-   - Buddy dynamically discovers installed agent harnesses from `agents` (e.g. `agy`, `opencode`, `pi`) and prompts you to select the harness for each role. Each harness starts with that agent's own default model.
-   - Hit **Enter** to accept the default (`agy`, or previously configured values on re-install).
-   - Unknown harness names are validated with re-prompting.
+Custom installation flags:
+```sh
+# Specify a version, custom install prefix, or custom binary name
+curl -fsSL https://raw.githubusercontent.com/tortoise10h/buddy/main/install.sh | bash -s -- --version v1.0.0 --prefix ~/.local/bin --name buddy-ctl
+```
 
-- Re-running `install.sh` on an existing installation automatically detects and preserves your configured roots and agent choices.
-- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` (and optionally `BUDDY_PROJECTS_ROOTS="dir1:dir2"`, `BUDDY_ORCHESTRATOR_AGENT="opencode"`, `BUDDY_WORKER_AGENT="agy"`).
+### Homebrew
 
-This:
-1. Links `bin/buddy` and `buddy-ctl` -> `~/.local/bin/`
-2. Links `skills/buddy` into:
-   - `~/.agents/skills/buddy`
-   - `~/.gemini/config/skills/buddy`
-   - `~/.gemini/antigravity-cli/skills/buddy`
-   - `~/.pi/agent/skills/buddy`
-   - `~/.config/opencode/skills/buddy`
-3. Initializes `~/.buddy/` (`config.json`, `state.json`, `AGENTS.md`, `.agents/hooks.json`) with your configured project roots and agent roles.
+> *Coming soon (`brew install tortoise10h/tap/buddy`).*
+
+### Go Install
+
+Install the Go binary directly using the Go toolchain:
+
+```sh
+go install github.com/tortoise10h/buddy/cmd/buddy-ctl@latest
+```
+
+### From Source
+
+Clone the repository and run the installer:
+
+```sh
+git clone https://github.com/tortoise10h/buddy.git
+cd buddy
+./install.sh --from-source
+```
+
+Or build manually via Makefile:
+```sh
+make build
+make install PREFIX=~/.local/bin INSTALL_NAME=buddy-ctl-go
+```
+
+> [!NOTE]
+> **Maintainer / Migration Note**: The Python `buddy-ctl` remains the live production CLI on the maintainer's machine until the final cutover phase. When installing locally on maintainer machines, `make install` defaults to `buddy-ctl-go` so it never shadows the existing Python CLI.
+
+---
+
+## Troubleshooting
+
+- **`rex: command not found`**:
+  Buddy talks to the Rex terminal server. Ensure Rex Server is running and the `rex` CLI is accessible on your `PATH`. Rex typically installs its CLI helper at:
+  `/Users/<user>/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex`
+- **`PATH` Issues (`buddy` or `buddy-ctl: command not found`)**:
+  Default installations place binaries in `~/.local/bin`. Ensure this directory is in your `$PATH`. Add to your shell profile (`~/.zshrc` or `~/.bashrc`):
+  ```sh
+  export PATH="$HOME/.local/bin:$PATH"
+  ```
+- **macOS Gatekeeper Quarantine**:
+  If macOS prevents running downloaded binaries with an untrusted developer warning, clear the quarantine attribute:
+  ```sh
+  xattr -d com.apple.quarantine ~/.local/bin/buddy-ctl
+  codesign --force -s - ~/.local/bin/buddy-ctl
+  ```
+  *(The `install.sh` script performs this automatically during download mode).*
+- **Agent Authentication**:
+  Buddy launches your chosen orchestrator agent (e.g. `agy`, `pi`, `opencode`) inside Rex. Verify that your agent harness is authenticated and can execute a prompt in a normal terminal before launching Buddy.
+
+---
+
+## Installation (Interactive Setup Details)
 
 ---
 
