@@ -1700,6 +1700,20 @@ def send_prompt_smart(
     return picked_up, preview
 
 
+def resolve_rex_agent_command(agent_spec: str | None, cfg: dict) -> tuple[str, list[str], int, str]:
+    """Resolves agent name, command array, submit_delay_ms, and submit_key for Rex execution."""
+    agent_name = agent_spec or cfg.get("default_agent", "agy")
+    agent_info = cfg.get("agents", {}).get(agent_name, {
+        "command": [agent_name],
+        "submit_delay_ms": 1500,
+        "submit_key": "enter"
+    })
+    agent_cmd = agent_info.get("command", [agent_name])
+    submit_delay_ms = agent_info.get("submit_delay_ms", 1500)
+    submit_key = agent_info.get("submit_key", "enter")
+    return agent_name, agent_cmd, submit_delay_ms, submit_key
+
+
 def cmd_dispatch(args: argparse.Namespace) -> None:
     """Fast-path atomic dispatch:
     Resolves project, determines slug (explicit primary, smart fallback),
@@ -1746,15 +1760,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     sess_id = ensure_project_session(project_name, project_path, state)
 
     # Agent selection
-    agent_name = args.agent or cfg.get("default_agent", "agy")
-    agent_info = cfg.get("agents", {}).get(agent_name, {
-        "command": [agent_name],
-        "submit_delay_ms": 1500,
-        "submit_key": "enter"
-    })
-    agent_cmd = agent_info.get("command", [agent_name])
-    submit_delay_ms = agent_info.get("submit_delay_ms", 1500)
-    submit_key = agent_info.get("submit_key", "enter")
+    agent_name, agent_cmd, submit_delay_ms, submit_key = resolve_rex_agent_command(args.agent, cfg)
 
     # CWD & worktree handling
     use_wt = args.worktree or cfg.get("use_worktree_by_default", False)
@@ -1901,6 +1907,9 @@ def cmd_task_start(args: argparse.Namespace) -> None:
 
     # Ensure project session exists
     sess_id = ensure_project_session(project_name, project_path, state)
+
+    # Agent selection
+    agent_name, agent_cmd, submit_delay_ms, submit_key = resolve_rex_agent_command(args.agent, cfg)
 
     # CWD & worktree handling
     use_wt = args.worktree or cfg.get("use_worktree_by_default", False)
