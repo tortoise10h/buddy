@@ -27,6 +27,12 @@ HOOKS_PATH = HOOKS_DIR / "hooks.json"
 DEFAULT_CONFIG = {
     "version": 1,
     "buddy_session_name": "Buddy",
+    # Role-based agent defaults
+    # Precedence: orchestrator_agent -> default_agent -> "agy"
+    "orchestrator_agent": "agy",
+    # Precedence: worker_agent -> default_agent -> "agy"
+    "worker_agent": "agy",
+    # Legacy fallback preserved for backward compatibility
     "default_agent": "agy",
     "projects_roots": [
         # Fallback default project root; can be overridden during install/init via --projects-root,
@@ -55,6 +61,21 @@ DEFAULT_CONFIG = {
             "submit_key": "enter"
         },
         "opencode": {
+            "command": ["opencode"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
+        "agy-argon": {
+            "command": ["agy", "--model", "gemini-4-argon-high"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
+        "agy-flash": {
+            "command": ["agy", "--model", "gemini-3.8-flash-medium"],
+            "submit_delay_ms": 1500,
+            "submit_key": "enter"
+        },
+        "opencode-flash": {
             "command": ["opencode"],
             "submit_delay_ms": 1500,
             "submit_key": "enter"
@@ -216,13 +237,37 @@ def load_config() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
+            # Legacy fallback: if default_agent is set, use it as fallback for missing orchestrator/worker_agent
+            legacy_default = data.get("default_agent")
             # Merge with defaults for missing keys
             for k, v in DEFAULT_CONFIG.items():
                 if k not in data:
-                    data[k] = v
+                    if k in ("orchestrator_agent", "worker_agent") and legacy_default:
+                        data[k] = legacy_default
+                    else:
+                        data[k] = v
+            # Merge missing agent definitions from default config
+            if "agents" in data and isinstance(data["agents"], dict):
+                for agent_k, agent_v in DEFAULT_CONFIG.get("agents", {}).items():
+                    if agent_k not in data["agents"]:
+                        data["agents"][agent_k] = agent_v
             return data
     except Exception:
         return dict(DEFAULT_CONFIG)
+
+
+def get_effective_orchestrator_agent(cfg: dict) -> str:
+    """Resolve effective orchestrator agent.
+    Precedence: orchestrator_agent -> default_agent -> 'agy'
+    """
+    return cfg.get("orchestrator_agent") or cfg.get("default_agent") or "agy"
+
+
+def get_effective_worker_agent(cfg: dict) -> str:
+    """Resolve effective worker agent.
+    Precedence: worker_agent -> default_agent -> 'agy'
+    """
+    return cfg.get("worker_agent") or cfg.get("default_agent") or "agy"
 
 
 def save_config(cfg: dict) -> None:
@@ -426,6 +471,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     flag_roots_str = getattr(args, "projects_roots", None)
     has_explicit_flags = bool(flag_roots or flag_roots_str)
 
+    flag_orch = getattr(args, "orchestrator_agent", None) or os.environ.get("BUDDY_ORCHESTRATOR_AGENT")
+    flag_worker = getattr(args, "worker_agent", None) or os.environ.get("BUDDY_WORKER_AGENT")
+
     custom_roots = parse_projects_roots_input(flag_roots, flag_roots_str, include_env=True)
     if custom_roots:
         DEFAULT_CONFIG["projects_roots"] = custom_roots
@@ -435,13 +483,31 @@ def cmd_init(args: argparse.Namespace) -> None:
         cfg_to_save = json.loads(json.dumps(DEFAULT_CONFIG))
         if custom_roots:
             cfg_to_save["projects_roots"] = custom_roots
+        if flag_orch:
+            cfg_to_save["orchestrator_agent"] = flag_orch
+        if flag_worker:
+            cfg_to_save["worker_agent"] = flag_worker
         save_config(cfg_to_save)
         created.append("config.json")
-    elif has_explicit_flags and custom_roots:
+    else:
         cfg = load_config()
-        cfg["projects_roots"] = custom_roots
-        save_config(cfg)
-        created.append("config.json (updated projects_roots)")
+        changed = False
+        updates = []
+        if has_explicit_flags and custom_roots:
+            cfg["projects_roots"] = custom_roots
+            changed = True
+            updates.append("projects_roots")
+        if flag_orch and cfg.get("orchestrator_agent") != flag_orch:
+            cfg["orchestrator_agent"] = flag_orch
+            changed = True
+            updates.append("orchestrator_agent")
+        if flag_worker and cfg.get("worker_agent") != flag_worker:
+            cfg["worker_agent"] = flag_worker
+            changed = True
+            updates.append("worker_agent")
+        if changed:
+            save_config(cfg)
+            created.append(f"config.json (updated {', '.join(updates)})")
 
     # 2. state.json
     state = load_state()
@@ -980,7 +1046,8 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     sess_id = ensure_project_session(project_name, project_path, state)
 
     # Agent selection
-    agent_name = args.agent or cfg.get("default_agent", "agy")
+    # Precedence: args.agent -> worker_agent -> default_agent -> agy
+    agent_name = args.agent or get_effective_worker_agent(cfg)
     agent_info = cfg.get("agents", {}).get(agent_name, {
         "command": [agent_name],
         "submit_delay_ms": 1500,
@@ -1116,7 +1183,8 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     sess_id = ensure_project_session(project_name, project_path, state)
 
     # Agent selection
-    agent_name = args.agent or cfg.get("default_agent", "agy")
+    # Precedence: args.agent -> worker_agent -> default_agent -> agy
+    agent_name = args.agent or get_effective_worker_agent(cfg)
     agent_info = cfg.get("agents", {}).get(agent_name, {
         "command": [agent_name],
         "submit_delay_ms": 1500,
@@ -1629,7 +1697,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                                     "window_label": w_label,
                                     "agent_block_id": b_id,
                                     "dev_block_id": None,
-                                    "agent": cfg.get("default_agent", "agy"),
+                                    "agent": get_effective_worker_agent(cfg),
                                     "cwd": matched_dir,
                                     "worktree_path": None,
                                     "branch": None,
@@ -2266,7 +2334,8 @@ def cmd_context_inject(args: argparse.Namespace) -> None:
             pass
 
         tasks_str = "; ".join(task_summaries) if task_summaries else "None active"
-        default_agent = cfg.get("default_agent", "agy")
+        orch_agent = get_effective_orchestrator_agent(cfg)
+        worker_agent = get_effective_worker_agent(cfg)
 
         nudge_banner = ""
         if nudges:
@@ -2278,7 +2347,7 @@ def cmd_context_inject(args: argparse.Namespace) -> None:
             )
 
         ephemeral_text = (
-            f"[Buddy Live State] Default agent: {default_agent} | "
+            f"[Buddy Live State] Orchestrator: {orch_agent} | Worker: {worker_agent} | "
             f"Active projects: {len(active_projects)} | Tasks: {tasks_str}. "
             f"🚨 ZERO-TOLERANCE GUARDRAIL (RULE #1): NEVER edit project files, docs, or code in this session. "
             f"Even for minor edits, typos, or READMEs, ALWAYS dispatch a task tab via 'buddy-ctl dispatch'."
@@ -2311,11 +2380,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
     p_init.add_argument("--projects-root", action="append", help="Project root directory (repeatable)")
     p_init.add_argument("--projects-roots", help="Colon- or comma-separated list of project root directories")
+    p_init.add_argument("--orchestrator-agent", help="Default agent for Buddy orchestrator session (e.g. agy, opencode-flash)")
+    p_init.add_argument("--worker-agent", help="Default agent for worker tasks (e.g. agy, pi, opencode)")
 
     # config
     p_config = subparsers.add_parser("config", help="Get, set, or show configuration")
     p_config.add_argument("config_action", choices=["show", "get", "set"], nargs="?", default="show")
-    p_config.add_argument("key", nargs="?", help="Dot-notation config key (e.g. default_agent)")
+    p_config.add_argument("key", nargs="?", help="Dot-notation config key (e.g. orchestrator_agent, worker_agent)")
     p_config.add_argument("value", nargs="?", help="Value to set")
 
     # projects
@@ -2340,7 +2411,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_disp.add_argument("--project", "-p", required=True, help="Project name or directory path")
     p_disp.add_argument("--prompt", "-m", required=True, help="Task prompt to execute")
     p_disp.add_argument("--task", "-t", help="Task slug (optional: caller-supplied 2-3 word slug is primary, smart fallback derived if omitted)")
-    p_disp.add_argument("--agent", "-a", help="Agent CLI to launch (agy, pi, opencode; default: config.default_agent)")
+    p_disp.add_argument("--agent", "-a", help="Agent CLI to launch (agy, pi, opencode, etc.; default: config.worker_agent)")
     p_disp.add_argument("--plan-first", action="store_true", help="Wrap prompt to instruct worker agent to plan first")
     p_disp.add_argument("--worktree", action="store_true", help="Create an isolated git worktree")
     p_disp.add_argument("--branch", "-b", help="Branch name for worktree")
@@ -2352,7 +2423,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = ts_sub.add_parser("start", help="Start a new feature task tab in project session")
     p_start.add_argument("--project", "-p", required=True, help="Project name or path")
     p_start.add_argument("--task", "-t", required=True, help="Task slug (e.g. feat-auth)")
-    p_start.add_argument("--agent", "-a", help="Agent CLI to launch (agy, pi, opencode; default: config.default_agent)")
+    p_start.add_argument("--agent", "-a", help="Agent CLI to launch (agy, pi, opencode, etc.; default: config.worker_agent)")
     p_start.add_argument("--worktree", action="store_true", help="Create an isolated git worktree")
     p_start.add_argument("--branch", "-b", help="Branch name for worktree")
     p_start.add_argument("--prompt", help="Initial prompt to send to the worker agent")

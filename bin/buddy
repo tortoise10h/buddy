@@ -58,7 +58,7 @@ while [ $# -gt 0 ]; do
             CHOSEN_AGENT="${1#*=}"
             shift
             ;;
-        agy|pi|opencode)
+        agy|pi|opencode|agy-argon|agy-flash|opencode-flash)
             if [ -z "$CHOSEN_AGENT" ]; then
                 CHOSEN_AGENT="$1"
             else
@@ -86,22 +86,59 @@ if [ -z "$CHOSEN_AGENT" ] && [ -n "${BUDDY_AGENT:-}" ]; then
     CHOSEN_AGENT="$BUDDY_AGENT"
 fi
 
-# Default agent resolution via buddy-ctl config or fallback to agy
+# Resolve orchestrator agent name:
+# Precedence: CLI argument (--agent/-a/positional) -> BUDDY_AGENT env -> orchestrator_agent config -> default_agent config -> "agy"
 RESOLVED_AGENT="$CHOSEN_AGENT"
 if [ -z "$RESOLVED_AGENT" ]; then
-    DEFAULT_AGENT=""
+    ORCH_AGENT=""
     if [ -n "$BUDDY_CTL_CMD" ]; then
-        CFG_OUT="$("$BUDDY_CTL_CMD" config get default_agent 2>/dev/null || true)"
+        CFG_OUT="$("$BUDDY_CTL_CMD" config get orchestrator_agent 2>/dev/null || true)"
         if command -v jq >/dev/null 2>&1; then
-            DEFAULT_AGENT="$(echo "$CFG_OUT" | jq -r '.value // empty' 2>/dev/null || true)"
+            ORCH_AGENT="$(echo "$CFG_OUT" | jq -r '.value // empty' 2>/dev/null || true)"
         else
-            DEFAULT_AGENT="$(echo "$CFG_OUT" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+            ORCH_AGENT="$(echo "$CFG_OUT" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+        fi
+        if [ "$ORCH_AGENT" = "null" ] || [ -z "$ORCH_AGENT" ]; then
+            CFG_OUT="$("$BUDDY_CTL_CMD" config get default_agent 2>/dev/null || true)"
+            if command -v jq >/dev/null 2>&1; then
+                ORCH_AGENT="$(echo "$CFG_OUT" | jq -r '.value // empty' 2>/dev/null || true)"
+            else
+                ORCH_AGENT="$(echo "$CFG_OUT" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+            fi
         fi
     fi
-    if [ "$DEFAULT_AGENT" = "null" ] || [ -z "$DEFAULT_AGENT" ]; then
-        DEFAULT_AGENT="agy"
+    if [ "$ORCH_AGENT" = "null" ] || [ -z "$ORCH_AGENT" ]; then
+        ORCH_AGENT="agy"
     fi
-    RESOLVED_AGENT="$DEFAULT_AGENT"
+    RESOLVED_AGENT="$ORCH_AGENT"
+fi
+
+# Resolve command array from config.agents.<name>.command
+RESOLVED_CMD=()
+if [ -n "$BUDDY_CTL_CMD" ]; then
+    CMD_JSON="$("$BUDDY_CTL_CMD" config get "agents.$RESOLVED_AGENT.command" 2>/dev/null || true)"
+    if [ -n "$CMD_JSON" ]; then
+        while IFS= read -r -d '' item; do
+            [ -n "$item" ] && RESOLVED_CMD+=("$item")
+        done < <(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    val = data.get('value')
+    if isinstance(val, list):
+        for part in val:
+            sys.stdout.write(str(part) + '\0')
+    elif isinstance(val, str) and val.strip() and val.strip().lower() != 'null':
+        sys.stdout.write(val.strip() + '\0')
+except Exception:
+    pass
+" "$CMD_JSON" 2>/dev/null || true)
+    fi
+fi
+
+if [ ${#RESOLVED_CMD[@]} -eq 0 ]; then
+    echo "Warning: Agent '$RESOLVED_AGENT' not found in config.agents. Falling back to bare executable '$RESOLVED_AGENT'." >&2
+    RESOLVED_CMD=("$RESOLVED_AGENT")
 fi
 
 # Find Rex binary
@@ -114,9 +151,9 @@ if [ -n "$CURRENT_SESS" ]; then
     if [ "$SESS_LABEL" = "Buddy" ]; then
         cd "$BUDDY_DIR"
         if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-            exec "$RESOLVED_AGENT" "${EXTRA_ARGS[@]}"
+            exec "${RESOLVED_CMD[@]}" "${EXTRA_ARGS[@]}"
         else
-            exec "$RESOLVED_AGENT"
+            exec "${RESOLVED_CMD[@]}"
         fi
     fi
 fi
@@ -138,9 +175,9 @@ if [ -n "$BUDDY_SESS_ID" ]; then
 else
     echo "Creating Buddy session in Rex..."
     if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "$RESOLVED_AGENT" "${EXTRA_ARGS[@]}")"
+        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "${RESOLVED_CMD[@]}" "${EXTRA_ARGS[@]}")"
     else
-        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "$RESOLVED_AGENT")"
+        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "${RESOLVED_CMD[@]}")"
     fi
     BUDDY_SESS_ID="$(echo "$NEW_SESS" | jq -r '.session_id')"
     if [ -n "$BUDDY_CTL_CMD" ]; then
