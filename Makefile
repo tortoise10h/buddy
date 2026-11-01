@@ -7,13 +7,23 @@ LDFLAGS := -s -w \
 	-X 'github.com/tortoise10h/buddy/internal/cli.Commit=$(COMMIT)' \
 	-X 'github.com/tortoise10h/buddy/internal/cli.Date=$(DATE)'
 
-.PHONY: all build test vet clean
+PREFIX ?= $(HOME)/.local/bin
+INSTALL_NAME ?= buddy-ctl
+
+.PHONY: all build test vet clean install uninstall
 
 all: build
 
 build:
 	@mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/buddy-ctl ./cmd/buddy-ctl
+
+install: build
+	@mkdir -p $(PREFIX)
+	install -m 0755 bin/buddy-ctl $(PREFIX)/$(INSTALL_NAME)
+
+uninstall:
+	rm -f $(PREFIX)/$(INSTALL_NAME)
 
 test:
 	go test -v ./...
