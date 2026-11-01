@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          OUT="buddy-ctl-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags="-s -w -X 'github.com/tortoise10h/buddy/internal/cli.Version=${VERSION}' -X 'github.com/tortoise10h/buddy/internal/cli.Commit=${COMMIT}' -X 'github.com/tortoise10h/buddy/internal/cli.Date=${DATE}'" \
+            -o "dist/${OUT}" ./cmd/buddy-ctl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buddy-ctl-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/buddy-ctl-${{ matrix.os }}-${{ matrix.arch }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

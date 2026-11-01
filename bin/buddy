@@ -7,7 +7,7 @@ set -euo pipefail
 BUDDY_DIR="$HOME/.buddy"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUDDY_CTL="$REPO_DIR/skills/buddy/scripts/buddy-ctl"
+BUDDY_CTL="$REPO_DIR/bin/buddy-ctl"
 
 # Resolve buddy-ctl CLI executable
 BUDDY_CTL_CMD=""

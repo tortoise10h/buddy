@@ -35,7 +35,7 @@ Buddy solves the 3 core multi-project orchestration challenges:
                                |
                                v
                +-------------------------------+
-               | buddy-ctl (Python 3 CLI tool) |
+               | buddy-ctl (Go CLI tool)       |
                +-------------------------------+
                                |
                                v
@@ -101,7 +101,8 @@ Clone and run the installer:
 
 ```sh
 cd /Users/sunday/Dev/Personal/Projects/buddy
-./install.sh
+./install.sh           # Downloads pre-built binary (or compiles with Go if release unavailable)
+./install.sh --build   # Or build locally from source with Go (tracks latest code on main)
 ```
 
 During installation, Buddy prompts you for:

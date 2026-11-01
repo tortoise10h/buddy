@@ -9,18 +9,177 @@ SKILL_DIR="$REPO_DIR/skills/buddy"
 BIN_SRC="$REPO_DIR/bin/buddy"
 LOCAL_BIN="$HOME/.local/bin"
 
+# Parse CLI options
+BUILD_FROM_SOURCE=false
+for arg in "${@:-}"; do
+    case "$arg" in
+        --build|-b)
+            BUILD_FROM_SOURCE=true
+            ;;
+        --help|-h)
+            echo "Usage: ./install.sh [options]"
+            echo ""
+            echo "Options:"
+            echo "  --build, -b    Build buddy-ctl from source using Go (uses latest code on main)"
+            echo "  --help, -h     Show this help message and exit"
+            echo ""
+            echo "Environment variables:"
+            echo "  BUDDY_BUILD=1             Equivalent to --build"
+            echo "  BUDDY_NONINTERACTIVE=1    Run without interactive prompts"
+            echo "  BUDDY_PROJECTS_ROOTS=...  Colon-separated list of roots"
+            echo "  BUDDY_ORCHESTRATOR_AGENT= Orchestrator agent harness (default: agy)"
+            echo "  BUDDY_WORKER_AGENT=       Worker agent harness (default: agy)"
+            exit 0
+            ;;
+    esac
+done
+
+if [ "${BUDDY_BUILD:-0}" = "1" ]; then
+    BUILD_FROM_SOURCE=true
+fi
+
 echo "=== Installing Buddy ==="
 
-# 1. Ensure scripts are executable
-chmod +x "$REPO_DIR/bin/buddy"
-chmod +x "$REPO_DIR/skills/buddy/scripts/buddy-ctl"
+GITHUB_REPO="tortoise10h/buddy"
 
-# 2. Symlink binaries into ~/.local/bin
+detect_platform() {
+    local os arch
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch="$(uname -m)"
+
+    case "$arch" in
+        x86_64|amd64) arch="amd64" ;;
+        arm64|aarch64) arch="arm64" ;;
+        *)
+            echo "unsupported"
+            return 1
+            ;;
+    esac
+
+    case "$os" in
+        darwin|linux) ;;
+        *)
+            echo "unsupported"
+            return 1
+            ;;
+    esac
+
+    echo "${os}-${arch}"
+}
+
+build_buddy_ctl() {
+    local target="$1"
+    if ! command -v go >/dev/null 2>&1; then
+        return 1
+    fi
+
+    echo "Building buddy-ctl from source using Go..."
+    local commit date version
+    commit="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    version="v0.1.0-dev"
+
+    mkdir -p "$(dirname "$target")"
+    (
+        cd "$REPO_DIR"
+        CGO_ENABLED=0 go build -trimpath \
+            -ldflags="-s -w -X 'github.com/tortoise10h/buddy/internal/cli.Version=${version}' -X 'github.com/tortoise10h/buddy/internal/cli.Commit=${commit}' -X 'github.com/tortoise10h/buddy/internal/cli.Date=${date}'" \
+            -o "$target" ./cmd/buddy-ctl
+    )
+}
+
+download_buddy_ctl() {
+    local target="$1"
+    local platform="$2"
+    local url="https://github.com/${GITHUB_REPO}/releases/latest/download/buddy-ctl-${platform}"
+
+    echo "Attempting to download pre-built buddy-ctl (${platform}) from GitHub Releases..."
+    local tmp_bin
+    tmp_bin="$(mktemp "${TMPDIR:-/tmp}/buddy-ctl.XXXXXX")"
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSL -o "$tmp_bin" "$url" 2>/dev/null; then
+            chmod +x "$tmp_bin"
+            mkdir -p "$(dirname "$target")"
+            mv "$tmp_bin" "$target"
+            return 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q -O "$tmp_bin" "$url" 2>/dev/null; then
+            chmod +x "$tmp_bin"
+            mkdir -p "$(dirname "$target")"
+            mv "$tmp_bin" "$target"
+            return 0
+        fi
+    fi
+
+    rm -f "$tmp_bin"
+    return 1
+}
+
+# 1. Provision buddy-ctl executable
+PLATFORM="$(detect_platform || echo "unknown")"
+BUDDY_CTL_TARGET="$REPO_DIR/bin/buddy-ctl"
+
+if [ "$BUILD_FROM_SOURCE" = true ]; then
+    if ! build_buddy_ctl "$BUDDY_CTL_TARGET"; then
+        echo ""
+        echo "✖ Failed to build buddy-ctl from source. Go compiler (>= 1.22) is required."
+        echo "  • macOS: brew install go"
+        echo "  • Linux: https://go.dev/doc/install"
+        exit 1
+    fi
+    echo "✔ Successfully built buddy-ctl from source"
+else
+    # Default path: try downloading pre-built binary
+    DOWNLOADED=false
+    if [ "$PLATFORM" != "unknown" ]; then
+        if download_buddy_ctl "$BUDDY_CTL_TARGET" "$PLATFORM"; then
+            DOWNLOADED=true
+            echo "✔ Downloaded pre-built buddy-ctl (${PLATFORM})"
+        fi
+    fi
+
+    if [ "$DOWNLOADED" = false ]; then
+        # Fallback to local Go build if compiler is present
+        if command -v go >/dev/null 2>&1; then
+            echo "ℹ Pre-built release not found or unavailable; falling back to local Go build..."
+            if build_buddy_ctl "$BUDDY_CTL_TARGET"; then
+                echo "✔ Built buddy-ctl using local Go"
+            else
+                echo "✖ Failed to build buddy-ctl with local Go."
+                exit 1
+            fi
+        elif [ -x "$BUDDY_CTL_TARGET" ]; then
+            echo "✔ Using existing compiled binary at $BUDDY_CTL_TARGET"
+        else
+            echo ""
+            echo "✖ Pre-built binary could not be downloaded and Go is not installed on this system."
+            echo ""
+            echo "To install Go and build from source:"
+            echo "  • macOS: brew install go"
+            echo "  • Linux: https://go.dev/doc/install"
+            echo ""
+            echo "Once installed, re-run: ./install.sh --build"
+            exit 1
+        fi
+    fi
+fi
+
+# 2. Ensure scripts are executable and install binaries
+chmod +x "$REPO_DIR/bin/buddy"
+chmod +x "$BUDDY_CTL_TARGET"
+
 mkdir -p "$LOCAL_BIN"
 ln -sf "$BIN_SRC" "$LOCAL_BIN/buddy"
-ln -sf "$SKILL_DIR/scripts/buddy-ctl" "$LOCAL_BIN/buddy-ctl"
+
+# Remove any old symlink or file before installing standalone binary
+rm -f "$LOCAL_BIN/buddy-ctl"
+cp "$BUDDY_CTL_TARGET" "$LOCAL_BIN/buddy-ctl"
+chmod +x "$LOCAL_BIN/buddy-ctl"
+
 echo "✔ Symlinked ~/.local/bin/buddy -> $BIN_SRC"
-echo "✔ Symlinked ~/.local/bin/buddy-ctl -> $SKILL_DIR/scripts/buddy-ctl"
+echo "✔ Installed ~/.local/bin/buddy-ctl"
 
 # 3. Symlink skills/buddy into agent directories
 SKILL_TARGETS=(
@@ -345,7 +504,7 @@ for r in "${COLLECTED_ROOTS[@]}"; do
 done
 INIT_ARGS+=(--orchestrator-agent "$CHOSEN_ORCH" --worker-agent "$CHOSEN_WORKER")
 
-python3 "$LOCAL_BIN/buddy-ctl" init "${INIT_ARGS[@]}"
+"$LOCAL_BIN/buddy-ctl" init "${INIT_ARGS[@]}"
 
 echo "=== Buddy installation complete! ==="
 echo "You can now run 'buddy' from anywhere or use 'buddy-ctl' commands."
