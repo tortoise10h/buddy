@@ -3,11 +3,12 @@ package t3
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/tortoise10h/buddy/internal/backend"
@@ -168,12 +169,6 @@ func TestT3Backend_ReadOperations(t *testing.T) {
 		t.Errorf("expected proj_alpha, got %s", projID)
 	}
 
-	// Non-existing project returns ErrNotImplementedPhase1
-	_, err = backendImpl.EnsureProjectContainer(ctx, "New App", "/Users/test/Projects/new-app")
-	if !errors.Is(err, backend.ErrNotImplementedPhase1) {
-		t.Errorf("expected ErrNotImplementedPhase1 for missing project creation, got: %v", err)
-	}
-
 	// 3. IsTaskAlive
 	alive, err := backendImpl.IsTaskAlive(ctx, backend.TaskHandle{ThreadID: "th_active"})
 	if err != nil || !alive {
@@ -223,34 +218,405 @@ func TestT3Backend_ReadOperations(t *testing.T) {
 	}
 }
 
-func TestT3Backend_Phase1DeferredMutations(t *testing.T) {
-	b := NewT3Backend(WithServerURL("http://127.0.0.1:3773"))
+func TestT3Backend_DispatchTask_EndToEnd(t *testing.T) {
+	var mu sync.Mutex
+	var launchedParams LaunchThreadParams
+	var createdProjectTitle string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/projects":
+			_ = json.NewEncoder(w).Encode(ProjectSnapshot{Projects: []T3Project{}})
+
+		case "/mcp":
+			var req McpRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+
+			if req.Method == "initialize" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}`))
+				return
+			}
+			if req.Method == "notifications/initialized" {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+
+			if req.Method == "tools/call" {
+				toolName, _ := req.Params["name"].(string)
+				args, _ := req.Params["arguments"].(map[string]any)
+
+				if toolName == "t3_project_create" {
+					mu.Lock()
+					createdProjectTitle = args["title"].(string)
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"result": map[string]any{
+							"content": []map[string]any{
+								{
+									"type": "text",
+									"text": `{"id": "proj_new_auto", "title": "NewProject", "workspaceRoot": "/tmp/new-project"}`,
+								},
+							},
+						},
+					})
+					return
+				}
+
+				if toolName == "t3_thread_launch" {
+					mu.Lock()
+					launchedParams.ProjectID, _ = args["projectId"].(string)
+					launchedParams.Title, _ = args["title"].(string)
+					launchedParams.Message, _ = args["message"].(string)
+					launchedParams.RuntimeMode, _ = args["runtimeMode"].(string)
+					if ws, ok := args["workspaceStrategy"].(map[string]any); ok {
+						launchedParams.WorkspaceStrategy = ws
+					}
+					mu.Unlock()
+
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"result": map[string]any{
+							"content": []map[string]any{
+								{
+									"type": "text",
+									"text": `{"threadId": "th_dispatched_99", "projectId": "proj_new_auto", "runId": "run_initial_1", "status": "running"}`,
+								},
+							},
+						},
+					})
+					return
+				}
+			}
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tokenProvider := NewSessionTokenProvider(WithStaticSessionToken("token"))
+	httpClient := NewHTTPClient(
+		WithBaseURL(server.URL),
+		WithHTTPTokenProvider(tokenProvider),
+	)
+	mcpClient := NewMCPClient(
+		WithMCPBaseURL(server.URL),
+		WithMCPTokenProvider(&StaticMCPTokenProvider{Token: "token"}),
+	)
+
+	b := NewT3Backend(
+		WithServerURL(server.URL),
+		WithHTTPClient(httpClient),
+		WithMCPClient(mcpClient),
+		WithTokenProvider(tokenProvider),
+	)
 	ctx := context.Background()
-	handle := backend.TaskHandle{ThreadID: "th_123"}
 
-	// DispatchTask
-	_, err := b.DispatchTask(ctx, backend.DispatchSpec{TaskSlug: "my-task"})
-	if !errors.Is(err, backend.ErrNotImplementedPhase1) {
-		t.Errorf("expected ErrNotImplementedPhase1 for DispatchTask, got: %v", err)
+	spec := backend.DispatchSpec{
+		ProjectName: "NewProject",
+		ProjectPath: "/tmp/new-project",
+		TaskSlug:    "feat-auth",
+		Prompt:      "Implement OAuth login",
+		AgentSpec:   "antigravity/gemini-4-argon-high",
+		UseWorktree: true,
+		BaseRef:     "main",
+		Branch:      "feat-auth-branch",
 	}
 
-	// CloseTask
-	err = b.CloseTask(ctx, handle)
-	if !errors.Is(err, backend.ErrNotImplementedPhase1) {
-		t.Errorf("expected ErrNotImplementedPhase1 for CloseTask, got: %v", err)
+	result, err := b.DispatchTask(ctx, spec)
+	if err != nil {
+		t.Fatalf("DispatchTask failed: %v", err)
 	}
 
-	// SendMessage
-	err = b.SendMessage(ctx, handle, "Hello")
-	if !errors.Is(err, backend.ErrNotImplementedPhase1) {
-		t.Errorf("expected ErrNotImplementedPhase1 for SendMessage, got: %v", err)
+	if !result.PickedUp {
+		t.Errorf("expected PickedUp to be true")
+	}
+	if result.TaskHandle.ThreadID != "th_dispatched_99" {
+		t.Errorf("expected threadId th_dispatched_99, got %s", result.TaskHandle.ThreadID)
+	}
+	if result.TaskHandle.ActiveRunID != "run_initial_1" {
+		t.Errorf("expected runId run_initial_1, got %s", result.TaskHandle.ActiveRunID)
 	}
 
-	// InterruptTask
-	err = b.InterruptTask(ctx, handle)
-	if !errors.Is(err, backend.ErrNotImplementedPhase1) {
-		t.Errorf("expected ErrNotImplementedPhase1 for InterruptTask, got: %v", err)
+	mu.Lock()
+	defer mu.Unlock()
+	if createdProjectTitle != "NewProject" {
+		t.Errorf("expected project auto-registration title NewProject, got %s", createdProjectTitle)
 	}
+	if launchedParams.RuntimeMode != "full-access" {
+		t.Errorf("expected runtimeMode full-access, got %s", launchedParams.RuntimeMode)
+	}
+	if launchedParams.WorkspaceStrategy["type"] != "worktree" || launchedParams.WorkspaceStrategy["baseRef"] != "main" {
+		t.Errorf("unexpected workspaceStrategy: %+v", launchedParams.WorkspaceStrategy)
+	}
+}
+
+func TestT3Backend_ProjectAutoRegistration_CLIFallback(t *testing.T) {
+	// Fake server where MCP t3_project_create returns 401 unauthorized (auth unavailable)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/projects" {
+			_ = json.NewEncoder(w).Encode(ProjectSnapshot{Projects: []T3Project{}})
+			return
+		}
+		if r.URL.Path == "/mcp" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error": "invalid_mcp_credential"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	// Mock command runner for 't3 project add'
+	var executedCmd string
+	mockRunner := func(ctx context.Context, name string, args ...string) (string, error) {
+		executedCmd = fmt.Sprintf("%s %s", name, strings.Join(args, " "))
+		return `{"id": "proj_cli_fallback_1", "title": "FallbackProject", "workspaceRoot": "/tmp/fallback"}`, nil
+	}
+
+	b := NewT3Backend(
+		WithServerURL(server.URL),
+		WithBackendBinPath("/usr/local/bin/t3"),
+		WithBackendCommandRunner(mockRunner),
+		WithTokenProvider(NewSessionTokenProvider(WithStaticSessionToken("token"))),
+	)
+
+	projID, err := b.EnsureProjectContainer(context.Background(), "FallbackProject", "/tmp/fallback")
+	if err != nil {
+		t.Fatalf("EnsureProjectContainer with CLI fallback failed: %v", err)
+	}
+	if projID != "proj_cli_fallback_1" {
+		t.Errorf("expected proj_cli_fallback_1, got %s", projID)
+	}
+	if !strings.Contains(executedCmd, "project add /tmp/fallback --title FallbackProject --json") {
+		t.Errorf("unexpected cli execution: %s", executedCmd)
+	}
+}
+
+func TestT3Backend_SendMessage_PendingRequest_BothShapes(t *testing.T) {
+	var mu sync.Mutex
+	var respondedAnswers map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/mcp" {
+			var req McpRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+
+			if req.Method == "initialize" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}`))
+				return
+			}
+			if req.Method == "notifications/initialized" {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+
+			if req.Method == "tools/call" {
+				toolName, _ := req.Params["name"].(string)
+				args, _ := req.Params["arguments"].(map[string]any)
+
+				if toolName == "t3_pending_request" {
+					action, _ := args["action"].(string)
+					if action == "list" {
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"jsonrpc": "2.0",
+							"id":      req.ID,
+							"result": map[string]any{
+								"content": []map[string]any{
+									{"type": "text", "text": `{"requestIds": ["req_q2"]}`},
+								},
+							},
+						})
+						return
+					}
+					if action == "read" {
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"jsonrpc": "2.0",
+							"id":      req.ID,
+							"result": map[string]any{
+								"content": []map[string]any{
+									{
+										"type": "text",
+										"text": `{"requestId": "req_q2", "questions": [
+											{"id": "q_env", "header": "Environment", "question": "Target env?"},
+											{"id": "q_migrate", "header": "Migrate", "question": "Run migrations?"}
+										]}`,
+									},
+								},
+							},
+						})
+						return
+					}
+					if action == "respond" {
+						mu.Lock()
+						respondedAnswers, _ = args["answers"].(map[string]any)
+						mu.Unlock()
+
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"jsonrpc": "2.0",
+							"id":      req.ID,
+							"result": map[string]any{
+								"content": []map[string]any{
+									{"type": "text", "text": `{"sequence": 1}`},
+								},
+							},
+						})
+						return
+					}
+				}
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	mcpClient := NewMCPClient(
+		WithMCPBaseURL(server.URL),
+		WithMCPTokenProvider(&StaticMCPTokenProvider{Token: "token"}),
+	)
+
+	b := NewT3Backend(
+		WithServerURL(server.URL),
+		WithMCPClient(mcpClient),
+		WithTokenProvider(NewSessionTokenProvider(WithStaticSessionToken("token"))),
+	)
+	ctx := context.Background()
+	handle := backend.TaskHandle{ThreadID: "th_pending_test"}
+
+	// 1. Attempting single text string on multi-question prompt fails clearly
+	err := b.SendMessage(ctx, handle, backend.TextMessage("production"))
+	if err == nil || !strings.Contains(err.Error(), "repeatable answers required") {
+		t.Fatalf("expected error requiring repeatable answers, got: %v", err)
+	}
+
+	// 2. Submitting ordered answers maps structurally without bare string concat (Decision 2)
+	err = b.SendMessage(ctx, handle, backend.OrderedAnswers("staging", "yes"))
+	if err != nil {
+		t.Fatalf("SendMessage with OrderedAnswers failed: %v", err)
+	}
+
+	mu.Lock()
+	if respondedAnswers["q_env"] != "staging" || respondedAnswers["q_migrate"] != "yes" {
+		t.Errorf("unexpected mapped answers: %+v", respondedAnswers)
+	}
+	mu.Unlock()
+
+	// 3. Submitting keyed answers directly
+	err = b.SendMessage(ctx, handle, backend.KeyedAnswers(map[string]any{
+		"q_env":     "production",
+		"q_migrate": "no",
+	}))
+	if err != nil {
+		t.Fatalf("SendMessage with KeyedAnswers failed: %v", err)
+	}
+
+	mu.Lock()
+	if respondedAnswers["q_env"] != "production" || respondedAnswers["q_migrate"] != "no" {
+		t.Errorf("unexpected mapped answers: %+v", respondedAnswers)
+	}
+	mu.Unlock()
+}
+
+func TestT3Backend_InterruptAndClose(t *testing.T) {
+	var mu sync.Mutex
+	var interrupted bool
+	var archived bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/mcp" {
+			var req McpRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+
+			if req.Method == "initialize" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}`))
+				return
+			}
+			if req.Method == "notifications/initialized" {
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+
+			if req.Method == "tools/call" {
+				toolName, _ := req.Params["name"].(string)
+
+				if toolName == "t3_thread_interrupt" {
+					mu.Lock()
+					interrupted = true
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"result": map[string]any{
+							"content": []map[string]any{{"type": "text", "text": `{"interrupted": true}`}},
+						},
+					})
+					return
+				}
+
+				if toolName == "t3_thread_organize" {
+					mu.Lock()
+					archived = true
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"result": map[string]any{
+							"content": []map[string]any{{"type": "text", "text": `{"sequence": 5}`}},
+						},
+					})
+					return
+				}
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	mcpClient := NewMCPClient(
+		WithMCPBaseURL(server.URL),
+		WithMCPTokenProvider(&StaticMCPTokenProvider{Token: "token"}),
+	)
+
+	b := NewT3Backend(
+		WithServerURL(server.URL),
+		WithMCPClient(mcpClient),
+		WithTokenProvider(NewSessionTokenProvider(WithStaticSessionToken("token"))),
+	)
+	ctx := context.Background()
+	handle := backend.TaskHandle{ThreadID: "th_test_close"}
+
+	// 1. InterruptTask
+	if err := b.InterruptTask(ctx, handle); err != nil {
+		t.Fatalf("InterruptTask failed: %v", err)
+	}
+
+	mu.Lock()
+	if !interrupted {
+		t.Errorf("expected interrupted to be true")
+	}
+	mu.Unlock()
+
+	// 2. CloseTask
+	if err := b.CloseTask(ctx, handle); err != nil {
+		t.Fatalf("CloseTask failed: %v", err)
+	}
+
+	mu.Lock()
+	if !archived {
+		t.Errorf("expected archived to be true")
+	}
+	mu.Unlock()
 }
 
 func TestT3Backend_LiveServer(t *testing.T) {

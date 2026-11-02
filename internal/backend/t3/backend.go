@@ -2,6 +2,7 @@ package t3
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -16,13 +17,17 @@ var _ backend.WorkerBackend = (*T3Backend)(nil)
 
 // T3Backend implements backend.WorkerBackend for the T3 Code desktop app and server.
 type T3Backend struct {
-	mu            sync.RWMutex
-	discovery     *ServerDiscovery
-	httpClient    *HTTPClient
-	mcpClient     *MCPClient
-	tokenProvider *SessionTokenProvider
-	initialized   bool
-	serverURL     string
+	mu               sync.RWMutex
+	discovery        *ServerDiscovery
+	httpClient       *HTTPClient
+	mcpClient        *MCPClient
+	tokenProvider    *SessionTokenProvider
+	mcpTokenProvider MCPTokenProvider
+	mcpOAuthPath     string
+	binPath          string
+	commandRunner    CommandRunner
+	initialized      bool
+	serverURL        string
 }
 
 // Option configures T3Backend.
@@ -63,9 +68,39 @@ func WithTokenProvider(tp *SessionTokenProvider) Option {
 	}
 }
 
+// WithBackendMCPTokenProvider overrides the MCP token provider.
+func WithBackendMCPTokenProvider(p MCPTokenProvider) Option {
+	return func(b *T3Backend) {
+		b.mcpTokenProvider = p
+	}
+}
+
+// WithMCPOAuthPath sets a custom path for the t3_mcp_oauth.json file.
+func WithMCPOAuthPath(path string) Option {
+	return func(b *T3Backend) {
+		b.mcpOAuthPath = path
+	}
+}
+
+// WithBackendBinPath sets the binary path for the t3 executable.
+func WithBackendBinPath(path string) Option {
+	return func(b *T3Backend) {
+		b.binPath = path
+	}
+}
+
+// WithBackendCommandRunner sets a custom command runner for CLI executions.
+func WithBackendCommandRunner(runner CommandRunner) Option {
+	return func(b *T3Backend) {
+		b.commandRunner = runner
+	}
+}
+
 // NewT3Backend creates a new T3 Code WorkerBackend.
 func NewT3Backend(opts ...Option) *T3Backend {
-	b := &T3Backend{}
+	b := &T3Backend{
+		commandRunner: DefaultCommandRunner,
+	}
 	for _, opt := range opts {
 		opt(b)
 	}
@@ -74,15 +109,23 @@ func NewT3Backend(opts ...Option) *T3Backend {
 		b.discovery = NewServerDiscovery()
 	}
 	if b.tokenProvider == nil {
-		b.tokenProvider = NewSessionTokenProvider()
+		b.tokenProvider = NewSessionTokenProvider(
+			WithBinPath(b.binPath),
+			WithCommandRunner(b.commandRunner),
+		)
 	}
 	if b.httpClient == nil {
 		b.httpClient = NewHTTPClient(
 			WithHTTPTokenProvider(b.tokenProvider),
 		)
 	}
+	if b.mcpTokenProvider == nil {
+		b.mcpTokenProvider = NewFileMCPTokenProvider(b.mcpOAuthPath)
+	}
 	if b.mcpClient == nil {
-		b.mcpClient = NewMCPClient()
+		b.mcpClient = NewMCPClient(
+			WithMCPTokenProvider(b.mcpTokenProvider),
+		)
 	}
 
 	if b.serverURL != "" {
@@ -147,32 +190,79 @@ func (b *T3Backend) EnsureInitialized(ctx context.Context) error {
 }
 
 // EnsureProjectContainer verifies that a project exists in T3 Code and returns its ID.
-// If the project does not exist, Phase 1 returns ErrNotImplementedPhase1 because
-// project creation requires mutation tools (t3 project add or MCP).
+// Per Decision 3, if the project is not registered, it auto-registers via MCP tool
+// t3_project_create (preferred), falling back to 't3 project add' only when MCP auth
+// is unavailable. Never fails with "project not registered".
 func (b *T3Backend) EnsureProjectContainer(ctx context.Context, projectName, projectPath string) (string, error) {
 	if err := b.EnsureInitialized(ctx); err != nil {
 		return "", err
 	}
 
+	absPath, err := filepath.Abs(projectPath)
+	if err != nil || absPath == "" {
+		absPath = projectPath
+	}
+
+	// 1. Check existing live projects
 	projects, err := b.ListLiveProjects(ctx)
+	if err == nil {
+		for _, p := range projects {
+			pAbs, _ := filepath.Abs(p.Path)
+			if absPath != "" && pAbs == absPath {
+				return p.ID, nil
+			}
+			if strings.EqualFold(p.Name, projectName) {
+				return p.ID, nil
+			}
+		}
+	}
+
+	// 2. Unregistered: auto-register project (Decision 3)
+	// Try MCP tool t3_project_create first
+	proj, mcpErr := b.mcpClient.CreateProject(ctx, projectName, absPath)
+	if mcpErr == nil && proj != nil && proj.ID != "" {
+		return proj.ID, nil
+	}
+
+	// If MCP creation failed, fall back to CLI 't3 project add'
+	cliID, cliErr := b.addProjectViaCLI(ctx, projectName, absPath)
+	if cliErr == nil && cliID != "" {
+		return cliID, nil
+	}
+
+	if mcpErr != nil {
+		return "", fmt.Errorf("failed to auto-register project '%s' (mcp error: %v, cli fallback error: %v)", projectName, mcpErr, cliErr)
+	}
+	return "", fmt.Errorf("failed to auto-register project '%s': %w", projectName, cliErr)
+}
+
+func (b *T3Backend) addProjectViaCLI(ctx context.Context, projectName, absPath string) (string, error) {
+	runner := b.commandRunner
+	if runner == nil {
+		runner = DefaultCommandRunner
+	}
+	bin := b.binPath
+	if bin == "" {
+		resolved, err := FindT3Binary("")
+		if err != nil {
+			return "", err
+		}
+		bin = resolved
+	}
+
+	out, err := runner(ctx, bin, "project", "add", absPath, "--title", projectName, "--json")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("cli 't3 project add' failed: %w", err)
 	}
 
-	absPath, _ := filepath.Abs(projectPath)
-
-	for _, p := range projects {
-		pAbs, _ := filepath.Abs(p.Path)
-		if absPath != "" && pAbs == absPath {
-			return p.ID, nil
-		}
-		if strings.EqualFold(p.Name, projectName) {
-			return p.ID, nil
-		}
+	var proj T3Project
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &proj); err != nil {
+		return "", fmt.Errorf("failed to parse 't3 project add' json: %w", err)
 	}
-
-	return "", fmt.Errorf("%w: project '%s' (%s) not found in T3 Code (project creation requires mutation)",
-		backend.ErrNotImplementedPhase1, projectName, projectPath)
+	if proj.ID == "" {
+		return "", fmt.Errorf("empty project id returned from 't3 project add'")
+	}
+	return proj.ID, nil
 }
 
 // ListLiveProjects retrieves all active projects from GET /api/projects.
@@ -342,26 +432,208 @@ func (b *T3Backend) CaptureOutput(ctx context.Context, handle backend.TaskHandle
 	return strings.Join(allLines, "\n"), nil
 }
 
-// -------------------------------------------------------------------------
-// Mutation-dependent methods (deferred to Phase 2; return ErrNotImplementedPhase1)
-// -------------------------------------------------------------------------
-
-// DispatchTask launches a task on T3 Code via MCP t3_thread_launch in Phase 2.
+// DispatchTask launches a task on T3 Code via MCP t3_thread_launch.
+// Automatically auto-registers the project if unregistered (Decision 3),
+// creates an isolated git worktree if spec.UseWorktree is set, and launches
+// with runtimeMode "full-access".
 func (b *T3Backend) DispatchTask(ctx context.Context, spec backend.DispatchSpec) (*backend.DispatchResult, error) {
-	return nil, fmt.Errorf("DispatchTask: %w", backend.ErrNotImplementedPhase1)
+	if err := b.EnsureInitialized(ctx); err != nil {
+		return nil, err
+	}
+
+	projectID, err := b.EnsureProjectContainer(ctx, spec.ProjectName, spec.ProjectPath)
+	if err != nil {
+		return nil, fmt.Errorf("DispatchTask: %w", err)
+	}
+
+	// Prepare workspaceStrategy
+	var wsStrategy map[string]any
+	if spec.UseWorktree {
+		baseRef := spec.BaseRef
+		if baseRef == "" {
+			baseRef = "HEAD"
+		}
+		branch := spec.Branch
+		if branch == "" {
+			branch = spec.TaskSlug
+		}
+		wsStrategy = map[string]any{
+			"type":    "worktree",
+			"baseRef": baseRef,
+			"branch":  branch,
+		}
+	} else {
+		wsStrategy = map[string]any{
+			"type": "root",
+		}
+	}
+
+	// Prepare modelSelection
+	var modelSelection map[string]any
+	if spec.AgentSpec != "" {
+		if strings.Contains(spec.AgentSpec, "/") {
+			parts := strings.SplitN(spec.AgentSpec, "/", 2)
+			modelSelection = map[string]any{
+				"instanceId": parts[0],
+				"model":      parts[1],
+			}
+		} else {
+			modelSelection = map[string]any{
+				"instanceId": spec.AgentSpec,
+			}
+		}
+	}
+	if spec.Extra != nil && spec.Extra["modelSelection"] != nil {
+		if ms, ok := spec.Extra["modelSelection"].(map[string]any); ok {
+			modelSelection = ms
+		}
+	}
+
+	title := spec.TaskSlug
+	if title == "" {
+		title = spec.ProjectName + "-task"
+	}
+
+	params := LaunchThreadParams{
+		ProjectID:         projectID,
+		Title:             title,
+		Message:           spec.Prompt,
+		RuntimeMode:       "full-access",
+		ModelSelection:    modelSelection,
+		WorkspaceStrategy: wsStrategy,
+	}
+
+	launchRes, err := b.mcpClient.LaunchThread(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("DispatchTask: %w", err)
+	}
+
+	runID := ""
+	if launchRes.RunID != nil {
+		runID = *launchRes.RunID
+	}
+	status := ""
+	if launchRes.Status != nil {
+		status = *launchRes.Status
+	}
+
+	handle := backend.TaskHandle{
+		Backend:     "t3code",
+		ProjectID:   projectID,
+		TaskSlug:    spec.TaskSlug,
+		ThreadID:    launchRes.ThreadID,
+		ActiveRunID: runID,
+		LatestRunID: runID,
+		Branch:      spec.Branch,
+	}
+
+	return &backend.DispatchResult{
+		TaskHandle: handle,
+		PickedUp:   runID != "",
+		Preview:    fmt.Sprintf("T3 thread %s (run %s, status %s)", launchRes.ThreadID, runID, status),
+	}, nil
 }
 
-// CloseTask interrupts and archives a thread via MCP in Phase 2.
+// CloseTask interrupts and archives a thread via MCP tools.
 func (b *T3Backend) CloseTask(ctx context.Context, handle backend.TaskHandle) error {
-	return fmt.Errorf("CloseTask: %w", backend.ErrNotImplementedPhase1)
+	if handle.ThreadID == "" {
+		return fmt.Errorf("empty thread ID in task handle")
+	}
+
+	if err := b.EnsureInitialized(ctx); err != nil {
+		return err
+	}
+
+	// Best-effort interrupt
+	_ = b.mcpClient.InterruptThread(ctx, handle.ThreadID)
+
+	// Archive thread
+	return b.mcpClient.ArchiveThread(ctx, handle.ThreadID)
 }
 
-// SendMessage delivers messages or answers via MCP t3_pending_request / t3_thread_send in Phase 2.
-func (b *T3Backend) SendMessage(ctx context.Context, handle backend.TaskHandle, text string) error {
-	return fmt.Errorf("SendMessage: %w", backend.ErrNotImplementedPhase1)
+// SendMessage delivers messages or answers via MCP t3_pending_request or t3_thread_send.
+// Per Decision 2, multi-question answers are accepted as an ordered or keyed list
+// rather than bare string concatenation.
+func (b *T3Backend) SendMessage(ctx context.Context, handle backend.TaskHandle, msg backend.MessageInput) error {
+	if handle.ThreadID == "" {
+		return fmt.Errorf("empty thread ID in task handle")
+	}
+
+	if err := b.EnsureInitialized(ctx); err != nil {
+		return err
+	}
+
+	// Detect if there are pending interactive requests on the thread
+	reqIDs, err := b.mcpClient.ListPendingRequests(ctx, handle.ThreadID)
+	if err != nil {
+		if errors.Is(err, ErrMcpAuthRequired) {
+			return err
+		}
+		// If listing pending requests fails for other reason, try normal send
+		reqIDs = nil
+	}
+
+	if len(reqIDs) > 0 {
+		reqID := reqIDs[0]
+		detail, err := b.mcpClient.ReadPendingRequest(ctx, handle.ThreadID, reqID)
+		if err != nil {
+			return fmt.Errorf("failed to read pending question: %w", err)
+		}
+
+		answersMap := make(map[string]any)
+
+		switch {
+		case len(msg.KeyedAnswers) > 0:
+			answersMap = msg.KeyedAnswers
+
+		case len(msg.Answers) > 0:
+			// Map ordered answers to questions
+			for i, ans := range msg.Answers {
+				if i < len(detail.Questions) {
+					answersMap[detail.Questions[i].ID] = ans
+				} else {
+					answersMap[fmt.Sprintf("q%d", i+1)] = ans
+				}
+			}
+
+		case msg.Text != "":
+			if len(detail.Questions) == 1 {
+				answersMap[detail.Questions[0].ID] = msg.Text
+			} else if len(detail.Questions) > 1 {
+				return fmt.Errorf("thread has %d pending questions; repeatable answers required (cannot use single message)", len(detail.Questions))
+			} else {
+				answersMap["answer"] = msg.Text
+			}
+
+		default:
+			return fmt.Errorf("cannot send empty message or answers")
+		}
+
+		return b.mcpClient.RespondPendingRequest(ctx, handle.ThreadID, reqID, answersMap)
+	}
+
+	// Normal conversational turn (no pending requests)
+	text := msg.Text
+	if text == "" && len(msg.Answers) > 0 {
+		text = strings.Join(msg.Answers, "\n")
+	}
+	if text == "" {
+		return fmt.Errorf("cannot send empty message to thread")
+	}
+
+	_, err = b.mcpClient.SendThread(ctx, handle.ThreadID, text, "auto")
+	return err
 }
 
-// InterruptTask stops a running thread via MCP t3_thread_interrupt in Phase 2.
+// InterruptTask stops a running thread turn via MCP t3_thread_interrupt (ctrl+c semantics).
 func (b *T3Backend) InterruptTask(ctx context.Context, handle backend.TaskHandle) error {
-	return fmt.Errorf("InterruptTask: %w", backend.ErrNotImplementedPhase1)
+	if handle.ThreadID == "" {
+		return fmt.Errorf("empty thread ID in task handle")
+	}
+
+	if err := b.EnsureInitialized(ctx); err != nil {
+		return err
+	}
+
+	return b.mcpClient.InterruptThread(ctx, handle.ThreadID)
 }

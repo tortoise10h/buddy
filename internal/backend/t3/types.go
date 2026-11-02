@@ -237,3 +237,71 @@ type McpContent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 }
+
+// UserInputQuestionOption models a selectable option for a user input question.
+type UserInputQuestionOption struct {
+	Label       string  `json:"label"`
+	Description string  `json:"description,omitempty"`
+	Value       *string `json:"value,omitempty"`
+	Preview     *string `json:"preview,omitempty"`
+}
+
+// UserInputQuestion models a single question presented to the user by a worker.
+type UserInputQuestion struct {
+	ID                string                    `json:"id"`
+	Header            string                    `json:"header"`
+	Question          string                    `json:"question"`
+	Options           []UserInputQuestionOption `json:"options,omitempty"`
+	MultiSelect       bool                      `json:"multiSelect,omitempty"`
+	AllowCustomAnswer bool                      `json:"allowCustomAnswer,omitempty"`
+	InitialAnswer     *string                   `json:"initialAnswer,omitempty"`
+	Required          bool                      `json:"required,omitempty"`
+}
+
+// PendingQuestionList represents the result of t3_pending_request action="list".
+type PendingQuestionList struct {
+	RequestIDs []string `json:"requestIds"`
+}
+
+// PendingQuestionDetail represents the result of t3_pending_request action="read".
+type PendingQuestionDetail struct {
+	RequestID string              `json:"requestId"`
+	Questions []UserInputQuestion `json:"questions"`
+}
+
+// LaunchThreadParams models parameters for MCP tool t3_thread_launch.
+type LaunchThreadParams struct {
+	ProjectID         string         `json:"projectId,omitempty"`
+	Title             string         `json:"title"`
+	Message           string         `json:"message,omitempty"`
+	RuntimeMode       string         `json:"runtimeMode,omitempty"` // "full-access"
+	ModelSelection    map[string]any `json:"modelSelection,omitempty"`
+	WorkspaceStrategy map[string]any `json:"workspaceStrategy,omitempty"`
+}
+
+// ThreadLaunchResult models the result returned by MCP tool t3_thread_launch.
+type ThreadLaunchResult struct {
+	ThreadID       string         `json:"threadId"`
+	Link           string         `json:"link,omitempty"`
+	ProjectID      string         `json:"projectId"`
+	ModelSelection map[string]any `json:"modelSelection,omitempty"`
+	RunID          *string        `json:"runId,omitempty"`
+	Status         *string        `json:"status,omitempty"`
+}
+
+// McpThreadSendResult models the result returned by MCP tool t3_thread_send.
+type McpThreadSendResult struct {
+	ThreadID  string  `json:"threadId"`
+	Link      *string `json:"link,omitempty"`
+	MessageID string  `json:"messageId"`
+	RunID     string  `json:"runId"`
+	Status    string  `json:"status"`
+	Delivery  string  `json:"delivery"`
+}
+
+// McpThreadInterruptResult models the result returned by MCP tool t3_thread_interrupt.
+type McpThreadInterruptResult struct {
+	ThreadID    string  `json:"threadId"`
+	Interrupted bool    `json:"interrupted"`
+	RunID       *string `json:"runId,omitempty"`
+}

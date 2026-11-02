@@ -137,7 +137,7 @@ func TestRexBackend_WorkerBackend(t *testing.T) {
 	}
 
 	// SendMessage
-	if err := b.SendMessage(ctx, handle, "test message"); err != nil {
+	if err := b.SendMessage(ctx, handle, backend.TextMessage("test message")); err != nil {
 		t.Errorf("SendMessage failed: %v", err)
 	}
 

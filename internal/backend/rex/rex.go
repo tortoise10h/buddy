@@ -423,7 +423,11 @@ func (r *RexBackend) CloseTask(ctx context.Context, handle backend.TaskHandle) e
 }
 
 // SendMessage sends text input to the task pane followed by enter.
-func (r *RexBackend) SendMessage(ctx context.Context, handle backend.TaskHandle, text string) error {
+func (r *RexBackend) SendMessage(ctx context.Context, handle backend.TaskHandle, input backend.MessageInput) error {
+	text := input.Text
+	if text == "" && len(input.Answers) > 0 {
+		text = strings.Join(input.Answers, "\n")
+	}
 	return r.Send(ctx, handle.SessionID, handle.BlockID, backend.Input{
 		Text:  text,
 		Enter: true,

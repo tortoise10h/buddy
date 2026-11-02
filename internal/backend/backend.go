@@ -156,6 +156,31 @@ type AgentStatusReport struct {
 	RawState            map[string]any `json:"raw_state,omitempty"`
 }
 
+// MessageInput represents a message or answers to send to a worker task.
+// For standard conversational turns, Text is provided.
+// For interactive questions (e.g. T3 pending requests with multi-question prompts),
+// Answers provides an ordered or keyed list of answers without bare string concatenation.
+type MessageInput struct {
+	Text         string         `json:"text,omitempty"`
+	Answers      []string       `json:"answers,omitempty"`
+	KeyedAnswers map[string]any `json:"keyed_answers,omitempty"`
+}
+
+// TextMessage creates a MessageInput with plain text.
+func TextMessage(text string) MessageInput {
+	return MessageInput{Text: text}
+}
+
+// OrderedAnswers creates a MessageInput with an ordered list of answers.
+func OrderedAnswers(answers ...string) MessageInput {
+	return MessageInput{Answers: answers}
+}
+
+// KeyedAnswers creates a MessageInput with keyed answers.
+func KeyedAnswers(answers map[string]any) MessageInput {
+	return MessageInput{KeyedAnswers: answers}
+}
+
 // WorkerBackend defines the task execution abstraction for buddy-ctl.
 //
 // Implementations include:
@@ -175,7 +200,7 @@ type WorkerBackend interface {
 	CloseTask(ctx context.Context, handle TaskHandle) error
 
 	// Task interaction
-	SendMessage(ctx context.Context, handle TaskHandle, text string) error
+	SendMessage(ctx context.Context, handle TaskHandle, input MessageInput) error
 	InterruptTask(ctx context.Context, handle TaskHandle) error
 	CaptureOutput(ctx context.Context, handle TaskHandle, lines int) (string, error)
 	GetAgentStatus(ctx context.Context, handle TaskHandle) (*AgentStatusReport, error)
