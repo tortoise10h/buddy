@@ -5,16 +5,68 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/tortoise10h/buddy/internal/backend"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
+	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
 )
+
+type recordedNotification struct {
+	title    string
+	subtitle string
+	message  string
+	sound    string
+	enabled  bool
+}
+
+type notificationRecorder struct {
+	mu            sync.Mutex
+	notifications []recordedNotification
+}
+
+func (nr *notificationRecorder) Record(title, subtitle, message, sound string, enabled bool, customRunner ...notify.Runner) bool {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	nr.notifications = append(nr.notifications, recordedNotification{
+		title:    title,
+		subtitle: subtitle,
+		message:  message,
+		sound:    sound,
+		enabled:  enabled,
+	})
+	return true
+}
+
+func (nr *notificationRecorder) Reset() {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	nr.notifications = nil
+}
+
+func (nr *notificationRecorder) All() []recordedNotification {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	copied := make([]recordedNotification, len(nr.notifications))
+	copy(copied, nr.notifications)
+	return copied
+}
+
+var globalNotificationRecorder = &notificationRecorder{}
+
+func TestMain(m *testing.M) {
+	// Guard: Ensure notifyFn is pointed to a recorder by default during tests
+	// so real macOS desktop notifications are never sent.
+	notifyFn = globalNotificationRecorder.Record
+	os.Exit(m.Run())
+}
 
 type mockWatchBackend struct {
 	captures   []string
@@ -22,8 +74,8 @@ type mockWatchBackend struct {
 	captureErr error
 }
 
-func (m *mockWatchBackend) Name() string                               { return "rex" }
-func (m *mockWatchBackend) IsAvailable(ctx context.Context) bool       { return true }
+func (m *mockWatchBackend) Name() string                         { return "rex" }
+func (m *mockWatchBackend) IsAvailable(ctx context.Context) bool { return true }
 func (m *mockWatchBackend) EnsureSession(ctx context.Context, name string, cwd string) (backend.SessionInfo, error) {
 	return backend.SessionInfo{SessionID: "sess_watch_1", Name: name, Path: cwd}, nil
 }
@@ -72,14 +124,14 @@ func TestWatchRegex_BeforeAfterProvesRegression(t *testing.T) {
 	oldErrorRe := regexp.MustCompile(`(?i)traceback\s+\(most\s+recent\s+call\s+last\)|fatal\s+error|build\s+failed|npm\s+err!|panic:\s+`)
 
 	tests := []struct {
-		name         string
-		line         string
-		oldDemo      bool
-		newDemo      bool
-		oldInput     bool
-		newInput     bool
-		oldError     bool
-		newError     bool
+		name     string
+		line     string
+		oldDemo  bool
+		newDemo  bool
+		oldInput bool
+		newInput bool
+		oldError bool
+		newError bool
 	}{
 		{
 			name:     "Regression A: Prompt prose with 'done'",
@@ -258,7 +310,8 @@ func TestWatch_SummaryExtraction(t *testing.T) {
 	}
 }
 
-// TestWatch_PositiveC_CompletionWithDebounce verifies ready_for_demo triggers after debounce.
+// TestWatch_PositiveC_CompletionWithDebounce verifies ready_for_demo triggers after debounce
+// and delivers exactly one desktop notification with the matching event.
 func TestWatch_PositiveC_CompletionWithDebounce(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
@@ -266,6 +319,10 @@ func TestWatch_PositiveC_CompletionWithDebounce(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ProjectsRoots = []string{tmpDir}
 	_ = config.SaveConfig(cfg)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
 
 	mockBackend := &mockWatchBackend{
 		captures: []string{
@@ -295,6 +352,7 @@ func TestWatch_PositiveC_CompletionWithDebounce(t *testing.T) {
 		"--task", "task-c",
 		"--debounce", "2",
 		"--interval", "0",
+		"--notify=true",
 	})
 
 	if err := rootCmd.Execute(); err != nil {
@@ -320,12 +378,29 @@ func TestWatch_PositiveC_CompletionWithDebounce(t *testing.T) {
 	if task.Status != "ready_for_demo" {
 		t.Errorf("saved task status = %v, want ready_for_demo", task.Status)
 	}
+
+	// Verify exactly one recorded notification delivered with matching event
+	notifs := recorder.All()
+	if len(notifs) != 1 {
+		t.Fatalf("expected 1 recorded notification, got %d", len(notifs))
+	}
+	if !strings.Contains(notifs[0].subtitle, "ready_for_demo") {
+		t.Errorf("notification subtitle = %q, want containing 'ready_for_demo'", notifs[0].subtitle)
+	}
+	if !strings.Contains(notifs[0].message, "Task complete") {
+		t.Errorf("notification message = %q, want containing 'Task complete'", notifs[0].message)
+	}
 }
 
-// TestWatch_PositiveD_QuestionInput verifies waiting_for_input triggers on real question.
+// TestWatch_PositiveD_QuestionInput verifies waiting_for_input triggers on real question
+// and delivers exactly one desktop notification with the matching event.
 func TestWatch_PositiveD_QuestionInput(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
 
 	mockBackend := &mockWatchBackend{
 		captures: []string{
@@ -353,6 +428,7 @@ func TestWatch_PositiveD_QuestionInput(t *testing.T) {
 		"--task", "task-d",
 		"--debounce", "1",
 		"--interval", "0",
+		"--notify=true",
 	})
 
 	if err := rootCmd.Execute(); err != nil {
@@ -370,12 +446,29 @@ func TestWatch_PositiveD_QuestionInput(t *testing.T) {
 	if !strings.HasPrefix(resp["summary"].(string), "? Which option") {
 		t.Errorf("summary = %v, want prompt text", resp["summary"])
 	}
+
+	// Verify exactly one recorded notification delivered with matching event
+	notifs := recorder.All()
+	if len(notifs) != 1 {
+		t.Fatalf("expected 1 recorded notification, got %d", len(notifs))
+	}
+	if !strings.Contains(notifs[0].subtitle, "waiting_for_input") {
+		t.Errorf("notification subtitle = %q, want containing 'waiting_for_input'", notifs[0].subtitle)
+	}
+	if !strings.Contains(notifs[0].message, "? Which option") {
+		t.Errorf("notification message = %q, want containing '? Which option'", notifs[0].message)
+	}
 }
 
-// TestWatch_ErrorE_PanicLineStart verifies panic at line start triggers error, but prose does not.
+// TestWatch_ErrorE_PanicLineStart verifies panic at line start triggers error
+// and delivers exactly one desktop notification with the matching event.
 func TestWatch_ErrorE_PanicLineStart(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
 
 	mockBackend := &mockWatchBackend{
 		captures: []string{
@@ -403,6 +496,7 @@ func TestWatch_ErrorE_PanicLineStart(t *testing.T) {
 		"--task", "task-e",
 		"--debounce", "1",
 		"--interval", "0",
+		"--notify=true",
 	})
 
 	if err := rootCmd.Execute(); err != nil {
@@ -420,12 +514,29 @@ func TestWatch_ErrorE_PanicLineStart(t *testing.T) {
 	if !strings.HasPrefix(resp["summary"].(string), "panic:") {
 		t.Errorf("summary = %v, want line starting with panic:", resp["summary"])
 	}
+
+	// Verify exactly one recorded notification delivered with matching event
+	notifs := recorder.All()
+	if len(notifs) != 1 {
+		t.Fatalf("expected 1 recorded notification, got %d", len(notifs))
+	}
+	if !strings.Contains(notifs[0].subtitle, "error") {
+		t.Errorf("notification subtitle = %q, want containing 'error'", notifs[0].subtitle)
+	}
+	if !strings.Contains(notifs[0].message, "panic:") {
+		t.Errorf("notification message = %q, want containing 'panic:'", notifs[0].message)
+	}
 }
 
-// TestWatch_TestF_CachedTerminalStatusAtStart verifies already_reported=true and no state rewrite.
+// TestWatch_TestF_CachedTerminalStatusAtStart verifies already_reported=true,
+// no state rewrite, and zero notifications delivered.
 func TestWatch_TestF_CachedTerminalStatusAtStart(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
 
 	_ = state.MutateState(func(s *state.State) error {
 		s.RecordTask("proj-f", filepath.Join(tmpDir, "proj-f"), "sess_f", "sess_label_f", state.TaskState{
@@ -452,6 +563,7 @@ func TestWatch_TestF_CachedTerminalStatusAtStart(t *testing.T) {
 		"watch",
 		"--project", "proj-f",
 		"--task", "task-f",
+		"--notify=false",
 	})
 
 	if err := rootCmd.Execute(); err != nil {
@@ -480,6 +592,11 @@ func TestWatch_TestF_CachedTerminalStatusAtStart(t *testing.T) {
 	if taskAfter.UpdatedAt != beforeUpdatedAt {
 		t.Errorf("task UpdatedAt changed from %v to %v, state should not have been rewritten", beforeUpdatedAt, taskAfter.UpdatedAt)
 	}
+
+	// Verify zero notifications delivered for already_reported status
+	if len(recorder.All()) != 0 {
+		t.Errorf("expected 0 recorded notifications for already_reported status, got %d", len(recorder.All()))
+	}
 }
 
 // TestWatch_TestG_UnknownTargetFailsFast verifies fast error return rather than timeout.
@@ -496,6 +613,7 @@ func TestWatch_TestG_UnknownTargetFailsFast(t *testing.T) {
 		"--project", "nonexistent-project",
 		"--task", "nonexistent-task",
 		"--timeout", "1",
+		"--notify=false",
 	})
 	if err := rootCmd.Execute(); err == nil {
 		t.Errorf("expected error for nonexistent project, got nil")
@@ -517,6 +635,7 @@ func TestWatch_TestG_UnknownTargetFailsFast(t *testing.T) {
 		"--project", "proj-g",
 		"--task", "missing-task",
 		"--timeout", "1",
+		"--notify=false",
 	})
 	if err := rootCmd.Execute(); err == nil {
 		t.Errorf("expected error for missing task, got nil")
@@ -538,6 +657,7 @@ func TestWatch_TestG_UnknownTargetFailsFast(t *testing.T) {
 		"--project", "proj-g",
 		"--task", "no-block-task",
 		"--timeout", "1",
+		"--notify=false",
 	})
 	if err := rootCmd.Execute(); err == nil {
 		t.Errorf("expected error for task without agent block id, got nil")
@@ -556,6 +676,7 @@ func TestWatch_TestG_UnknownTargetFailsFast(t *testing.T) {
 		"--project", "proj-g",
 		"--task", "valid-task",
 		"--timeout", "5",
+		"--notify=false",
 	})
 	if err := rootCmd.Execute(); err == nil {
 		t.Errorf("expected error when capture fails, got nil")

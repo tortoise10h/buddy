@@ -28,6 +28,9 @@ var (
 	watchDemoRe  = watchDemoLineRe
 	watchErrorRe = watchErrorLineRe
 	watchInputRe = inputQuestionRe
+
+	// notifyFn is injectable for testing to intercept desktop notifications.
+	notifyFn = notify.SendDesktopNotification
 )
 
 func stripANSI(s string) string {
@@ -410,7 +413,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 						})
 
 						if notifyEnabled {
-							notify.SendDesktopNotification("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", target.project, target.task, matchedEvent), summary, "Glass", true)
+							notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", target.project, target.task, matchedEvent), summary, "Glass", true)
 						}
 
 						elapsed := int(time.Since(startTime).Seconds())
