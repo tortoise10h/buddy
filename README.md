@@ -48,7 +48,7 @@ Buddy solves the 3 core multi-project orchestration challenges:
         - Tab 2: feat-ui
 ```
 
-1. **Always-On System Prompt Identity**: `~/.buddy/AGENTS.md` is injected on every turn and survives `/compact`. Because it lives in `~/.buddy/`, worker agents in project repositories never inherit it.
+1. **Always-On System Prompt Identity**: `~/.buddy/AGENTS.md` (symlinked from `templates/orchestrator-AGENTS.md`) is injected on every turn and survives `/compact`. Because it lives in `~/.buddy/`, worker agents in project repositories never inherit it.
 2. **Ephemeral Turn Injections (Zero History Bloat)**: `~/.buddy/.agents/hooks.json` runs `buddy-ctl context-inject` on `PreInvocation`, emitting a transient `ephemeralMessage` with active project statuses that is discarded immediately after the turn.
 3. **O(1) Local State Cache**: `~/.buddy/state.json` maps projects and tasks to exact Rex session and block IDs, eliminating slow scans across Rex sessions.
 
@@ -126,7 +126,7 @@ This:
    - `~/.gemini/antigravity-cli/skills/buddy`
    - `~/.pi/agent/skills/buddy`
    - `~/.config/opencode/skills/buddy`
-3. Initializes `~/.buddy/` (`config.json`, `state.json`, `AGENTS.md`, `.agents/hooks.json`) with your configured project roots and agent roles.
+3. Initializes `~/.buddy/` (`config.json`, `state.json`, `AGENTS.md` symlinked to `templates/orchestrator-AGENTS.md`, `.agents/hooks.json`) with your configured project roots and agent roles.
 
 ---
 
