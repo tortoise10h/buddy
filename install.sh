@@ -496,6 +496,8 @@ mkdir -p "$HOME/.buddy/.agents"
 
 ORCHESTRATOR_TEMPLATE="$REPO_DIR/templates/orchestrator-AGENTS.md"
 DEST_AGENTS="$HOME/.buddy/AGENTS.md"
+# Migration path for pre-split installs where ~/.buddy/AGENTS.md was symlinked to $REPO_DIR/AGENTS.md.
+# TODO(2026-11-09): Remove OLD_AGENTS / canonical_old migration check after ~1 week once active users have upgraded.
 OLD_AGENTS="$REPO_DIR/AGENTS.md"
 
 if [ -L "$DEST_AGENTS" ]; then
