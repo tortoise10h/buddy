@@ -167,7 +167,7 @@ Buddy does not wait for manual polling. Whenever tasks are dispatched:
    )
    ```
 2. **Zero-Token Waiting**:
-   - The subagent executes `buddy-ctl watch --all`, which polls worker panes in Python. This consumes **zero LLM tokens** while waiting.
+   - The subagent executes `buddy-ctl watch --all`, which polls worker panes. This consumes **zero LLM tokens** while waiting.
    - Automatically triggers a native macOS desktop notification (`Glass` chime) on milestone events.
 3. **Reactive Wakeup**:
    - When an event occurs, the subagent messages Buddy via `send_message`.
