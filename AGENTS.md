@@ -112,7 +112,7 @@ Buddy does not wait for manual polling. Whenever tasks are dispatched (or when m
    - Prompt instructions for subagent:
      `"Monitor all active tasks across projects. Run 'buddy-ctl watch --all --interval 5 --timeout 600'. When it returns with an event (waiting_for_input, ready_for_demo, or error), message the parent Buddy agent via send_message with a concise summary of the event and what the worker needs."`
 2. **Zero-Token Waiting**:
-   - The subagent executes `buddy-ctl watch --all` in a lightweight Python loop, consuming **zero LLM tokens** while waiting.
+   - The subagent executes `buddy-ctl watch --all` in a lightweight loop, consuming **zero LLM tokens** while waiting.
 3. **Out-of-Band & In-Session Nudges**:
    - `buddy-ctl watch` automatically triggers a native **macOS desktop notification with a 'Glass' audio chime** whenever any worker transitions to `waiting_for_input` or `ready_for_demo`.
    - When an event fires, the subagent messages parent Buddy via `send_message`, waking Buddy up via **Reactive Wakeup**.

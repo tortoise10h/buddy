@@ -385,7 +385,7 @@ echo ""
 echo "Configuring Buddy agents..."
 
 # Harness candidates, filtered to those actually installed on this machine.
-# Keep in sync with DEFAULT_CONFIG["agents"] in skills/buddy/scripts/buddy-ctl.
+# Keep in sync with DefaultConfig() in internal/config/config.go.
 HARNESS_CANDIDATES=("agy" "pi" "opencode" "claude" "codex" "cursor" "gemini")
 
 AVAILABLE_AGENTS=()

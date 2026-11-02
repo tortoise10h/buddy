@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "python3 /Users/sunday/.local/bin/buddy-ctl context-inject",
+        "command": "/Users/sunday/.local/bin/buddy-ctl context-inject",
         "timeout": 5
       }
     ]
