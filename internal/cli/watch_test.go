@@ -170,6 +170,24 @@ func TestWatchRegex_BeforeAfterProvesRegression(t *testing.T) {
 			newInput: true,
 		},
 		{
+			name:     "Positive input: Which option prompt",
+			line:     "? Which option would you like to select?",
+			oldInput: true,
+			newInput: true,
+		},
+		{
+			name:     "Positive input: Bracket y/n prompt",
+			line:     "[y/n] Proceed with migration?",
+			oldInput: true,
+			newInput: true,
+		},
+		{
+			name:     "Regression: Go test no test files line",
+			line:     "?       github.com/tortoise10h/buddy/internal/backend    [no test files]",
+			oldInput: true,  // Old regex suffered false-positive
+			newInput: false, // Must be rejected
+		},
+		{
 			name:     "Positive error: Panic at line start",
 			line:     "panic: runtime error: index out of range",
 			oldError: true,
@@ -457,6 +475,132 @@ func TestWatch_PositiveD_QuestionInput(t *testing.T) {
 	}
 	if !strings.Contains(notifs[0].message, "? Which option") {
 		t.Errorf("notification message = %q, want containing '? Which option'", notifs[0].message)
+	}
+}
+
+// TestWatch_Positive_YesNoPrompt verifies that leading [y/n] prompts trigger waiting_for_input.
+func TestWatch_Positive_YesNoPrompt(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+	mockBackend := &mockWatchBackend{
+		captures: []string{
+			"[y/n] Proceed with migration?",
+		},
+	}
+	reg := getRegistry()
+	reg.Register("rex", engine.NewTerminalEngine(mockBackend))
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-yn", filepath.Join(tmpDir, "proj-yn"), "sess_yn", "sess_label_yn", state.TaskState{
+			TaskSlug:     "task-yn",
+			AgentBlockID: "blk_yn",
+			Status:       "running",
+		})
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"watch",
+		"--project", "proj-yn",
+		"--task", "task-yn",
+		"--debounce", "1",
+		"--interval", "0",
+		"--notify=true",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("watch execute failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+	}
+
+	if resp["event"] != "waiting_for_input" {
+		t.Errorf("event = %v, want waiting_for_input", resp["event"])
+	}
+	if resp["summary"] != "[y/n] Proceed with migration?" {
+		t.Errorf("summary = %v, want '[y/n] Proceed with migration?'", resp["summary"])
+	}
+
+	notifs := recorder.All()
+	if len(notifs) != 1 {
+		t.Fatalf("expected 1 recorded notification, got %d", len(notifs))
+	}
+	if !strings.Contains(notifs[0].subtitle, "waiting_for_input") {
+		t.Errorf("notification subtitle = %q, want containing 'waiting_for_input'", notifs[0].subtitle)
+	}
+}
+
+// TestWatch_GoTestOutputRegression verifies that go test lines starting with '? <pkg> [no test files]'
+// do NOT produce waiting_for_input, and allow ready_for_demo to trigger if a completion report is present.
+func TestWatch_GoTestOutputRegression(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+	mockBackend := &mockWatchBackend{
+		captures: []string{
+			"?       github.com/tortoise10h/buddy/internal/backend    [no test files]\n" +
+				"ok      github.com/tortoise10h/buddy/internal/backend/rex 0.151s\n" +
+				"Task complete!",
+		},
+	}
+	reg := getRegistry()
+	reg.Register("rex", engine.NewTerminalEngine(mockBackend))
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-gotest", filepath.Join(tmpDir, "proj-gotest"), "sess_gt", "sess_label_gt", state.TaskState{
+			TaskSlug:     "task-gotest",
+			AgentBlockID: "blk_gt",
+			Status:       "running",
+		})
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"watch",
+		"--project", "proj-gotest",
+		"--task", "task-gotest",
+		"--debounce", "1",
+		"--interval", "0",
+		"--notify=true",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("watch execute failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+	}
+
+	if resp["event"] != "ready_for_demo" {
+		t.Errorf("event = %v, want ready_for_demo (must not be waiting_for_input)", resp["event"])
+	}
+
+	notifs := recorder.All()
+	if len(notifs) != 1 {
+		t.Fatalf("expected 1 recorded notification, got %d", len(notifs))
+	}
+	if !strings.Contains(notifs[0].subtitle, "ready_for_demo") {
+		t.Errorf("notification subtitle = %q, want containing 'ready_for_demo'", notifs[0].subtitle)
 	}
 }
 

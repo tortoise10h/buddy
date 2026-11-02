@@ -19,8 +19,10 @@ var (
 	watchDemoLineRe  = regexp.MustCompile(`(?i)^(?:(?:\[?[✓✔xX☑]\]?|[✅•●*-])\s*)?(?:task\s+complete[d]?(?::\s*.+)?|implementation\s+complete[d]?(?::\s*.+)?|all\s+tests\s+pass(?:ed)?(?::\s*.+)?|ready\s+for\s+(?:review|demo)|successfully\s+(?:implemented|built|completed)(?::\s*.+)?|finished\s+implementing|done)[.!]?$`)
 	watchErrorLineRe = regexp.MustCompile(`(?i)^(?:panic:\s+|fatal(?:\s+error)?:|traceback\s+\(most\s+recent\s+call\s+last\):?|npm\s+err!|build\s+failed)`)
 
-	inputStartPromptRe = regexp.MustCompile(`^(?:\[\?\]|\?)\s+`)
-	inputQuestionRe    = regexp.MustCompile(`(?i)^(?:(?:\[\?\]|\?)\s+.*|\s*(?:do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|what\s+would\s+you\s+like|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|clarification\s+needed|approval\s+needed|proceed\s*\?).*|.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\))\s*$)`)
+	inputStartPromptRe  = regexp.MustCompile(`^(?:\[\?\]|\?)\s+`)
+	toolOutputRe        = regexp.MustCompile(`(?i)(?:^|\s)(?:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+|\./\S+)\s+(?:\[.*\]|\d+(?:\.\d+)?s|\(cached\))`)
+	interactivePhraseRe = regexp.MustCompile(`(?i)(?:(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|proceed\s*\?|clarification\s+needed|approval\s+needed|what\s+would\s+you\s+like|do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\))`)
+	inputQuestionRe     = regexp.MustCompile(`(?i)^(?:(?:\[\?\]|\?)\s+.*|\s*(?:do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|what\s+would\s+you\s+like|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|clarification\s+needed|approval\s+needed|proceed\s*\?).*|.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\)).*$)`)
 
 	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
 
@@ -155,9 +157,18 @@ func matchInputLine(line string) bool {
 		return false
 	}
 	lower := strings.ToLower(trimmed)
-	if strings.Contains(lower, "for shortcuts") {
+
+	// Outright reject known false positives
+	if strings.Contains(lower, "for shortcuts") || strings.Contains(lower, "[no test files]") {
 		return false
 	}
+
+	// Reject candidates that look like tool output (package/module path followed by timing or bracket text)
+	if toolOutputRe.MatchString(trimmed) {
+		return false
+	}
+
+	// If line starts with "?" or "[?]" prompt marker:
 	if inputStartPromptRe.MatchString(trimmed) {
 		rest := strings.TrimSpace(inputStartPromptRe.ReplaceAllString(trimmed, ""))
 		if rest == "" {
@@ -166,9 +177,17 @@ func matchInputLine(line string) bool {
 		if strings.HasPrefix(strings.ToLower(rest), "for shortcuts") {
 			return false
 		}
-		return true
+		// Candidate must end with "?" or match explicit interactive phrases
+		return strings.HasSuffix(rest, "?") || interactivePhraseRe.MatchString(rest)
 	}
-	return inputQuestionRe.MatchString(trimmed)
+
+	// For lines prefixed with choice markers like [y/n]
+	if strings.HasPrefix(lower, "[y/n]") || strings.HasPrefix(lower, "(y/n)") ||
+		strings.HasPrefix(lower, "[yes/no]") || strings.HasPrefix(lower, "(yes/no)") {
+		return strings.HasSuffix(trimmed, "?") || interactivePhraseRe.MatchString(trimmed)
+	}
+
+	return inputQuestionRe.MatchString(trimmed) && (strings.HasSuffix(trimmed, "?") || interactivePhraseRe.MatchString(trimmed))
 }
 
 func extractSummary(lines []string, matchIdx int) string {
