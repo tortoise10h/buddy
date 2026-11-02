@@ -540,10 +540,10 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # Determine repo directory
     repo_dir = Path(__file__).resolve().parents[3]
-    repo_agents = repo_dir / "AGENTS.md"
+    repo_agents = repo_dir / "templates" / "orchestrator-AGENTS.md"
     repo_hooks = repo_dir / ".agents" / "hooks.json"
 
-    # 3. AGENTS.md (symlink to repo source of truth if available)
+    # 3. AGENTS.md (symlink to repo orchestrator template if available)
     if repo_agents.is_file():
         if AGENTS_MD_PATH.is_symlink() or AGENTS_MD_PATH.exists():
             if args.force or not AGENTS_MD_PATH.is_symlink():

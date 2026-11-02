@@ -493,9 +493,35 @@ echo "  • Worker: $CHOSEN_WORKER"
 # 6. Initialize ~/.buddy Control Tower & symlink workspace rules
 echo "Initializing ~/.buddy Control Tower..."
 mkdir -p "$HOME/.buddy/.agents"
-ln -sf "$REPO_DIR/AGENTS.md" "$HOME/.buddy/AGENTS.md"
+
+ORCHESTRATOR_TEMPLATE="$REPO_DIR/templates/orchestrator-AGENTS.md"
+DEST_AGENTS="$HOME/.buddy/AGENTS.md"
+OLD_AGENTS="$REPO_DIR/AGENTS.md"
+
+if [ -L "$DEST_AGENTS" ]; then
+    current_target="$(readlink "$DEST_AGENTS" 2>/dev/null || true)"
+    canonical_repo="$(cd "$REPO_DIR" 2>/dev/null && pwd -P || echo "$REPO_DIR")"
+    canonical_template="$(cd "$REPO_DIR/templates" 2>/dev/null && pwd -P || echo "$REPO_DIR/templates")/orchestrator-AGENTS.md"
+    canonical_old="$canonical_repo/AGENTS.md"
+
+    if [ "$current_target" = "$OLD_AGENTS" ] || [ "$current_target" = "$canonical_old" ]; then
+        rm -f "$DEST_AGENTS"
+    elif [ "$current_target" = "$ORCHESTRATOR_TEMPLATE" ] || [ "$current_target" = "$canonical_template" ]; then
+        rm -f "$DEST_AGENTS"
+    else
+        backup="${DEST_AGENTS}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$DEST_AGENTS" "$backup"
+        echo "ℹ Backed up existing ~/.buddy/AGENTS.md -> $backup"
+    fi
+elif [ -e "$DEST_AGENTS" ]; then
+    backup="${DEST_AGENTS}.bak-$(date +%Y%m%d%H%M%S)"
+    mv "$DEST_AGENTS" "$backup"
+    echo "ℹ Backed up existing ~/.buddy/AGENTS.md -> $backup"
+fi
+
+ln -sf "$ORCHESTRATOR_TEMPLATE" "$DEST_AGENTS"
 ln -sf "$REPO_DIR/.agents/hooks.json" "$HOME/.buddy/.agents/hooks.json"
-echo "✔ Symlinked ~/.buddy/AGENTS.md -> $REPO_DIR/AGENTS.md"
+echo "✔ Symlinked ~/.buddy/AGENTS.md -> $ORCHESTRATOR_TEMPLATE"
 echo "✔ Symlinked ~/.buddy/.agents/hooks.json -> $REPO_DIR/.agents/hooks.json"
 
 INIT_ARGS=()
