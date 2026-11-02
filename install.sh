@@ -493,7 +493,6 @@ echo "  • Worker: $CHOSEN_WORKER"
 # 6. Initialize ~/.buddy Control Tower & symlink workspace rules
 echo "Initializing ~/.buddy Control Tower..."
 mkdir -p "$HOME/.buddy/.agents"
-
 ORCHESTRATOR_TEMPLATE="$REPO_DIR/templates/orchestrator-AGENTS.md"
 DEST_AGENTS="$HOME/.buddy/AGENTS.md"
 # Migration path for pre-split installs where ~/.buddy/AGENTS.md was symlinked to $REPO_DIR/AGENTS.md.
@@ -522,9 +521,42 @@ elif [ -e "$DEST_AGENTS" ]; then
 fi
 
 ln -sf "$ORCHESTRATOR_TEMPLATE" "$DEST_AGENTS"
-ln -sf "$REPO_DIR/.agents/hooks.json" "$HOME/.buddy/.agents/hooks.json"
 echo "✔ Symlinked ~/.buddy/AGENTS.md -> $ORCHESTRATOR_TEMPLATE"
-echo "✔ Symlinked ~/.buddy/.agents/hooks.json -> $REPO_DIR/.agents/hooks.json"
+
+HOOKS_TEMPLATE="$REPO_DIR/templates/hooks.json"
+DEST_HOOKS="$HOME/.buddy/.agents/hooks.json"
+OLD_HOOKS="$REPO_DIR/.agents/hooks.json"
+
+tmp_rendered="$(mktemp "${TMPDIR:-/tmp}/buddy-hooks.XXXXXX")"
+sed "s|__BUDDY_CTL__|$LOCAL_BIN/buddy-ctl|g" "$HOOKS_TEMPLATE" > "$tmp_rendered"
+chmod 644 "$tmp_rendered"
+
+if [ -L "$DEST_HOOKS" ]; then
+    current_target="$(readlink "$DEST_HOOKS" 2>/dev/null || true)"
+    canonical_repo="$(cd "$REPO_DIR" 2>/dev/null && pwd -P || echo "$REPO_DIR")"
+    canonical_old="$canonical_repo/.agents/hooks.json"
+
+    if [ "$current_target" = "$OLD_HOOKS" ] || [ "$current_target" = "$canonical_old" ] || [ ! -e "$DEST_HOOKS" ]; then
+        rm -f "$DEST_HOOKS"
+    else
+        backup="${DEST_HOOKS}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$DEST_HOOKS" "$backup"
+        echo "ℹ Backed up existing ~/.buddy/.agents/hooks.json -> $backup"
+    fi
+elif [ -f "$DEST_HOOKS" ]; then
+    if ! cmp -s "$tmp_rendered" "$DEST_HOOKS"; then
+        backup="${DEST_HOOKS}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$DEST_HOOKS" "$backup"
+        echo "ℹ Backed up existing ~/.buddy/.agents/hooks.json -> $backup"
+    fi
+elif [ -e "$DEST_HOOKS" ]; then
+    backup="${DEST_HOOKS}.bak-$(date +%Y%m%d%H%M%S)"
+    mv "$DEST_HOOKS" "$backup"
+    echo "ℹ Backed up existing ~/.buddy/.agents/hooks.json -> $backup"
+fi
+
+mv "$tmp_rendered" "$DEST_HOOKS"
+echo "✔ Generated ~/.buddy/.agents/hooks.json"
 
 INIT_ARGS=()
 for r in "${COLLECTED_ROOTS[@]}"; do
