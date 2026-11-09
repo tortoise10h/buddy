@@ -50,4 +50,5 @@ func init() {
 	rootCmd.AddCommand(newDiagnoseCmd())
 	rootCmd.AddCommand(newBatchCmd())
 	rootCmd.AddCommand(newContextInjectCmd())
+	rootCmd.AddCommand(newT3Cmd())
 }

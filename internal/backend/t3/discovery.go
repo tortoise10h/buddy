@@ -46,6 +46,10 @@ func NewServerDiscovery(opts ...DiscoveryOption) *ServerDiscovery {
 // equivalent ~/.t3/userdata/server-runtime.json.
 // If neither exists, it returns a graceful ErrServerNotRunning error.
 func (d *ServerDiscovery) DiscoverRuntime() (*ServerRuntime, error) {
+	if envURL := os.Getenv("BUDDY_T3_SERVER_URL"); envURL != "" {
+		return &ServerRuntime{Origin: strings.TrimRight(envURL, "/")}, nil
+	}
+
 	candidates := d.candidatePaths()
 
 	var lastErr error

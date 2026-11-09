@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -112,6 +111,28 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			format := strings.ToLower(formatStr)
+			hasT3 := false
+			for _, pData := range projects {
+				for _, tData := range pData.Tasks {
+					eng := strings.ToLower(tData.GetEngine())
+					if eng == "t3code" || eng == "t3" {
+						hasT3 = true
+						break
+					}
+				}
+				if hasT3 {
+					break
+				}
+			}
+
+			var t3Warning string
+			if hasT3 {
+				oauthStatus := t3.InspectOAuthToken("")
+				if oauthStatus.WarningMessage != "" {
+					t3Warning = oauthStatus.WarningMessage
+				}
+			}
+
 			if format == "" || format == "json" {
 				resp := map[string]any{
 					"version":          st.Version,
@@ -119,7 +140,10 @@ func newStatusCmd() *cobra.Command {
 					"updated_at":       st.UpdatedAt,
 					"projects":         projects,
 				}
-				enc := json.NewEncoder(os.Stdout)
+				if t3Warning != "" {
+					resp["warning"] = t3Warning
+				}
+				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(resp)
 			}
@@ -138,6 +162,9 @@ func newStatusCmd() *cobra.Command {
 						}
 						lines = append(lines, fmt.Sprintf("• %s/%s [%s | %s]: %s", pName, tSlug, agent, tData.Status, tData.LastSummary))
 					}
+				}
+				if t3Warning != "" {
+					lines = append(lines, fmt.Sprintf("\n⚠️ %s", t3Warning))
 				}
 				if len(lines) == 0 {
 					fmt.Println("No active projects or tasks.")
@@ -166,6 +193,9 @@ func newStatusCmd() *cobra.Command {
 					}
 					fmt.Printf("%-16s %-20s %-8s %-16s %s\n", pName, tSlug, agent, tData.Status, summary)
 				}
+			}
+			if t3Warning != "" {
+				fmt.Printf("\n⚠️ %s\n", t3Warning)
 			}
 			return nil
 		},
