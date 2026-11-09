@@ -151,6 +151,15 @@ func (b *T3Backend) Capabilities() backend.WorkerCapabilities {
 	}
 }
 
+// IsAvailable checks whether the T3 Code server runtime is discoverable and responding.
+func (b *T3Backend) IsAvailable(ctx context.Context) bool {
+	if err := b.EnsureInitialized(ctx); err != nil {
+		return false
+	}
+	_, err := b.httpClient.GetProjects(ctx)
+	return err == nil
+}
+
 // HTTPClient returns the underlying HTTP client.
 func (b *T3Backend) HTTPClient() *HTTPClient {
 	return b.httpClient

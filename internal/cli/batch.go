@@ -94,13 +94,7 @@ func newBatchCmd() *cobra.Command {
 
 				slug := project.DeriveSlug(spec.Task, spec.Prompt, projName)
 
-				engineName := spec.Engine
-				if engineName == "" {
-					engineName = cfg.DefaultEngine
-					if engineName == "" {
-						engineName = "rex"
-					}
-				}
+				engineName := resolveWorkerEngineName(spec.Engine, "", cfg)
 
 				eng, err := getEngine(engineName)
 				if err != nil {
@@ -143,6 +137,17 @@ func newBatchCmd() *cobra.Command {
 					preview = preview[:60] + "..."
 				}
 
+				var branch *string
+				var worktreePath *string
+				if res.Extra != nil {
+					if b, ok := res.Extra["branch"].(string); ok && b != "" {
+						branch = &b
+					}
+					if w, ok := res.Extra["worktree_path"].(string); ok && w != "" {
+						worktreePath = &w
+					}
+				}
+
 				_ = state.MutateState(func(s *state.State) error {
 					var initialPrompt *string
 					if spec.Prompt != "" {
@@ -159,6 +164,8 @@ func newBatchCmd() *cobra.Command {
 						Status:        "running",
 						InitialPrompt: initialPrompt,
 						LastSummary:   preview,
+						Branch:        branch,
+						WorktreePath:  worktreePath,
 					})
 					return nil
 				})

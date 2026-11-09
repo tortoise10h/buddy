@@ -14,11 +14,12 @@ import (
 
 func newDispatchCmd() *cobra.Command {
 	var (
-		projectName string
-		taskSlug    string
-		prompt      string
-		agentName   string
-		engineName  string
+		projectName   string
+		taskSlug      string
+		prompt        string
+		agentName     string
+		engineName    string
+		workerBackend string
 	)
 
 	cmd := &cobra.Command{
@@ -51,22 +52,22 @@ func newDispatchCmd() *cobra.Command {
 			slug := project.DeriveSlug(taskSlug, prompt, projName)
 
 			// 3. Resolve engine
-			if engineName == "" {
-				engineName = cfg.DefaultEngine
-				if engineName == "" {
-					engineName = "rex"
-				}
-			}
+			engineName = resolveWorkerEngineName(engineName, workerBackend, cfg)
 			eng, err := getEngine(engineName)
 			if err != nil {
 				return err
 			}
 
-			// 4. Resolve agent command
+			// 4. Resolve agent command / agent spec
 			if agentName == "" {
 				agentName = cfg.GetEffectiveWorkerAgent()
 			}
-			agentCmd, _, _ := cfg.GetAgentCommand(agentName)
+			var agentCmd []string
+			if engineName == "t3code" || engineName == "t3" {
+				agentCmd = []string{agentName}
+			} else {
+				agentCmd, _, _ = cfg.GetAgentCommand(agentName)
+			}
 
 			// 5. Dispatch via engine
 			res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{
@@ -86,6 +87,17 @@ func newDispatchCmd() *cobra.Command {
 				preview = preview[:60] + "..."
 			}
 
+			var worktreePath *string
+			var branch *string
+			if res.Extra != nil {
+				if wp, ok := res.Extra["worktree_path"].(string); ok && wp != "" {
+					worktreePath = &wp
+				}
+				if br, ok := res.Extra["branch"].(string); ok && br != "" {
+					branch = &br
+				}
+			}
+
 			err = state.MutateState(func(s *state.State) error {
 				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
 					TaskSlug:      slug,
@@ -95,6 +107,8 @@ func newDispatchCmd() *cobra.Command {
 					AgentBlockID:  res.BlockID,
 					Agent:         agentName,
 					Cwd:           projPath,
+					WorktreePath:  worktreePath,
+					Branch:        branch,
 					Status:        "running",
 					InitialPrompt: &prompt,
 					LastSummary:   preview,
@@ -114,6 +128,7 @@ func newDispatchCmd() *cobra.Command {
 				"window_id":      res.WindowID,
 				"agent_block_id": res.BlockID,
 				"agent":          agentName,
+				"engine":         engineName,
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -124,8 +139,9 @@ func newDispatchCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Project name or directory path")
 	cmd.Flags().StringVarP(&prompt, "prompt", "m", "", "Task prompt to execute")
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
-	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch (agy, pi, opencode, etc.)")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch (agy, pi, opencode, or <provider>/<model>)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3code)")
+	cmd.Flags().StringVar(&workerBackend, "worker-backend", "", "Worker execution backend (alias for --engine)")
 
 	return cmd
 }

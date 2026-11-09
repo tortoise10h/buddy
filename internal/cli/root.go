@@ -10,6 +10,8 @@ var (
 	Version = "v0.1.0-dev"
 	Commit  = "none"
 	Date    = "unknown"
+
+	globalWorkerBackend string
 )
 
 var rootCmd = &cobra.Command{
@@ -28,6 +30,8 @@ func Execute() error {
 func init() {
 	rootCmd.Version = fmt.Sprintf("%s (commit: %s, date: %s)", Version, Commit, Date)
 	rootCmd.SetVersionTemplate("buddy-ctl {{.Version}}\n")
+
+	rootCmd.PersistentFlags().StringVar(&globalWorkerBackend, "worker-backend", "", "Worker execution backend (rex, t3code)")
 
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newInitCmd())

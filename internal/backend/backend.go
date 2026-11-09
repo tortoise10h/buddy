@@ -11,9 +11,11 @@ var ErrNotImplementedPhase1 = errors.New("not implemented in phase 1")
 
 // Input represents text and/or keystrokes to send to a running terminal pane.
 type Input struct {
-	Text  string
-	Key   string
-	Enter bool
+	Text         string
+	Key          string
+	Enter        bool
+	Answers      []string
+	KeyedAnswers map[string]any
 }
 
 // SessionInfo represents a project session or workspace.

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
 )
@@ -78,12 +80,17 @@ func newWatchCmd() *cobra.Command {
 					for pName, pData := range st.Projects {
 						for tName, tData := range pData.Tasks {
 							if tData.Status == "running" && tData.AgentBlockID != "" {
+								sessID := pData.RexSessionID
+								engName := tData.GetEngine()
+								if engName == "t3code" || engName == "t3" {
+									sessID = pName
+								}
 								targets = append(targets, targetTask{
 									project:   pName,
 									task:      tName,
-									sessionID: pData.RexSessionID,
+									sessionID: sessID,
 									blockID:   tData.AgentBlockID,
-									engine:    tData.GetEngine(),
+									engine:    engName,
 								})
 							}
 						}
@@ -93,12 +100,17 @@ func newWatchCmd() *cobra.Command {
 					if err == nil {
 						t, err := p.FindTask(taskSlug)
 						if err == nil {
+							sessID := p.RexSessionID
+							engName := t.GetEngine()
+							if engName == "t3code" || engName == "t3" {
+								sessID = p.Name
+							}
 							targets = append(targets, targetTask{
 								project:   p.Name,
 								task:      t.TaskSlug,
-								sessionID: p.RexSessionID,
+								sessionID: sessID,
 								blockID:   t.AgentBlockID,
-								engine:    t.GetEngine(),
+								engine:    engName,
 							})
 						}
 					}
@@ -110,36 +122,63 @@ func newWatchCmd() *cobra.Command {
 						continue
 					}
 
-					out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 20)
-					if err != nil {
-						continue
+					var matchedEvent, summary string
+
+					// For T3 engine, query typed status first
+					if t3Eng, ok := eng.(*engine.T3Engine); ok {
+						handle := backend.TaskHandle{ProjectID: target.project, ThreadID: target.blockID}
+						if rep, err := t3Eng.Backend().GetAgentStatus(cmd.Context(), handle); err == nil && rep != nil {
+							switch rep.Status {
+							case "waiting_for_input":
+								if untilSet["input"] || untilSet["any"] {
+									matchedEvent = "waiting_for_input"
+									summary = rep.Summary
+								}
+							case "ready_for_demo":
+								if untilSet["demo"] || untilSet["done"] || untilSet["any"] {
+									matchedEvent = "ready_for_demo"
+									summary = rep.Summary
+								}
+							case "error":
+								if untilSet["error"] || untilSet["any"] {
+									matchedEvent = "error"
+									summary = rep.Summary
+								}
+							}
+						}
 					}
 
-					var matchedEvent, summary string
-					lines := strings.Split(strings.TrimRight(out, "\r\n"), "\n")
+					if matchedEvent == "" {
+						out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 20)
+						if err != nil {
+							continue
+						}
 
-					if (untilSet["input"] || untilSet["any"]) && watchInputRe.MatchString(out) {
-						matchedEvent = "waiting_for_input"
-						for i := len(lines) - 1; i >= 0; i-- {
-							if watchInputRe.MatchString(lines[i]) {
-								summary = strings.TrimSpace(lines[i])
-								break
+						lines := strings.Split(strings.TrimRight(out, "\r\n"), "\n")
+
+						if (untilSet["input"] || untilSet["any"]) && watchInputRe.MatchString(out) {
+							matchedEvent = "waiting_for_input"
+							for i := len(lines) - 1; i >= 0; i-- {
+								if watchInputRe.MatchString(lines[i]) {
+									summary = strings.TrimSpace(lines[i])
+									break
+								}
 							}
-						}
-					} else if (untilSet["demo"] || untilSet["done"] || untilSet["any"]) && watchDemoRe.MatchString(out) {
-						matchedEvent = "ready_for_demo"
-						for i := len(lines) - 1; i >= 0; i-- {
-							if watchDemoRe.MatchString(lines[i]) {
-								summary = strings.TrimSpace(lines[i])
-								break
+						} else if (untilSet["demo"] || untilSet["done"] || untilSet["any"]) && watchDemoRe.MatchString(out) {
+							matchedEvent = "ready_for_demo"
+							for i := len(lines) - 1; i >= 0; i-- {
+								if watchDemoRe.MatchString(lines[i]) {
+									summary = strings.TrimSpace(lines[i])
+									break
+								}
 							}
-						}
-					} else if (untilSet["error"] || untilSet["any"]) && watchErrorRe.MatchString(out) {
-						matchedEvent = "error"
-						for i := len(lines) - 1; i >= 0; i-- {
-							if watchErrorRe.MatchString(lines[i]) {
-								summary = strings.TrimSpace(lines[i])
-								break
+						} else if (untilSet["error"] || untilSet["any"]) && watchErrorRe.MatchString(out) {
+							matchedEvent = "error"
+							for i := len(lines) - 1; i >= 0; i-- {
+								if watchErrorRe.MatchString(lines[i]) {
+									summary = strings.TrimSpace(lines[i])
+									break
+								}
 							}
 						}
 					}
