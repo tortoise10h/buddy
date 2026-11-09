@@ -127,6 +127,28 @@ if [ -n "$BUDDY_CTL_CMD" ]; then
     "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
 fi
 
+# Verify terminal_backend is not misconfigured to t3code
+TERMINAL_BACKEND=""
+if [ -n "$BUDDY_CTL_CMD" ]; then
+    TB_JSON="$("$BUDDY_CTL_CMD" config get terminal_backend 2>/dev/null || true)"
+    if command -v jq >/dev/null 2>&1; then
+        TERMINAL_BACKEND="$(echo "$TB_JSON" | jq -r '.value // empty' 2>/dev/null || true)"
+    else
+        TERMINAL_BACKEND="$(echo "$TB_JSON" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
+    fi
+fi
+if [ -z "$TERMINAL_BACKEND" ] || [ "$TERMINAL_BACKEND" = "null" ]; then
+    TERMINAL_BACKEND="${BUDDY_TERMINAL_BACKEND:-rex}"
+fi
+
+if [ "$TERMINAL_BACKEND" = "t3code" ] || [ "$TERMINAL_BACKEND" = "t3" ]; then
+    echo "Error: terminal_backend cannot be set to '$TERMINAL_BACKEND'." >&2
+    echo "T3 Code is strictly a worker_backend for autonomous coding tasks." >&2
+    echo "Buddy Control Tower TUI requires a terminal multiplexer (rex or herdr)." >&2
+    echo "Hint: Run 'buddy-ctl config set terminal_backend rex' to fix this." >&2
+    exit 1
+fi
+
 # Environment variable fallback if not specified on CLI
 if [ -z "$CHOSEN_AGENT" ] && [ -n "${BUDDY_AGENT:-}" ]; then
     CHOSEN_AGENT="$BUDDY_AGENT"

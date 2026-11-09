@@ -29,6 +29,7 @@ for arg in "${@:-}"; do
             echo "  BUDDY_PROJECTS_ROOTS=...  Colon-separated list of roots"
             echo "  BUDDY_ORCHESTRATOR_AGENT= Orchestrator agent harness (default: agy)"
             echo "  BUDDY_WORKER_AGENT=       Worker agent harness (default: agy)"
+            echo "  BUDDY_WORKER_BACKEND=     Worker execution backend (rex | herdr | t3code, default: rex)"
             exit 0
             ;;
     esac
@@ -490,7 +491,81 @@ echo "✔ Agents configured:"
 echo "  • Orchestrator: $CHOSEN_ORCH"
 echo "  • Worker: $CHOSEN_WORKER"
 
-# 6. Initialize ~/.buddy Control Tower & symlink workspace rules
+# 6. Worker backend selection configuration
+echo ""
+echo "Configuring worker execution backend..."
+
+EXISTING_BACKEND=""
+if [ -f "$CONFIG_FILE" ]; then
+    EXISTING_BACKEND=$(python3 -c "
+import json
+try:
+    with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    print(cfg.get('worker_backend') or cfg.get('default_engine') or '')
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+
+DEFAULT_BACKEND="${EXISTING_BACKEND:-rex}"
+VALID_BACKENDS=("rex" "herdr" "t3code")
+
+is_valid_backend() {
+    local target="$1"
+    for b in "${VALID_BACKENDS[@]}"; do
+        if [ "$b" = "$target" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+CHOSEN_WORKER_BACKEND=""
+if [ "$IS_NONINTERACTIVE" -eq 1 ]; then
+    if [ -n "${BUDDY_WORKER_BACKEND:-}" ]; then
+        CHOSEN_WORKER_BACKEND="$BUDDY_WORKER_BACKEND"
+    else
+        CHOSEN_WORKER_BACKEND="$DEFAULT_BACKEND"
+    fi
+else
+    echo "Available worker execution backends:"
+    echo "  • rex    - Rex terminal multiplexer (PTY panes, default)"
+    echo "  • herdr  - Herdr terminal multiplexer (requires HERDR_ENV=1)"
+    echo "  • t3code - T3 Code autonomous threads (via localhost HTTP/MCP)"
+    echo ""
+
+    while true; do
+        read -r -p "Worker backend [$DEFAULT_BACKEND]: " input_backend
+        input_backend="${input_backend:-$DEFAULT_BACKEND}"
+        input_backend="$(echo "$input_backend" | tr -d '[:space:]')"
+        if is_valid_backend "$input_backend"; then
+            CHOSEN_WORKER_BACKEND="$input_backend"
+            break
+        fi
+        echo "✖ Unknown backend '$input_backend'. Please choose from: rex, herdr, t3code"
+    done
+fi
+
+echo "✔ Worker backend configured: $CHOSEN_WORKER_BACKEND"
+
+if [ "$CHOSEN_WORKER_BACKEND" = "t3code" ]; then
+    # Verify t3 CLI presence
+    T3_FOUND=false
+    if command -v t3 >/dev/null 2>&1; then
+        T3_FOUND=true
+    elif [ -x "$HOME/.local/bin/t3" ] || [ -x "/usr/local/bin/t3" ]; then
+        T3_FOUND=true
+    fi
+
+    if [ "$T3_FOUND" = false ]; then
+        echo "ℹ Note: 't3' binary was not found on PATH or at ~/.local/bin/t3."
+        echo "  Ensure T3 Code desktop app or CLI is installed to run t3code tasks."
+    fi
+    echo "👉 Important: Run 'buddy-ctl t3 auth login' to pair Buddy with T3 Code."
+fi
+
+# 7. Initialize ~/.buddy Control Tower & symlink workspace rules
 echo "Initializing ~/.buddy Control Tower..."
 mkdir -p "$HOME/.buddy/.agents"
 ln -sf "$REPO_DIR/AGENTS.md" "$HOME/.buddy/AGENTS.md"
@@ -502,7 +577,7 @@ INIT_ARGS=()
 for r in "${COLLECTED_ROOTS[@]}"; do
     INIT_ARGS+=(--projects-root "$r")
 done
-INIT_ARGS+=(--orchestrator-agent "$CHOSEN_ORCH" --worker-agent "$CHOSEN_WORKER")
+INIT_ARGS+=(--orchestrator-agent "$CHOSEN_ORCH" --worker-agent "$CHOSEN_WORKER" --worker-backend "$CHOSEN_WORKER_BACKEND")
 
 "$LOCAL_BIN/buddy-ctl" init "${INIT_ARGS[@]}"
 

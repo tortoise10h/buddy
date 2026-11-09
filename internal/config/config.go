@@ -44,6 +44,8 @@ func DefaultConfig() *Config {
 		Version:              1,
 		BuddySessionName:     "Buddy",
 		DefaultEngine:        "rex",
+		WorkerBackend:        "rex",
+		TerminalBackend:      "rex",
 		OrchestratorAgent:    "agy",
 		WorkerAgent:          "agy",
 		DefaultAgent:         "agy",

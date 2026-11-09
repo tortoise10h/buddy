@@ -100,9 +100,17 @@ To maintain high responsiveness without blocking the user or bloating your conte
 - **Relaying Questions & Answers**:
   - Run `buddy-ctl capture --project <project> --task <slug>`.
   - If worker asked a question, present it to user and mark status: `waiting_for_input`.
-  - When user responds, relay it immediately: `buddy-ctl send --project <project> --task <slug> --text "<answer>"`.
+  - When user responds, relay it immediately:
+    - Text turn: `buddy-ctl send --project <project> --task <slug> --text "<answer>"`
+    - Interactive questions / T3 pending requests: `buddy-ctl send --project <project> --task <slug> --answer "<option>" [--answer "<key=value>"]`
 - **Showing a Demo**:
-  - Focus Rex tab and optionally split dev server: `buddy-ctl demo --project <project> --task <slug> [--cmd "<dev command>"]`.
+  - For Rex tasks: Focus tab and optionally launch dev split: `buddy-ctl demo --project <project> --task <slug> [--cmd "<dev command>"]`.
+  - For T3 Code tasks: `buddy-ctl demo` without `--cmd` outputs a task/worktree summary (thread-level UI focus in T3 Code is unsupported). Passing `--cmd "<dev command>"` launches a dedicated dev server tab in the host terminal (`Rex`) at the task's managed git worktree.
+- **T3 Code Worker Execution & OAuth Pairing**:
+  - T3 Code tasks run autonomously via localhost HTTP and `/mcp` APIs.
+  - When `--worker-backend t3code` is used, `--agent` accepts `<provider>/<model>` (e.g. `antigravity/gemini-4-argon-high`, `claude-3-5-sonnet`) or standard aliases.
+  - If a 72-hour warning banner appears (`[⚠️ T3 Code /mcp OAuth expires in <N>h]`) or worker relay reports authentication required, prompt the user to run: `buddy-ctl t3 auth login`.
+  - Thread-level focus (`buddy-ctl focus`) is a clean no-op for `t3code` tasks.
 
 ### 2. Proactive Background Watchdog Monitoring (Unified Subagent)
 
@@ -141,19 +149,23 @@ When the user wants to start tasks across multiple projects at once:
 
 ## `buddy-ctl` Command Reference
 
-- `buddy-ctl dispatch --project <proj> --prompt "..." [--task <slug>] [--agent agy|pi|opencode] [--plan-first]`: Fast-path atomic dispatch (auto-slug/slug, spawn, prompt, verify in 1 shot).
+- `buddy-ctl dispatch --project <proj> --prompt "..." [--task <slug>] [--agent <agent>] [--worker-backend rex|herdr|t3code] [--plan-first]`: Fast-path atomic dispatch. `--agent` accepts CLI harnesses (`agy`, `pi`, `opencode`) or `<provider>/<model>` under `t3code`.
 - `buddy-ctl status`: Show all tracked projects and tasks (O(1) from cache).
-- `buddy-ctl status --sync`: Reconcile cache with live Rex sessions.
+- `buddy-ctl status --sync`: Reconcile cache with live Rex sessions and T3 Code threads.
 - `buddy-ctl projects`: List available project directories.
-- `buddy-ctl task start --project <proj> --task <slug> [--agent agy|pi|opencode] [--worktree] [--plan-first] [--prompt "..."]`: Start task.
-- `buddy-ctl capture --project <proj> --task <slug> [--lines 100]`: Capture pane output.
-- `buddy-ctl send --project <proj> --task <slug> --text "..."`: Send text + enter to worker pane.
+- `buddy-ctl task start --project <proj> --task <slug> [--agent <agent>] [--worker-backend rex|t3code] [--worktree] [--plan-first] [--prompt "..."]`: Start task.
+- `buddy-ctl capture --project <proj> --task <slug> [--lines 100]`: Capture pane output or thread transcript.
+- `buddy-ctl send --project <proj> --task <slug> --text "..."`: Send text turn to worker.
+- `buddy-ctl send --project <proj> --task <slug> --answer "<answer>" [--answer "<key=value>"]`: Answer interactive pending requests with ordered or keyed answers.
 - `buddy-ctl send --project <proj> --task <slug> --key enter`: Send keypress (e.g. enter, ctrl+c, esc).
 - `buddy-ctl task update --project <proj> --task <slug> --status <status> --summary "..."`: Update cached status.
-- `buddy-ctl demo --project <proj> --task <slug> [--cmd "..."]`: Focus tab and optionally launch dev split.
-- `buddy-ctl focus [--project <proj>] [--task <slug>] [-w <window>]`: Switch active tab/window in Rex and bring Rex to front.
-- `buddy-ctl task close --project <proj> --task <slug>`: Close task tab in Rex and update state.
-- `buddy-ctl watch [--project <proj>] [--task <slug>] [--all] [--interval 5] [--timeout 600]`: Monitor worker tasks (single task or across all projects simultaneously).
+- `buddy-ctl demo --project <proj> --task <slug> [--cmd "..."]`: Focus tab and launch dev split (in host Rex tab at worktree for `t3code`).
+- `buddy-ctl focus [--project <proj>] [--task <slug>] [-w <window>]`: Switch active tab/window in Rex (no-op for `t3code`).
+- `buddy-ctl task close --project <proj> --task <slug>`: Close task (archives T3 thread and reaps host dev server tab).
+- `buddy-ctl watch [--project <proj>] [--task <slug>] [--all] [--interval 5] [--timeout 600]`: Monitor worker tasks (polls zero-OAuth shell snapshots for `t3code`).
 - `buddy-ctl notify --message "..." [--title "..."] [--subtitle "..."] [--sound Glass]`: Send native macOS desktop notification.
 - `buddy-ctl diagnose --project <proj> --task <slug> [--lines 300]`: Extract and parse error snippets from worker pane.
 - `buddy-ctl batch (--json '...' | --file <path>)`: Batch start multiple tasks across projects.
+- `buddy-ctl t3 auth login [--no-browser]`: Pair Buddy with T3 Code via 30-day loopback OAuth PKCE.
+- `buddy-ctl t3 auth status`: Inspect T3 Code OAuth and session token expiration and validity.
+- `buddy-ctl t3 snapshot`: Query zero-OAuth orchestration shell snapshot (`GET /api/orchestration/shell`).

@@ -18,6 +18,20 @@ func TestConfig_DefaultsAndDotNotation(t *testing.T) {
 	if cfg.GetEffectiveWorkerAgent() != "agy" {
 		t.Errorf("expected default worker agent agy, got %s", cfg.GetEffectiveWorkerAgent())
 	}
+	if cfg.GetEffectiveWorkerBackend() != "rex" {
+		t.Errorf("expected default worker backend rex, got %s", cfg.GetEffectiveWorkerBackend())
+	}
+	if cfg.GetEffectiveTerminalBackend() != "rex" {
+		t.Errorf("expected default terminal backend rex, got %s", cfg.GetEffectiveTerminalBackend())
+	}
+
+	// Test setting worker_backend to t3code
+	if err := cfg.SetPath("worker_backend", "t3code"); err != nil {
+		t.Fatalf("SetPath worker_backend failed: %v", err)
+	}
+	if cfg.GetEffectiveWorkerBackend() != "t3code" {
+		t.Errorf("expected worker_backend t3code, got %s", cfg.GetEffectiveWorkerBackend())
+	}
 
 	// Test SetPath and GetPath
 	if err := cfg.SetPath("worker_agent", "pi"); err != nil {
