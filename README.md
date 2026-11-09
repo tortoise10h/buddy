@@ -125,6 +125,8 @@ buddy-ctl dispatch --project docnotate --worker-backend t3code --prompt "Impleme
 
 ## T3 Code Integration
 
+> For the full end-to-end setup guide, prerequisites, troubleshooting, and daily usage reference, see the [T3 Code Integration Guide](docs/t3-integration.md).
+
 When using `t3code` as your worker backend:
 - **30-Day OAuth Pairing**: Pair once every ~30 days with a single command:
   ```sh
@@ -331,7 +333,8 @@ buddy-ctl task close --project docnotate --task inline-comments
 
 ---
 
-## Planning & Implementation Docs
+## Documentation & Implementation Plans
 
+- [T3 Code Integration Guide](docs/t3-integration.md)
 - [Implementation Handoff & Context Notes](plans/buddy-handoff.md)
 - [Full Architecture Plan](plans/buddy-terminal-orchestrator.md)
