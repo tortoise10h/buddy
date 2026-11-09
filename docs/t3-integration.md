@@ -15,17 +15,16 @@ Verify that `t3` is available in your PATH or in `~/.local/bin/t3`:
 t3 --version
 ```
 
-Example output:
+Example output *(illustrative sample; actual version string depends on your installed release)*:
 ```text
 t3-code 1.2.0 (darwin-arm64)
 ```
 
 Buddy automatically searches for the `t3` binary in the following order:
-1. Explicit path in `~/.buddy/config.json` (`t3.bin_path`)
-2. `BUDDY_T3_BIN` or `T3_BIN` environment variables
-3. System `PATH` (via `which t3`)
-4. `~/.local/bin/t3`
-5. `/usr/local/bin/t3`
+1. `BUDDY_T3_BIN` or `T3_BIN` environment variables
+2. System `PATH` (via `exec.LookPath`)
+3. `~/.local/bin/t3` (required for non-login subshells where `~/.local/bin` is omitted from `PATH`)
+4. `/usr/local/bin/t3`
 
 ### Installing T3 Code
 If `t3` is not installed:
@@ -35,7 +34,7 @@ If `t3` is not installed:
   # If bundled with the desktop app:
   ln -s "/Applications/T3 Code.app/Contents/Resources/bin/t3" ~/.local/bin/t3
   ```
-- **Local Server**: Launch T3 Code once so its background daemon starts on `http://127.0.0.1:3773`.
+- **Local Server**: Launch T3 Code once so its background daemon starts. *(Note: `http://127.0.0.1:3773` is an illustrative default origin; Buddy dynamically discovers the live server origin from T3 Code's runtime session file at `~/.buddy/engine/t3/session.json` or `t3 url`, falling back to `http://127.0.0.1:3773`.)*
 
 ---
 
@@ -53,18 +52,20 @@ The central Control Tower (`bin/buddy`) requires a terminal multiplexer (such as
 
 Attempting to set `terminal_backend` to `t3code` will be rejected by `bin/buddy`:
 ```text
-Error: terminal_backend is set to "t3code". T3 Code is a worker engine for executing tasks, not a terminal multiplexer.
-Use 'rex' or 'herdr' for terminal_backend, and set worker_backend to 't3code'.
+Error: terminal_backend cannot be set to 't3code'.
+T3 Code is strictly a worker_backend for autonomous coding tasks.
+Buddy Control Tower TUI requires a terminal multiplexer (rex or herdr).
+Hint: Run 'buddy-ctl config set terminal_backend rex' to fix this.
 ```
 
 ### Precedence Order for Worker Backend Resolution
 When dispatching a task, Buddy resolves the worker engine using the following order of precedence:
-1. Explicit CLI flag: `--worker-backend <rex|herdr|t3code>`
-2. Explicit CLI flag: `--engine <name>` (alias)
-3. Global persistent CLI flag: `--engine <name>`
+1. Per-command CLI flag: `--worker-backend <rex|herdr|t3code>` (`-w`)
+2. Per-command CLI flag: `--engine <name>` (`-e`, legacy alias)
+3. Global persistent root CLI flag: `--worker-backend <name>`
 4. Environment variable: `BUDDY_WORKER_BACKEND=<rex|herdr|t3code>`
 5. Persistent config: `worker_backend` in `~/.buddy/config.json`
-6. Persistent config: `default_engine` in `~/.buddy/config.json`
+6. Persistent config: `default_engine` in `~/.buddy/config.json` (legacy key)
 7. Fallback default: `"rex"`
 
 ### Setting `t3code` as Default Worker Backend
@@ -96,23 +97,25 @@ Run the login command:
 buddy-ctl t3 auth login
 ```
 
-Output:
+Output *(illustrative sample; callback port and client ID are ephemeral)*:
 ```text
 ✓ Ephemeral loopback callback server listening on 127.0.0.1:54321
 ✓ Registered OAuth client with T3 Code (ID: buddy-ctl-...)
 
 Opening browser for authorization...
 If the browser did not open automatically, visit:
-http://127.0.0.1:3773/oauth/mcp/authorize?client_id=...&code_challenge=...&scope=mcp:full_access
+http://127.0.0.1:3773/oauth/mcp/authorize?client_id=...&code_challenge=...&code_challenge_method=S256&redirect_uri=...&resource=http%3A%2F%2F127.0.0.1%3A3773%2Fmcp&response_type=code&state=...
 
 Waiting for approval...
 ✓ Exchanged authorization code for 30-day MCP access token
 
 🎉 Successfully authenticated with T3 Code!
-Scope:      mcp:full_access
+Scope:      orchestration:read orchestration:operate
 Expires at: 2026-12-09T20:30:00Z (~30 days remaining)
 Saved to:   ~/.buddy/t3_mcp_oauth.json (mode 0600)
 ```
+
+*(Note: `BuildAuthorizeURL` does not send a `scope` query parameter. When prompted in your browser, select **"Full access"** so T3 Code grants the required `orchestration:operate` scope).*
 
 ### Headless / Remote Pairing (`--no-browser`)
 If running on a remote server or headless environment without a local GUI browser:
@@ -131,7 +134,7 @@ This prints the authorization URL directly to the terminal. Open the link on any
     "origin": "http://127.0.0.1:3773",
     "issued_at": "2026-11-09T20:30:00Z",
     "expires_at": "2026-12-09T20:30:00Z",
-    "scope": "mcp:full_access"
+    "scope": "orchestration:read orchestration:operate"
   }
   ```
 
@@ -161,7 +164,7 @@ Server Origin:   http://127.0.0.1:3773 (online)
 OAuth Token:     VALID
 OAuth Path:      /Users/you/.buddy/t3_mcp_oauth.json
 OAuth Expires:   2026-12-09T20:30:00Z (~718.5 hours remaining)
-OAuth Scope:     mcp:full_access
+OAuth Scope:     orchestration:read orchestration:operate
 ```
 
 ---
@@ -184,13 +187,15 @@ What happens automatically:
 JSON Response:
 ```json
 {
+  "status": "dispatched",
   "project": "myapp",
   "task": "add-jwt-auth",
-  "engine": "t3code",
-  "status": "dispatched",
   "picked_up": true,
-  "session_id": "proj_12345",
-  "agent_block_id": "thread_67890"
+  "preview": "Implement JWT auth middleware in src/auth.ts with unit tests",
+  "window_id": "myapp-t3code-add-jwt-auth",
+  "agent_block_id": "thread_67890",
+  "agent": "agy",
+  "engine": "t3code"
 }
 ```
 
@@ -302,7 +307,7 @@ Keep the following operational characteristics in mind:
 3. **Session Reconnection**:
    - MCP connections are connection-scoped. If the T3 Code desktop app is restarted, Buddy automatically re-establishes the handshake and session using the 30-day token on the next command.
 4. **Localhost Scope**:
-   - T3 Code's API runs locally (`http://127.0.0.1:3773`). If accessing a remote server, port forwarding (e.g. `ssh -L 3773:127.0.0.1:3773 user@remote`) is required.
+   - T3 Code's API runs locally (`http://127.0.0.1:3773` by default). If accessing a remote server, port forwarding (e.g. `ssh -L 3773:127.0.0.1:3773 user@remote`) is required.
 
 ---
 
@@ -327,13 +332,9 @@ Error: t3 binary not found in PATH or standard locations
    ```sh
    export BUDDY_T3_BIN="/Applications/T3 Code.app/Contents/Resources/bin/t3"
    ```
-3. Or update `~/.buddy/config.json`:
-   ```json
-   {
-     "t3": {
-       "bin_path": "/path/to/t3"
-     }
-   }
+3. Or create a symlink in a standard directory on your `PATH`:
+   ```sh
+   ln -s "/Applications/T3 Code.app/Contents/Resources/bin/t3" ~/.local/bin/t3
    ```
 
 ### 3. T3 Code Server Offline
@@ -364,11 +365,12 @@ buddy-ctl dispatch --project myapp --worker-backend t3code --prompt "..."
 ### 5. Authorization Permission / Scope Errors
 **Symptom**:
 ```text
-Error: insufficient scope for tool execution: required 'mcp:full_access'
+Error: T3 Code OAuth token was granted read-only scope ("orchestration:read"). Buddy Control Tower requires 'Full access' (orchestration:operate) to launch threads and send messages. Please run 'buddy-ctl t3 auth login' again and select 'Full access'
 ```
 **Fix**:
-Re-authenticate with full access:
+Buddy requires the `orchestration:operate` scope to launch threads, send turns, and manage tasks.
+Re-authenticate:
 ```sh
 buddy-ctl t3 auth login
 ```
-Ensure you approve the request with full workspace access in the browser dialog.
+When your browser opens the T3 Code authorization dialog, select **"Full access"** (not read-only) before confirming.
