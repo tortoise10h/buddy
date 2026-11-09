@@ -164,3 +164,23 @@ func (s *State) UpdateTask(projectName, taskSlug, status, summary string) error 
 	s.Projects[proj.Name] = *proj
 	return nil
 }
+
+// UpdateTaskDevHandle sets or clears the DevHostHandle of a task in state.
+func (s *State) UpdateTaskDevHandle(projectName, taskSlug string, handle *DevHostHandle) error {
+	proj, err := s.FindProject(projectName)
+	if err != nil {
+		return err
+	}
+
+	task, err := proj.FindTask(taskSlug)
+	if err != nil {
+		return err
+	}
+
+	task.DevHostHandle = handle
+	task.UpdatedAt = nowISO()
+
+	proj.Tasks[task.TaskSlug] = *task
+	s.Projects[proj.Name] = *proj
+	return nil
+}

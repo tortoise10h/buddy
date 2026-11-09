@@ -19,6 +19,7 @@ func newT3Cmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newT3AuthCmd())
+	cmd.AddCommand(newT3SnapshotCmd())
 	return cmd
 }
 
@@ -171,6 +172,59 @@ func newT3AuthStatusCmd() *cobra.Command {
 				fmt.Fprintf(out, "\n⚠️ %s\n", oauthStatus.WarningMessage)
 			}
 
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&formatStr, "format", "f", "json", "Output format (json, text)")
+	return cmd
+}
+
+func newT3SnapshotCmd() *cobra.Command {
+	var formatStr string
+
+	cmd := &cobra.Command{
+		Use:     "snapshot",
+		Aliases: []string{"shell"},
+		Short:   "Zero-OAuth orchestration shell snapshot (GET /api/orchestration/shell)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			backend := t3.NewT3Backend()
+			if err := backend.EnsureInitialized(cmd.Context()); err != nil {
+				return fmt.Errorf("failed to connect to T3 Code server: %w", err)
+			}
+
+			snapshot, err := backend.HTTPClient().GetShellSnapshot(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("failed to fetch orchestration shell snapshot: %w", err)
+			}
+
+			format := strings.ToLower(formatStr)
+			if format == "" || format == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(snapshot)
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "T3 Code Orchestration Shell (Sequence %d, Threads: %d)\n", snapshot.SnapshotSequence, len(snapshot.Threads))
+			fmt.Fprintln(out, strings.Repeat("-", 60))
+			for _, t := range snapshot.Threads {
+				worktree := ""
+				if t.WorktreePath != nil {
+					worktree = *t.WorktreePath
+				}
+				branch := ""
+				if t.Branch != nil {
+					branch = *t.Branch
+				}
+				fmt.Fprintf(out, "• Thread %s [%s] (%s) - %s (pending: %d)\n", t.ID, t.Status, t.ProviderInstanceID, t.Title, t.EffectivePendingRequestCount())
+				if worktree != "" || branch != "" {
+					fmt.Fprintf(out, "  Worktree: %s (branch: %s)\n", worktree, branch)
+				}
+				if t.LastError != nil && *t.LastError != "" {
+					fmt.Fprintf(out, "  Error: %s\n", *t.LastError)
+				}
+			}
 			return nil
 		},
 	}

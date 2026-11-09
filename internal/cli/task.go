@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/project"
@@ -255,16 +257,38 @@ func newTaskCloseCmd() *cobra.Command {
 				return fmt.Errorf("missing session_id or window_id for task '%s'", task)
 			}
 
+			// Load state to retrieve DevHostHandle
+			st, _ := state.LoadState()
+			var devHandle *state.DevHostHandle
+			if st != nil {
+				if p, err := st.FindProject(projName); err == nil {
+					if t, err := p.FindTask(taskSlug); err == nil {
+						devHandle = t.DevHostHandle
+					}
+				}
+			}
+
 			eng, err := getEngine(engName)
 			if err != nil {
 				return err
 			}
 			if err := eng.Close(cmd.Context(), sessID, winID); err != nil {
-				return err
+				errLower := strings.ToLower(err.Error())
+				if !strings.Contains(errLower, "already") && !strings.Contains(errLower, "not found") {
+					return err
+				}
+			}
+
+			// Reap dev server handle in host terminal if present (no orphaned servers)
+			if devHandle != nil && devHandle.WindowID != "" {
+				termBackend := rex.NewRexBackend()
+				_ = termBackend.Close(cmd.Context(), devHandle.SessionID, devHandle.WindowID)
 			}
 
 			_ = state.MutateState(func(s *state.State) error {
-				return s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+				_ = s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+				_ = s.UpdateTaskDevHandle(projName, taskSlug, nil)
+				return nil
 			})
 
 			resp := map[string]any{
@@ -273,7 +297,7 @@ func newTaskCloseCmd() *cobra.Command {
 				"task":      taskSlug,
 				"window_id": winID,
 			}
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(resp)
 		},

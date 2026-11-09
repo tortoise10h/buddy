@@ -8,14 +8,24 @@ import (
 	"strings"
 )
 
+// DevHostHandle represents an external dev server process or terminal window/tab
+// running in the host terminal backend (Rex/Herdr) alongside a worker task.
+type DevHostHandle struct {
+	Backend   string `json:"backend,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	WindowID  string `json:"window_id,omitempty"`
+	BlockID   string `json:"block_id,omitempty"`
+}
+
 type TaskState struct {
-	TaskSlug      string  `json:"task_slug"`
-	Engine        string  `json:"engine,omitempty"`
-	WindowID      string  `json:"window_id"`
-	WindowLabel   string  `json:"window_label"`
-	AgentBlockID  string  `json:"agent_block_id"`
-	DevBlockID    *string `json:"dev_block_id,omitempty"`
-	Agent         string  `json:"agent,omitempty"`
+	TaskSlug      string         `json:"task_slug"`
+	Engine        string         `json:"engine,omitempty"`
+	WindowID      string         `json:"window_id"`
+	WindowLabel   string         `json:"window_label"`
+	AgentBlockID  string         `json:"agent_block_id"`
+	DevBlockID    *string        `json:"dev_block_id,omitempty"`
+	DevHostHandle *DevHostHandle `json:"dev_host_handle,omitempty"`
+	Agent         string         `json:"agent,omitempty"`
 	Cwd           string  `json:"cwd,omitempty"`
 	WorktreePath  *string `json:"worktree_path,omitempty"`
 	Branch        *string `json:"branch,omitempty"`
