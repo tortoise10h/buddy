@@ -386,7 +386,7 @@ echo ""
 echo "Configuring Buddy agents..."
 
 # Harness candidates, filtered to those actually installed on this machine.
-# Keep in sync with DEFAULT_CONFIG["agents"] in skills/buddy/scripts/buddy-ctl.
+# Keep in sync with DefaultConfig() in internal/config/config.go.
 HARNESS_CANDIDATES=("agy" "pi" "opencode" "claude" "codex" "cursor" "gemini")
 
 AVAILABLE_AGENTS=()
@@ -568,10 +568,70 @@ fi
 # 7. Initialize ~/.buddy Control Tower & symlink workspace rules
 echo "Initializing ~/.buddy Control Tower..."
 mkdir -p "$HOME/.buddy/.agents"
-ln -sf "$REPO_DIR/AGENTS.md" "$HOME/.buddy/AGENTS.md"
-ln -sf "$REPO_DIR/.agents/hooks.json" "$HOME/.buddy/.agents/hooks.json"
-echo "✔ Symlinked ~/.buddy/AGENTS.md -> $REPO_DIR/AGENTS.md"
-echo "✔ Symlinked ~/.buddy/.agents/hooks.json -> $REPO_DIR/.agents/hooks.json"
+ORCHESTRATOR_TEMPLATE="$REPO_DIR/templates/orchestrator-AGENTS.md"
+DEST_AGENTS="$HOME/.buddy/AGENTS.md"
+# Migration path for pre-split installs where ~/.buddy/AGENTS.md was symlinked to $REPO_DIR/AGENTS.md.
+# TODO(2026-11-09): Remove OLD_AGENTS / canonical_old migration check after ~1 week once active users have upgraded.
+OLD_AGENTS="$REPO_DIR/AGENTS.md"
+
+if [ -L "$DEST_AGENTS" ]; then
+    current_target="$(readlink "$DEST_AGENTS" 2>/dev/null || true)"
+    canonical_repo="$(cd "$REPO_DIR" 2>/dev/null && pwd -P || echo "$REPO_DIR")"
+    canonical_template="$(cd "$REPO_DIR/templates" 2>/dev/null && pwd -P || echo "$REPO_DIR/templates")/orchestrator-AGENTS.md"
+    canonical_old="$canonical_repo/AGENTS.md"
+
+    if [ "$current_target" = "$OLD_AGENTS" ] || [ "$current_target" = "$canonical_old" ]; then
+        rm -f "$DEST_AGENTS"
+    elif [ "$current_target" = "$ORCHESTRATOR_TEMPLATE" ] || [ "$current_target" = "$canonical_template" ]; then
+        rm -f "$DEST_AGENTS"
+    else
+        backup="${DEST_AGENTS}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$DEST_AGENTS" "$backup"
+        echo "ℹ Backed up existing ~/.buddy/AGENTS.md -> $backup"
+    fi
+elif [ -e "$DEST_AGENTS" ]; then
+    backup="${DEST_AGENTS}.bak-$(date +%Y%m%d%H%M%S)"
+    mv "$DEST_AGENTS" "$backup"
+    echo "ℹ Backed up existing ~/.buddy/AGENTS.md -> $backup"
+fi
+
+ln -sf "$ORCHESTRATOR_TEMPLATE" "$DEST_AGENTS"
+echo "✔ Symlinked ~/.buddy/AGENTS.md -> $ORCHESTRATOR_TEMPLATE"
+
+HOOKS_TEMPLATE="$REPO_DIR/templates/hooks.json"
+DEST_HOOKS="$HOME/.buddy/.agents/hooks.json"
+OLD_HOOKS="$REPO_DIR/.agents/hooks.json"
+
+tmp_rendered="$(mktemp "${TMPDIR:-/tmp}/buddy-hooks.XXXXXX")"
+sed "s|__BUDDY_CTL__|$LOCAL_BIN/buddy-ctl|g" "$HOOKS_TEMPLATE" > "$tmp_rendered"
+chmod 644 "$tmp_rendered"
+
+if [ -L "$DEST_HOOKS" ]; then
+    current_target="$(readlink "$DEST_HOOKS" 2>/dev/null || true)"
+    canonical_repo="$(cd "$REPO_DIR" 2>/dev/null && pwd -P || echo "$REPO_DIR")"
+    canonical_old="$canonical_repo/.agents/hooks.json"
+
+    if [ "$current_target" = "$OLD_HOOKS" ] || [ "$current_target" = "$canonical_old" ] || [ ! -e "$DEST_HOOKS" ]; then
+        rm -f "$DEST_HOOKS"
+    else
+        backup="${DEST_HOOKS}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$DEST_HOOKS" "$backup"
+        echo "ℹ Backed up existing ~/.buddy/.agents/hooks.json -> $backup"
+    fi
+elif [ -f "$DEST_HOOKS" ]; then
+    if ! cmp -s "$tmp_rendered" "$DEST_HOOKS"; then
+        backup="${DEST_HOOKS}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$DEST_HOOKS" "$backup"
+        echo "ℹ Backed up existing ~/.buddy/.agents/hooks.json -> $backup"
+    fi
+elif [ -e "$DEST_HOOKS" ]; then
+    backup="${DEST_HOOKS}.bak-$(date +%Y%m%d%H%M%S)"
+    mv "$DEST_HOOKS" "$backup"
+    echo "ℹ Backed up existing ~/.buddy/.agents/hooks.json -> $backup"
+fi
+
+mv "$tmp_rendered" "$DEST_HOOKS"
+echo "✔ Generated ~/.buddy/.agents/hooks.json"
 
 INIT_ARGS=()
 for r in "${COLLECTED_ROOTS[@]}"; do
