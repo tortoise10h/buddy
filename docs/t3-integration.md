@@ -60,8 +60,8 @@ Hint: Run 'buddy-ctl config set terminal_backend rex' to fix this.
 
 ### Precedence Order for Worker Backend Resolution
 When dispatching a task, Buddy resolves the worker engine using the following order of precedence:
-1. Per-command CLI flag: `--worker-backend <rex|herdr|t3code>` (`-w`)
-2. Per-command CLI flag: `--engine <name>` (`-e`, legacy alias)
+1. Per-command CLI flag: `--worker-backend <rex|herdr|t3code>`
+2. Per-command CLI flag: `--engine <name>` (legacy alias)
 3. Global persistent root CLI flag: `--worker-backend <name>`
 4. Environment variable: `BUDDY_WORKER_BACKEND=<rex|herdr|t3code>`
 5. Persistent config: `worker_backend` in `~/.buddy/config.json`
@@ -127,7 +127,7 @@ This prints the authorization URL directly to the terminal. Open the link on any
 ### Token Storage and Security
 - **Path**: `~/.buddy/t3_mcp_oauth.json`
 - **File Permissions**: Strictly enforced as `0600` (`-rw-------`). Buddy refuses to store tokens inside `state.json`.
-- **Token Contents**:
+- **Token Contents** *(illustrative sample)*:
   ```json
   {
     "access_token": "mcp_tok_...",
@@ -143,11 +143,15 @@ Buddy monitors token expiration automatically:
 - When the token has more than 72 hours remaining, operations proceed silently.
 - When less than 72 hours remain, Buddy injects proactive warning banners into status checks and context prompts:
   ```text
-  [⚠️ T3 Code /mcp OAuth token expires in 48h (2026-12-09 20:30:00). Run 'buddy-ctl t3 auth login' to refresh.]
+  [⚠️ T3 Code OAuth Warning] T3 Code /mcp OAuth expires in 48h — run 'buddy-ctl t3 auth login' soon to avoid interrupting worker Q&A
   ```
-- When expired, operations fail with a clear recovery message:
+- When missing or expired, operations fail with the underlying authentication error:
   ```text
-  Error: T3 Code MCP authorization required. Run 'buddy-ctl t3 auth login' to pair with T3 Code (token missing or expired).
+  t3 mcp oauth authentication required: T3 Code /mcp OAuth token is missing (file /Users/you/.buddy/t3_mcp_oauth.json not found). Run 'buddy-ctl t3 auth login' to authenticate
+  ```
+  *(or for an expired token)*:
+  ```text
+  t3 mcp oauth authentication required: T3 Code /mcp OAuth token expired at 2026-11-09T20:30:00Z. Run 'buddy-ctl t3 auth login' to re-authenticate
   ```
 
 ### Checking Auth Health
@@ -156,7 +160,7 @@ To inspect the health and expiration of your pairing:
 buddy-ctl t3 auth status --format text
 ```
 
-Output:
+Output *(illustrative sample)*:
 ```text
 T3 Code Authentication Status
 ----------------------------------------
@@ -184,7 +188,7 @@ What happens automatically:
 3. **Execution**: The autonomous agent begins analyzing files, creating plans, and implementing changes.
 4. **State Tracking**: Buddy records the session ID, block ID, and engine in `~/.buddy/state.json`.
 
-JSON Response:
+JSON Response *(illustrative sample)*:
 ```json
 {
   "status": "dispatched",
@@ -236,7 +240,7 @@ Inspect all active projects, tasks, and worker engines:
 buddy-ctl status
 ```
 
-Example output:
+Example output *(illustrative sample)*:
 ```text
 Projects & Tasks
 --------------------------------------------------------------------------------
@@ -316,7 +320,11 @@ Keep the following operational characteristics in mind:
 ### 1. Missing or Expired OAuth Token
 **Symptom**:
 ```text
-Error: T3 Code MCP authorization required. Run 'buddy-ctl t3 auth login' to pair with T3 Code (token missing or expired).
+t3 mcp oauth authentication required: T3 Code /mcp OAuth token is missing (file /Users/you/.buddy/t3_mcp_oauth.json not found). Run 'buddy-ctl t3 auth login' to authenticate
+```
+*(or when expired)*:
+```text
+t3 mcp oauth authentication required: T3 Code /mcp OAuth token expired at 2026-11-09T20:30:00Z. Run 'buddy-ctl t3 auth login' to re-authenticate
 ```
 **Fix**:
 Run `buddy-ctl t3 auth login` to renew the 30-day token. Verify with `buddy-ctl t3 auth status`.
@@ -340,7 +348,7 @@ Error: t3 binary not found in PATH or standard locations
 ### 3. T3 Code Server Offline
 **Symptom**:
 ```text
-Error: failed to connect to T3 Code server: connection refused on 127.0.0.1:3773
+Error: failed to connect to T3 Code server: t3 server is not running: runtime state file not found... Start the T3 Code desktop app or run 't3'
 ```
 **Fix**:
 Start the T3 Code desktop application. Check server status with `buddy-ctl t3 auth status`.
