@@ -341,3 +341,130 @@ func (r *RexBackend) IsBlockAlive(ctx context.Context, sessionID, blockID string
 	}
 	return true, nil
 }
+
+// Ensure compile-time interface conformance.
+var (
+	_ backend.TerminalBackend = (*RexBackend)(nil)
+	_ backend.WorkerBackend   = (*RexBackend)(nil)
+)
+
+// Capabilities returns the feature capabilities of Rex as a WorkerBackend.
+func (r *RexBackend) Capabilities() backend.WorkerCapabilities {
+	return backend.WorkerCapabilities{
+		ManagesWorktrees:  false,
+		SupportsFocus:     true,
+		SupportsDemoSplit: true,
+		SupportsRawKeys:   true,
+	}
+}
+
+// EnsureProjectContainer ensures a Rex session exists for the project and returns its ID.
+func (r *RexBackend) EnsureProjectContainer(ctx context.Context, projectName, projectPath string) (string, error) {
+	sess, err := r.EnsureSession(ctx, projectName, projectPath)
+	if err != nil {
+		return "", err
+	}
+	return sess.SessionID, nil
+}
+
+// ListLiveProjects lists all active Rex sessions as project containers.
+func (r *RexBackend) ListLiveProjects(ctx context.Context) ([]backend.ProjectContainer, error) {
+	sessions, err := r.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]backend.ProjectContainer, 0, len(sessions))
+	for _, s := range sessions {
+		res = append(res, backend.ProjectContainer{
+			ID:   s.SessionID,
+			Name: s.Name,
+			Path: s.Path,
+		})
+	}
+	return res, nil
+}
+
+// DispatchTask dispatches a task by creating a task window in the project's session.
+func (r *RexBackend) DispatchTask(ctx context.Context, spec backend.DispatchSpec) (*backend.DispatchResult, error) {
+	sessID, err := r.EnsureProjectContainer(ctx, spec.ProjectName, spec.ProjectPath)
+	if err != nil {
+		return nil, err
+	}
+
+	winID, blockID, err := r.CreateTaskWindow(ctx, sessID, spec.TaskSlug, spec.ProjectPath, spec.AgentCmd)
+	if err != nil {
+		return nil, err
+	}
+
+	handle := backend.TaskHandle{
+		Backend:   "rex",
+		ProjectID: sessID,
+		TaskSlug:  spec.TaskSlug,
+		SessionID: sessID,
+		WindowID:  winID,
+		BlockID:   blockID,
+	}
+
+	return &backend.DispatchResult{
+		TaskHandle: handle,
+		PickedUp:   true,
+		Preview:    fmt.Sprintf("Rex window %s (block %s)", winID, blockID),
+	}, nil
+}
+
+// IsTaskAlive checks if the task's block is currently alive in Rex.
+func (r *RexBackend) IsTaskAlive(ctx context.Context, handle backend.TaskHandle) (bool, error) {
+	return r.IsBlockAlive(ctx, handle.SessionID, handle.BlockID)
+}
+
+// CloseTask closes the task window in Rex.
+func (r *RexBackend) CloseTask(ctx context.Context, handle backend.TaskHandle) error {
+	return r.Close(ctx, handle.SessionID, handle.WindowID)
+}
+
+// SendMessage sends text input to the task pane followed by enter.
+func (r *RexBackend) SendMessage(ctx context.Context, handle backend.TaskHandle, input backend.MessageInput) error {
+	text := input.Text
+	if text == "" && len(input.Answers) > 0 {
+		text = strings.Join(input.Answers, "\n")
+	}
+	return r.Send(ctx, handle.SessionID, handle.BlockID, backend.Input{
+		Text:  text,
+		Enter: true,
+	})
+}
+
+// InterruptTask sends ctrl+c to the task pane.
+func (r *RexBackend) InterruptTask(ctx context.Context, handle backend.TaskHandle) error {
+	return r.Send(ctx, handle.SessionID, handle.BlockID, backend.Input{
+		Key: "ctrl+c",
+	})
+}
+
+// CaptureOutput captures the most recent lines of terminal output from the task pane.
+func (r *RexBackend) CaptureOutput(ctx context.Context, handle backend.TaskHandle, lines int) (string, error) {
+	return r.Capture(ctx, handle.SessionID, handle.BlockID, lines)
+}
+
+// GetAgentStatus reports the status of the task based on block liveness and recent output.
+func (r *RexBackend) GetAgentStatus(ctx context.Context, handle backend.TaskHandle) (*backend.AgentStatusReport, error) {
+	alive, err := r.IsTaskAlive(ctx, handle)
+	if err != nil {
+		return nil, err
+	}
+	if !alive {
+		return &backend.AgentStatusReport{
+			Status:  "stopped",
+			Summary: "Rex block is no longer alive",
+			Settled: true,
+		}, nil
+	}
+
+	capOut, _ := r.CaptureOutput(ctx, handle, 10)
+	return &backend.AgentStatusReport{
+		Status:  "running",
+		Summary: capOut,
+		Settled: false,
+	}, nil
+}
+

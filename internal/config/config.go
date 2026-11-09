@@ -20,6 +20,8 @@ type Config struct {
 	Version              int                    `json:"version"`
 	BuddySessionName     string                 `json:"buddy_session_name"`
 	DefaultEngine        string                 `json:"default_engine,omitempty"`
+	WorkerBackend        string                 `json:"worker_backend,omitempty"`
+	TerminalBackend      string                 `json:"terminal_backend,omitempty"`
 	OrchestratorAgent    string                 `json:"orchestrator_agent"`
 	WorkerAgent          string                 `json:"worker_agent"`
 	DefaultAgent         string                 `json:"default_agent"`
@@ -42,6 +44,8 @@ func DefaultConfig() *Config {
 		Version:              1,
 		BuddySessionName:     "Buddy",
 		DefaultEngine:        "rex",
+		WorkerBackend:        "rex",
+		TerminalBackend:      "rex",
 		OrchestratorAgent:    "agy",
 		WorkerAgent:          "agy",
 		DefaultAgent:         "agy",
@@ -129,6 +133,23 @@ func (c *Config) GetEffectiveWorkerAgent() string {
 		return c.DefaultAgent
 	}
 	return "agy"
+}
+
+func (c *Config) GetEffectiveWorkerBackend() string {
+	if c.WorkerBackend != "" {
+		return c.WorkerBackend
+	}
+	if c.DefaultEngine != "" {
+		return c.DefaultEngine
+	}
+	return "rex"
+}
+
+func (c *Config) GetEffectiveTerminalBackend() string {
+	if c.TerminalBackend != "" {
+		return c.TerminalBackend
+	}
+	return "rex"
 }
 
 func (c *Config) GetEffectiveOrchestratorAgent() string {

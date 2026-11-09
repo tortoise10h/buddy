@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/project"
@@ -30,11 +32,12 @@ func newTaskCmd() *cobra.Command {
 
 func newTaskStartCmd() *cobra.Command {
 	var (
-		projectName string
-		taskSlug    string
-		agentName   string
-		prompt      string
-		engineName  string
+		projectName   string
+		taskSlug      string
+		agentName     string
+		prompt        string
+		engineName    string
+		workerBackend string
 	)
 
 	cmd := &cobra.Command{
@@ -68,12 +71,7 @@ func newTaskStartCmd() *cobra.Command {
 
 			slug := project.DeriveSlug(taskSlug, prompt, projName)
 
-			if engineName == "" {
-				engineName = cfg.DefaultEngine
-				if engineName == "" {
-					engineName = "rex"
-				}
-			}
+			engineName = resolveWorkerEngineName(engineName, workerBackend, cfg)
 			eng, err := getEngine(engineName)
 			if err != nil {
 				return err
@@ -82,7 +80,12 @@ func newTaskStartCmd() *cobra.Command {
 			if agentName == "" {
 				agentName = cfg.GetEffectiveWorkerAgent()
 			}
-			agentCmd, _, _ := cfg.GetAgentCommand(agentName)
+			var agentCmd []string
+			if engineName == "t3code" || engineName == "t3" {
+				agentCmd = []string{agentName}
+			} else {
+				agentCmd, _, _ = cfg.GetAgentCommand(agentName)
+			}
 
 			res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{
 				ProjectName: projName,
@@ -108,6 +111,17 @@ func newTaskStartCmd() *cobra.Command {
 				initialPrompt = &prompt
 			}
 
+			var worktreePath *string
+			var branch *string
+			if res.Extra != nil {
+				if wp, ok := res.Extra["worktree_path"].(string); ok && wp != "" {
+					worktreePath = &wp
+				}
+				if br, ok := res.Extra["branch"].(string); ok && br != "" {
+					branch = &br
+				}
+			}
+
 			err = state.MutateState(func(s *state.State) error {
 				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
 					TaskSlug:      slug,
@@ -117,6 +131,8 @@ func newTaskStartCmd() *cobra.Command {
 					AgentBlockID:  res.BlockID,
 					Agent:         agentName,
 					Cwd:           projPath,
+					WorktreePath:  worktreePath,
+					Branch:        branch,
 					Status:        "running",
 					InitialPrompt: initialPrompt,
 					LastSummary:   preview,
@@ -135,6 +151,7 @@ func newTaskStartCmd() *cobra.Command {
 				"window_id":      res.WindowID,
 				"agent_block_id": res.BlockID,
 				"agent":          agentName,
+				"engine":         engineName,
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -146,7 +163,8 @@ func newTaskStartCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
 	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch")
 	cmd.Flags().StringVar(&prompt, "prompt", "", "Initial prompt for worker agent")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3code)")
+	cmd.Flags().StringVar(&workerBackend, "worker-backend", "", "Worker execution backend (alias for --engine)")
 
 	return cmd
 }
@@ -239,16 +257,38 @@ func newTaskCloseCmd() *cobra.Command {
 				return fmt.Errorf("missing session_id or window_id for task '%s'", task)
 			}
 
+			// Load state to retrieve DevHostHandle
+			st, _ := state.LoadState()
+			var devHandle *state.DevHostHandle
+			if st != nil {
+				if p, err := st.FindProject(projName); err == nil {
+					if t, err := p.FindTask(taskSlug); err == nil {
+						devHandle = t.DevHostHandle
+					}
+				}
+			}
+
 			eng, err := getEngine(engName)
 			if err != nil {
 				return err
 			}
 			if err := eng.Close(cmd.Context(), sessID, winID); err != nil {
-				return err
+				errLower := strings.ToLower(err.Error())
+				if !strings.Contains(errLower, "already") && !strings.Contains(errLower, "not found") {
+					return err
+				}
+			}
+
+			// Reap dev server handle in host terminal if present (no orphaned servers)
+			if devHandle != nil && devHandle.WindowID != "" {
+				termBackend := rex.NewRexBackend()
+				_ = termBackend.Close(cmd.Context(), devHandle.SessionID, devHandle.WindowID)
 			}
 
 			_ = state.MutateState(func(s *state.State) error {
-				return s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+				_ = s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+				_ = s.UpdateTaskDevHandle(projName, taskSlug, nil)
+				return nil
 			})
 
 			resp := map[string]any{
@@ -257,7 +297,7 @@ func newTaskCloseCmd() *cobra.Command {
 				"task":      taskSlug,
 				"window_id": winID,
 			}
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(resp)
 		},

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend/t3"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/state"
 )
@@ -116,6 +117,27 @@ func newContextInjectCmd() *cobra.Command {
 
 			ephemeralText := fmt.Sprintf("[Buddy Live State] Orchestrator: %s | Worker: %s | Active projects: %d | Tasks: %s. 🚨 ZERO-TOLERANCE GUARDRAIL (RULE #1): NEVER edit project files, docs, or code in this session. Even for minor edits, typos, or READMEs, ALWAYS dispatch a task tab via 'buddy-ctl dispatch'.%s",
 				orchAgent, workerAgent, len(st.Projects), tasksStr, nudgeBanner)
+
+			hasT3Tasks := false
+			for _, pData := range st.Projects {
+				for _, tData := range pData.Tasks {
+					eng := strings.ToLower(tData.GetEngine())
+					if eng == "t3code" || eng == "t3" {
+						hasT3Tasks = true
+						break
+					}
+				}
+				if hasT3Tasks {
+					break
+				}
+			}
+
+			if hasT3Tasks || cfg.GetEffectiveWorkerBackend() == "t3code" || globalWorkerBackend == "t3code" {
+				oauthStatus := t3.InspectOAuthToken("")
+				if oauthStatus.WarningMessage != "" {
+					ephemeralText += fmt.Sprintf("\n\n[⚠️ T3 Code OAuth Warning] %s", oauthStatus.WarningMessage)
+				}
+			}
 
 			out := map[string]any{
 				"injectSteps": []map[string]any{

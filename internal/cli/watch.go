@@ -9,6 +9,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
 )
@@ -355,12 +357,17 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 					for pName, pData := range st.Projects {
 						for tName, tData := range pData.Tasks {
 							if tData.Status == "running" && tData.AgentBlockID != "" {
+								sessID := pData.RexSessionID
+								engName := tData.GetEngine()
+								if engName == "t3code" || engName == "t3" {
+									sessID = pName
+								}
 								targets = append(targets, targetTask{
 									project:   pName,
 									task:      tName,
-									sessionID: pData.RexSessionID,
+									sessionID: sessID,
 									blockID:   tData.AgentBlockID,
-									engine:    tData.GetEngine(),
+									engine:    engName,
 								})
 							}
 						}
@@ -374,12 +381,17 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 					if err != nil {
 						return err
 					}
+					sessID := p.RexSessionID
+					engName := t.GetEngine()
+					if engName == "t3code" || engName == "t3" {
+						sessID = p.Name
+					}
 					targets = append(targets, targetTask{
 						project:   p.Name,
 						task:      t.TaskSlug,
-						sessionID: p.RexSessionID,
+						sessionID: sessID,
 						blockID:   t.AgentBlockID,
-						engine:    t.GetEngine(),
+						engine:    engName,
 					})
 				}
 
@@ -392,29 +404,61 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 						continue
 					}
 
-					out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 30)
-					if err != nil {
-						if !watchAll {
-							return fmt.Errorf("failed to capture terminal output: %w", err)
+					var matchedEvent, summary string
+
+					// For T3 engine, query typed status first
+					if t3Eng, ok := eng.(*engine.T3Engine); ok {
+						handle := backend.TaskHandle{ProjectID: target.project, ThreadID: target.blockID}
+						if rep, err := t3Eng.Backend().GetAgentStatus(cmd.Context(), handle); err == nil && rep != nil {
+							switch rep.Status {
+							case "waiting_for_input":
+								if untilSet["input"] || untilSet["any"] {
+									matchedEvent = "waiting_for_input"
+									summary = rep.Summary
+								}
+							case "ready_for_demo":
+								if untilSet["demo"] || untilSet["done"] || untilSet["any"] {
+									matchedEvent = "ready_for_demo"
+									summary = rep.Summary
+								}
+							case "error":
+								if untilSet["error"] || untilSet["any"] {
+									matchedEvent = "error"
+									summary = rep.Summary
+								}
+							}
 						}
-						continue
 					}
 
 					targetKey := target.project + "/" + target.task
-					filtered, working := paneLines(out)
-					if working {
-						// Suppress events while actively executing
-						delete(debounceMap, targetKey)
-						continue
+					var snapshot string
+
+					if matchedEvent != "" {
+						snapshot = summary
+					} else {
+						out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 30)
+						if err != nil {
+							if !watchAll {
+								return fmt.Errorf("failed to capture terminal output: %w", err)
+							}
+							continue
+						}
+
+						filtered, working := paneLines(out)
+						if working {
+							// Suppress events while actively executing
+							delete(debounceMap, targetKey)
+							continue
+						}
+
+						matchedEvent, summary = detectEvent(filtered, untilSet)
+						if matchedEvent == "" {
+							delete(debounceMap, targetKey)
+							continue
+						}
+						snapshot = strings.Join(filtered, "\n")
 					}
 
-					matchedEvent, summary := detectEvent(filtered, untilSet)
-					if matchedEvent == "" {
-						delete(debounceMap, targetKey)
-						continue
-					}
-
-					snapshot := strings.Join(filtered, "\n")
 					ds, exists := debounceMap[targetKey]
 					if !exists || ds.lastEvent != matchedEvent || ds.lastSnapshot != snapshot {
 						debounceMap[targetKey] = &debounceState{

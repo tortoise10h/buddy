@@ -95,6 +95,71 @@ Buddy solves the 3 core multi-project orchestration challenges:
 
 ---
 
+## Execution Backends
+
+Buddy cleanly separates two backend dimensions:
+
+1. **Terminal Backend (`terminal_backend`, default: `"rex"`)**:
+   - Hosts the central Buddy Control Tower TUI session (`bin/buddy`) and interactive demo server tabs (`buddy-ctl demo --cmd`).
+   - Supported options: `rex` (Rex terminal multiplexer) or `herdr` (Herdr terminal multiplexer).
+   - *Note: `terminal_backend` cannot be set to `t3code` because Control Tower requires an interactive terminal multiplexer.*
+
+2. **Worker Backend (`worker_backend`, default: `"rex"`)**:
+   - Executes autonomous coding tasks and feature implementations dispatched via `buddy-ctl dispatch` or `buddy-ctl task start`.
+   - Supported options:
+     - `rex`: Spawns CLI agents (`agy`, `pi`, `opencode`) into dedicated Rex tabs with PTY interaction.
+     - `herdr`: Spawns CLI agents in Herdr tabs.
+     - `t3code`: Runs autonomous coding threads in T3 Code via localhost HTTP and Streamable `/mcp` APIs, utilizing native git worktrees and structured Q&A.
+
+To configure defaults:
+```sh
+buddy-ctl config set terminal_backend rex
+buddy-ctl config set worker_backend t3code
+```
+Or override per command:
+```sh
+buddy-ctl dispatch --project docnotate --worker-backend t3code --prompt "Implement auth flow"
+```
+
+---
+
+## T3 Code Integration
+
+> For the full end-to-end setup guide, prerequisites, troubleshooting, and daily usage reference, see the [T3 Code Integration Guide](docs/t3-integration.md).
+
+When using `t3code` as your worker backend:
+- **30-Day OAuth Pairing**: Pair once every ~30 days with a single command:
+  ```sh
+  buddy-ctl t3 auth login
+  ```
+  Buddy starts an ephemeral loopback HTTP server, generates a PKCE `S256` challenge, and pairs with T3 Code via `POST /oauth/mcp/register` and `/oauth/mcp/token`. The 30-day token is securely stored in `~/.buddy/t3_mcp_oauth.json` with file mode `0600`.
+- **Check Auth Health**:
+  ```sh
+  buddy-ctl t3 auth status
+  ```
+  Displays token status, remaining hours, and scope. Proactive warnings surface in `status` and `context-inject` if the token is within 72 hours of expiration.
+- **Agent Models (`<provider>/<model>`)**:
+  Pass any provider and model supported by your T3 Code desktop app directly via `--agent`:
+  ```sh
+  buddy-ctl dispatch --project docnotate --worker-backend t3code --agent antigravity/gemini-4-argon-high --prompt "Optimize search"
+  ```
+- **Interactive Multi-Question Answering**:
+  ```sh
+  buddy-ctl send -p docnotate -t search-opt --answer "option A" --answer "env=production"
+  ```
+- **Zero-OAuth Watchdog Snapshots**:
+  Monitor all threads in <20ms without OAuth or Node startup overhead:
+  ```sh
+  buddy-ctl t3 snapshot
+  buddy-ctl watch --all
+  ```
+- **Cross-Host Demos & Reaping**:
+  - `buddy-ctl demo -p <proj> -t <task>` without `--cmd`: Outputs a structured task summary (thread-level focus in T3 Code is unsupported).
+  - `buddy-ctl demo -p <proj> -t <task> --cmd "npm run dev"`: Spawns the dev server inside your host terminal (`Rex`) rooted at T3's managed git worktree directory.
+  - `buddy-ctl task close -p <proj> -t <task>`: Archives the T3 thread and automatically reaps the host Rex dev server tab (idempotent double-close).
+
+---
+
 ## Installation
 
 Clone and run the installer:
@@ -268,7 +333,8 @@ buddy-ctl task close --project docnotate --task inline-comments
 
 ---
 
-## Planning & Implementation Docs
+## Documentation & Implementation Plans
 
+- [T3 Code Integration Guide](docs/t3-integration.md)
 - [Implementation Handoff & Context Notes](plans/buddy-handoff.md)
 - [Full Architecture Plan](plans/buddy-terminal-orchestrator.md)

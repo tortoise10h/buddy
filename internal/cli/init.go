@@ -14,6 +14,7 @@ func newInitCmd() *cobra.Command {
 		force             bool
 		orchestratorAgent string
 		workerAgent       string
+		workerBackend     string
 		projectsRoot      string
 	)
 
@@ -39,6 +40,9 @@ func newInitCmd() *cobra.Command {
 				if workerAgent != "" {
 					cfg.WorkerAgent = workerAgent
 				}
+				if workerBackend != "" {
+					cfg.WorkerBackend = workerBackend
+				}
 				if projectsRoot != "" {
 					cfg.ProjectsRoots = []string{projectsRoot}
 				}
@@ -46,6 +50,31 @@ func newInitCmd() *cobra.Command {
 					return err
 				}
 				created = append(created, "config.json")
+			} else {
+				// Update existing config with provided flags if any
+				cfg, err := config.LoadConfig()
+				if err == nil && cfg != nil {
+					modified := false
+					if orchestratorAgent != "" && cfg.OrchestratorAgent != orchestratorAgent {
+						cfg.OrchestratorAgent = orchestratorAgent
+						modified = true
+					}
+					if workerAgent != "" && cfg.WorkerAgent != workerAgent {
+						cfg.WorkerAgent = workerAgent
+						modified = true
+					}
+					if workerBackend != "" && cfg.WorkerBackend != workerBackend {
+						cfg.WorkerBackend = workerBackend
+						modified = true
+					}
+					if projectsRoot != "" {
+						cfg.ProjectsRoots = []string{projectsRoot}
+						modified = true
+					}
+					if modified {
+						_ = config.SaveConfig(cfg)
+					}
+				}
 			}
 
 			// 2. state.json
@@ -67,7 +96,7 @@ func newInitCmd() *cobra.Command {
 				"directory": dir,
 				"created":   created,
 			}
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(resp)
 		},
@@ -76,6 +105,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "Force overwrite existing config and state")
 	cmd.Flags().StringVar(&orchestratorAgent, "orchestrator-agent", "", "Default orchestrator agent (e.g. agy, opencode)")
 	cmd.Flags().StringVar(&workerAgent, "worker-agent", "", "Default worker agent (e.g. agy, pi)")
+	cmd.Flags().StringVar(&workerBackend, "worker-backend", "", "Default worker backend (rex, herdr, t3code)")
 	cmd.Flags().StringVar(&projectsRoot, "projects-root", "", "Default project root directory")
 
 	return cmd
