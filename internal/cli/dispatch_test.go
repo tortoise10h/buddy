@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -108,5 +109,53 @@ func TestDispatch_EndToEnd(t *testing.T) {
 	}
 	if task.Status != "running" {
 		t.Errorf("expected status running, got %s", task.Status)
+	}
+}
+
+func TestDispatch_T3Routing_ReturnsErrNotImplemented(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+	t.Setenv("T3CODE_THREAD_ID", "th_test123")
+	t.Setenv("REX_SESSION", "")
+	t.Setenv("TERM_PROGRAM", "")
+
+	// Create dummy project in tmpDir
+	projDir := filepath.Join(tmpDir, "buddy")
+	_ = os.MkdirAll(projDir, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to save test config: %v", err)
+	}
+
+	// Register mock backend for Rex to verify it is NOT touched
+	mockBackend := &mockTerminalBackend{}
+	mockEngine := engine.NewTerminalEngine(mockBackend)
+	reg := getRegistry()
+	reg.Register("rex", mockEngine)
+
+	cmd := newDispatchCmd()
+	cmd.SetArgs([]string{
+		"-p", "buddy",
+		"-m", "test prompt",
+	})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected dispatch to fail under T3 environment, got nil error")
+	}
+
+	var notImpl *engine.ErrNotImplemented
+	if !errors.As(err, &notImpl) {
+		t.Fatalf("expected error to be *engine.ErrNotImplemented, got: %v", err)
+	}
+
+	if notImpl.Engine != "t3" {
+		t.Errorf("expected ErrNotImplemented.Engine = 't3', got %q", notImpl.Engine)
+	}
+
+	if mockBackend.dispatched {
+		t.Errorf("rex backend should NOT have been touched during T3 dispatch")
 	}
 }
