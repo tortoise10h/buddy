@@ -94,13 +94,9 @@ func newBatchCmd() *cobra.Command {
 
 				slug := project.DeriveSlug(spec.Task, spec.Prompt, projName)
 
-				engineName := spec.Engine
-				if engineName == "" {
-					engineName = cfg.DefaultEngine
-					if engineName == "" {
-						engineName = "rex"
-					}
-				}
+				resEngine := engine.ResolveEngine(spec.Engine, os.Getenv, cfg)
+				resEngine.WarnUnknownHost(os.Stderr)
+				engineName := resEngine.EngineName
 
 				eng, err := getEngine(engineName)
 				if err != nil {
