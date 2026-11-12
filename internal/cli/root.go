@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(newWatchCmd())
 	rootCmd.AddCommand(newNotifyCmd())
 	rootCmd.AddCommand(newDiagnoseCmd())
+	rootCmd.AddCommand(newEngineCmd())
 	rootCmd.AddCommand(newBatchCmd())
 	rootCmd.AddCommand(newContextInjectCmd())
 }

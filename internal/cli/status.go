@@ -8,6 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/backend/rex"
+	"github.com/tortoise10h/buddy/internal/config"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
 )
 
@@ -36,6 +38,9 @@ func newStatusCmd() *cobra.Command {
 							for pName, pData := range s.Projects {
 								if !liveSessMap[pData.RexSessionID] {
 									for tSlug, tData := range pData.Tasks {
+										if tData.GetEngine() != "rex" {
+											continue
+										}
 										tData.Status = "missing"
 										tData.LastSummary = "Rex session not found"
 										pData.Tasks[tSlug] = tData
@@ -48,6 +53,9 @@ func newStatusCmd() *cobra.Command {
 											winMap[w.WindowID] = true
 										}
 										for tSlug, tData := range pData.Tasks {
+											if tData.GetEngine() != "rex" {
+												continue
+											}
 											if !winMap[tData.WindowID] {
 												tData.Status = "missing"
 												tData.LastSummary = "Window closed in Rex"
@@ -80,10 +88,20 @@ func newStatusCmd() *cobra.Command {
 				}
 			}
 
+			cfg, _ := config.LoadConfig()
+			res := engine.ResolveEngine("", os.Getenv, cfg)
+
 			format := strings.ToLower(formatStr)
 			if format == "" || format == "json" {
+				hostBlock := map[string]any{
+					"detected": res.HostInfo.Kind,
+					"engine":   res.EngineName,
+					"source":   res.Source,
+					"signals":  res.HostInfo.Signals,
+				}
 				resp := map[string]any{
 					"version":          st.Version,
+					"host":             hostBlock,
 					"buddy_session_id": st.BuddySessionID,
 					"updated_at":       st.UpdatedAt,
 					"projects":         projects,
@@ -94,6 +112,7 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			if format == "brief" {
+				fmt.Printf("Host: %s | Engine: %s (source: %s)\n", res.HostInfo.Kind, res.EngineName, res.Source)
 				var lines []string
 				for pName, pData := range projects {
 					if len(pData.Tasks) == 0 {
@@ -117,11 +136,12 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			// Table format
-			fmt.Printf("%-16s %-20s %-8s %-16s %s\n", "PROJECT", "TASK", "AGENT", "STATUS", "SUMMARY")
+			fmt.Printf("Host: %s | Engine: %s (source: %s)\n", res.HostInfo.Kind, res.EngineName, res.Source)
+			fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", "PROJECT", "TASK", "AGENT", "ENGINE", "STATUS", "SUMMARY")
 			fmt.Println(strings.Repeat("-", 80))
 			for pName, pData := range projects {
 				if len(pData.Tasks) == 0 {
-					fmt.Printf("%-16s %-20s %-8s %-16s %s\n", pName, "(none)", "-", "idle", "Rex session: "+pData.RexSessionID)
+					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, "(none)", "-", "-", "idle", "Rex session: "+pData.RexSessionID)
 					continue
 				}
 				for tSlug, tData := range pData.Tasks {
@@ -129,11 +149,12 @@ func newStatusCmd() *cobra.Command {
 					if agent == "" {
 						agent = "agy"
 					}
+					eng := tData.GetEngine()
 					summary := tData.LastSummary
 					if len(summary) > 40 {
 						summary = summary[:40] + "..."
 					}
-					fmt.Printf("%-16s %-20s %-8s %-16s %s\n", pName, tSlug, agent, tData.Status, summary)
+					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, tSlug, agent, eng, tData.Status, summary)
 				}
 			}
 			return nil

@@ -68,12 +68,9 @@ func newTaskStartCmd() *cobra.Command {
 
 			slug := project.DeriveSlug(taskSlug, prompt, projName)
 
-			if engineName == "" {
-				engineName = cfg.DefaultEngine
-				if engineName == "" {
-					engineName = "rex"
-				}
-			}
+			resEngine := engine.ResolveEngine(engineName, os.Getenv, cfg)
+			resEngine.WarnUnknownHost(os.Stderr)
+			engineName = resEngine.EngineName
 			eng, err := getEngine(engineName)
 			if err != nil {
 				return err
@@ -92,7 +89,7 @@ func newTaskStartCmd() *cobra.Command {
 				AgentCmd:    agentCmd,
 			})
 			if err != nil {
-				return fmt.Errorf("task start failed: %w", err)
+				return err
 			}
 
 			preview := "Started via CLI"

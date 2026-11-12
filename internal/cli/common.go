@@ -23,6 +23,9 @@ func getRegistry() *engine.Registry {
 		// Register Rex terminal engine
 		rexBackend := rex.NewRexBackend()
 		defaultRegistry.Register("rex", engine.NewTerminalEngine(rexBackend))
+
+		// Register T3 stub engine
+		defaultRegistry.Register("t3", engine.NewStubT3Engine())
 	}
 	return defaultRegistry
 }

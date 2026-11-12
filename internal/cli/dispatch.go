@@ -51,12 +51,9 @@ func newDispatchCmd() *cobra.Command {
 			slug := project.DeriveSlug(taskSlug, prompt, projName)
 
 			// 3. Resolve engine
-			if engineName == "" {
-				engineName = cfg.DefaultEngine
-				if engineName == "" {
-					engineName = "rex"
-				}
-			}
+			resEngine := engine.ResolveEngine(engineName, os.Getenv, cfg)
+			resEngine.WarnUnknownHost(os.Stderr)
+			engineName = resEngine.EngineName
 			eng, err := getEngine(engineName)
 			if err != nil {
 				return err
@@ -77,7 +74,7 @@ func newDispatchCmd() *cobra.Command {
 				AgentCmd:    agentCmd,
 			})
 			if err != nil {
-				return fmt.Errorf("dispatch failed: %w", err)
+				return err
 			}
 
 			// 6. Atomically record in state
