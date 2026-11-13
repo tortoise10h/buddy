@@ -2,6 +2,7 @@ package host
 
 import (
 	"os"
+	"strings"
 )
 
 type HostKind string
@@ -29,11 +30,21 @@ var RexSignalVars = []string{
 // T3SignalVars lists the environment variable names that indicate a T3 host environment.
 var T3SignalVars = []string{
 	"T3CODE_THREAD_ID",
+	"T3CODE_CLI_PATH",
+	"T3CODE_HOME",
 	"T3_ACP_MCP_ENDPOINT",
 	"T3_ACP_MCP_AUTHORIZATION",
+	"T3_ACP_MCP_NODE",
+	"T3_ACP_MCP_ENTRYPOINT",
 	"T3_MCP_URL",
 	"T3_MCP_BEARER_TOKEN",
+	"T3_PI_RUNTIME_MODE",
+	"T3_PI_MCP_EXTENSION_PATH",
 	"T3_THREAD_ID",
+	"TERM_PROGRAM",
+	"__CFBundleIdentifier",
+	"ANTIGRAVITY_HARNESS_PATH",
+	"GEMINI_HOME",
 }
 
 // DetectHostFromEnv is a pure function that inspects the environment using getEnv.
@@ -66,10 +77,32 @@ func DetectHostFromEnv(getEnv func(string) string) HostInfo {
 
 	for _, v := range T3SignalVars {
 		val := getEnv(v)
-		if val != "" {
-			t3Matches[v] = val
-			signals[v] = val
+		if val == "" {
+			continue
 		}
+		if v == "TERM_PROGRAM" {
+			if val == "t3code" {
+				t3Matches[v] = val
+				signals[v] = val
+			}
+			continue
+		}
+		if v == "__CFBundleIdentifier" {
+			if val == "com.t3tools.t3code" || strings.HasPrefix(val, "com.t3tools.t3code.") {
+				t3Matches[v] = val
+				signals[v] = val
+			}
+			continue
+		}
+		if v == "ANTIGRAVITY_HARNESS_PATH" || v == "GEMINI_HOME" {
+			if strings.Contains(val, "/.t3/") || strings.Contains(val, "\\.t3\\") {
+				t3Matches[v] = val
+				signals[v] = val
+			}
+			continue
+		}
+		t3Matches[v] = val
+		signals[v] = val
 	}
 
 	if len(t3Matches) > 0 {
