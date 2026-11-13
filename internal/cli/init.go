@@ -14,7 +14,7 @@ func newInitCmd() *cobra.Command {
 		force             bool
 		orchestratorAgent string
 		workerAgent       string
-		projectsRoot      string
+		projectsRoots     []string
 	)
 
 	cmd := &cobra.Command{
@@ -39,13 +39,32 @@ func newInitCmd() *cobra.Command {
 				if workerAgent != "" {
 					cfg.WorkerAgent = workerAgent
 				}
-				if projectsRoot != "" {
-					cfg.ProjectsRoots = []string{projectsRoot}
+				if len(projectsRoots) > 0 {
+					cfg.ProjectsRoots = mergeUniqueRoots(nil, projectsRoots)
 				}
 				if err := config.SaveConfig(cfg); err != nil {
 					return err
 				}
 				created = append(created, "config.json")
+			} else if err == nil && (len(projectsRoots) > 0 || orchestratorAgent != "" || workerAgent != "") {
+				cfg, loadErr := config.LoadConfig()
+				if loadErr != nil {
+					return loadErr
+				}
+				if len(projectsRoots) > 0 {
+					cfg.ProjectsRoots = mergeUniqueRoots(cfg.ProjectsRoots, projectsRoots)
+				}
+				if orchestratorAgent != "" {
+					cfg.OrchestratorAgent = orchestratorAgent
+				}
+				if workerAgent != "" {
+					cfg.WorkerAgent = workerAgent
+				}
+				if err := config.SaveConfig(cfg); err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
 			}
 
 			// 2. state.json
@@ -76,7 +95,25 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "Force overwrite existing config and state")
 	cmd.Flags().StringVar(&orchestratorAgent, "orchestrator-agent", "", "Default orchestrator agent (e.g. agy, opencode)")
 	cmd.Flags().StringVar(&workerAgent, "worker-agent", "", "Default worker agent (e.g. agy, pi)")
-	cmd.Flags().StringVar(&projectsRoot, "projects-root", "", "Default project root directory")
+	cmd.Flags().StringArrayVar(&projectsRoots, "projects-root", nil, "Default project root directory (can be specified multiple times)")
 
 	return cmd
+}
+
+func mergeUniqueRoots(existing, incoming []string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(incoming))
+	merged := make([]string, 0, len(existing)+len(incoming))
+	for _, list := range [][]string{existing, incoming} {
+		for _, r := range list {
+			if r == "" {
+				continue
+			}
+			if _, ok := seen[r]; ok {
+				continue
+			}
+			seen[r] = struct{}{}
+			merged = append(merged, r)
+		}
+	}
+	return merged
 }

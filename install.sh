@@ -234,21 +234,85 @@ DEFAULT_SUGGESTION="~/Dev/Personal/Projects"
 if [ ${#EXISTING_ROOTS[@]} -gt 0 ]; then
     FORMATTED_EXISTING=()
     for r in "${EXISTING_ROOTS[@]}"; do
-        if [[ "$r" == "$HOME"* ]]; then
+        if [ "$r" = "$HOME" ]; then
+            FORMATTED_EXISTING+=("~")
+        elif [[ "$r" == "$HOME/"* ]]; then
             FORMATTED_EXISTING+=("~${r#$HOME}")
         else
             FORMATTED_EXISTING+=("$r")
         fi
     done
-    DEFAULT_SUGGESTION=$(IFS=', '; echo "${FORMATTED_EXISTING[*]}")
+    DEFAULT_SUGGESTION=""
+    for r in "${FORMATTED_EXISTING[@]}"; do
+        if [ -z "$DEFAULT_SUGGESTION" ]; then
+            DEFAULT_SUGGESTION="$r"
+        else
+            DEFAULT_SUGGESTION="$DEFAULT_SUGGESTION, $r"
+        fi
+    done
     echo "✔ Found existing configured project roots: $DEFAULT_SUGGESTION"
 fi
 
 expand_path() {
     local p="$1"
     p="$(echo "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    p="${p/#\~/$HOME}"
+    if [ "$p" = "~" ]; then
+        p="$HOME"
+    elif [[ "$p" == "~/"* ]]; then
+        p="$HOME/${p#"~/"}"
+    fi
     echo "$p"
+}
+
+parse_root_inputs() {
+    python3 -c '
+import re, shlex, sys
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+
+def split_outside_quotes(s):
+    parts = []
+    cur = []
+    quote = None
+    escaped = False
+    for ch in s:
+        if escaped:
+            cur.append(ch)
+            escaped = False
+        elif ch == "\\" and quote != "\x27":
+            cur.append(ch)
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = None
+            cur.append(ch)
+        elif ch in ("\"", "\x27"):
+            quote = ch
+            cur.append(ch)
+        elif ch == ",":
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+for seg in split_outside_quotes(raw):
+    seg = seg.strip()
+    if not seg:
+        continue
+    if any(c in seg for c in ("\"", "\x27", "\\")):
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            tokens = [seg]
+    else:
+        tokens = re.split(r"\s+(?=(?:~(?:/|$)|/|\.\.?/))", seg)
+    for tok in tokens:
+        tok = tok.strip()
+        if tok:
+            print(tok)
+' "$1"
 }
 
 COLLECTED_ROOTS=()
@@ -265,6 +329,15 @@ add_to_collected() {
     COLLECTED_ROOTS+=("$candidate")
 }
 
+if [ ${#EXISTING_ROOTS[@]} -gt 0 ]; then
+    for r in "${EXISTING_ROOTS[@]}"; do
+        exp=$(expand_path "$r")
+        if [ -n "$exp" ]; then
+            add_to_collected "$exp"
+        fi
+    done
+fi
+
 IS_NONINTERACTIVE=0
 if [ -n "${BUDDY_NONINTERACTIVE:-}" ] || [ ! -t 0 ]; then
     IS_NONINTERACTIVE=1
@@ -280,14 +353,7 @@ if [ "$IS_NONINTERACTIVE" -eq 1 ]; then
                 add_to_collected "$exp"
             fi
         done
-    elif [ ${#EXISTING_ROOTS[@]} -gt 0 ]; then
-        for r in "${EXISTING_ROOTS[@]}"; do
-            exp=$(expand_path "$r")
-            if [ -n "$exp" ]; then
-                add_to_collected "$exp"
-            fi
-        done
-    else
+    elif [ ${#COLLECTED_ROOTS[@]} -eq 0 ]; then
         DEFAULT_PATH=$(expand_path "$DEFAULT_SUGGESTION")
         mkdir -p "$DEFAULT_PATH" 2>/dev/null || true
         add_to_collected "$DEFAULT_PATH"
@@ -332,23 +398,36 @@ else
         done
     }
 
+    process_root_input() {
+        local raw_input="$1"
+        local parsed_items=()
+        local item clean_item
+        while IFS= read -r item; do
+            if [ -n "$item" ]; then
+                parsed_items+=("$item")
+            fi
+        done <<< "$(parse_root_inputs "$raw_input")"
+        if [ ${#parsed_items[@]} -gt 0 ]; then
+            for item in "${parsed_items[@]}"; do
+                clean_item=$(expand_path "$item")
+                if [ -n "$clean_item" ]; then
+                    validate_and_add_dir "$clean_item" || true
+                fi
+            done
+        fi
+    }
+
+    if [ ${#EXISTING_ROOTS[@]} -gt 0 ]; then
+        read -r -p "Additional project directory(ies) (Enter to keep existing): " input_roots
+        if [ -n "$input_roots" ]; then
+            process_root_input "$input_roots"
+        fi
+    fi
+
     while [ ${#COLLECTED_ROOTS[@]} -eq 0 ]; do
         read -r -p "Project directory(ies) [$DEFAULT_SUGGESTION]: " input_roots
         input_roots="${input_roots:-$DEFAULT_SUGGESTION}"
-
-        input_items=()
-        if [[ "$input_roots" == *","* ]]; then
-            IFS=',' read -ra input_items <<< "$input_roots"
-        else
-            read -ra input_items <<< "$input_roots"
-        fi
-
-        for raw_item in "${input_items[@]}"; do
-            clean_item=$(expand_path "$raw_item")
-            if [ -n "$clean_item" ]; then
-                validate_and_add_dir "$clean_item" || true
-            fi
-        done
+        process_root_input "$input_roots"
 
         if [ ${#COLLECTED_ROOTS[@]} -eq 0 ]; then
             echo "No valid project roots specified. Please provide at least one directory."
@@ -361,11 +440,8 @@ else
         case "$add_another" in
             [yY]|[yY][eE][sS])
                 read -r -p "Additional project directory: " extra_input
-                clean_extra=$(expand_path "$extra_input")
-                if [ -n "$clean_extra" ]; then
-                    if validate_and_add_dir "$clean_extra"; then
-                        echo "✔ Added: $clean_extra"
-                    fi
+                if [ -n "$extra_input" ]; then
+                    process_root_input "$extra_input"
                 fi
                 ;;
             *)
