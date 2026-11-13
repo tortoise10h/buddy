@@ -25,51 +25,7 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show tracked projects and tasks from cache",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if syncLive {
-				rexDriver := rex.NewRexBackend()
-				if rexDriver.IsAvailable(cmd.Context()) {
-					liveSessions, err := rexDriver.ListSessions(cmd.Context())
-					if err == nil {
-						liveSessMap := make(map[string]bool)
-						for _, s := range liveSessions {
-							liveSessMap[s.SessionID] = true
-						}
-
-						_ = state.MutateState(func(s *state.State) error {
-							for pName, pData := range s.Projects {
-								if !liveSessMap[pData.RexSessionID] {
-									for tSlug, tData := range pData.Tasks {
-										if tData.GetEngine() != "rex" {
-											continue
-										}
-										tData.Status = "missing"
-										tData.LastSummary = "Rex session not found"
-										pData.Tasks[tSlug] = tData
-									}
-								} else {
-									windows, err := rexDriver.ListWindows(cmd.Context(), pData.RexSessionID)
-									if err == nil {
-										winMap := make(map[string]bool)
-										for _, w := range windows {
-											winMap[w.WindowID] = true
-										}
-										for tSlug, tData := range pData.Tasks {
-											if tData.GetEngine() != "rex" {
-												continue
-											}
-											if !winMap[tData.WindowID] {
-												tData.Status = "missing"
-												tData.LastSummary = "Window closed in Rex"
-												pData.Tasks[tSlug] = tData
-											}
-										}
-									}
-								}
-								s.Projects[pName] = pData
-							}
-							return nil
-						})
-					}
-				}
+				_ = reconcileRexWithBackend(cmd.Context(), rex.NewRexBackend())
 			}
 
 			st, err := state.LoadState()

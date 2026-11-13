@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
 )
@@ -23,8 +25,11 @@ var (
 	toolOutputRe        = regexp.MustCompile(`(?i)(?:^|\s)(?:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+|\./\S+)\s+(?:\[.*\]|\d+(?:\.\d+)?s|\(cached\))`)
 	interactivePhraseRe = regexp.MustCompile(`(?i)(?:(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|proceed\s*\?|clarification\s+needed|approval\s+needed|what\s+would\s+you\s+like|do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\))`)
 	inputQuestionRe     = regexp.MustCompile(`(?i)^(?:(?:\[\?\]|\?)\s+.*|\s*(?:do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|what\s+would\s+you\s+like|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|clarification\s+needed|approval\s+needed|proceed\s*\?).*|.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\)).*$)`)
+	questionSentenceRe  = regexp.MustCompile(`(?i)^(?:which|what|how|where|when|who|should|can|could|would|do|does|did|is|are|will|may|shall)\s+.*\?$`)
 
 	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
+
+	idlePromptLineRe = regexp.MustCompile(`(?i)^(?:[>❯›]\s*(?:type a message|ask anything)?|type a message|ask anything)\s*$`)
 
 	// Legacy aliases kept for compatibility
 	watchDemoRe  = watchDemoLineRe
@@ -33,6 +38,11 @@ var (
 
 	// notifyFn is injectable for testing to intercept desktop notifications.
 	notifyFn = notify.SendDesktopNotification
+
+	// syncRexFn is injectable for testing to reconcile state with live Rex sessions.
+	syncRexFn = func(ctx context.Context) error {
+		return reconcileRexWithBackend(ctx, rex.NewRexBackend())
+	}
 )
 
 func stripANSI(s string) string {
@@ -108,6 +118,29 @@ func isChromeLine(line string) bool {
 }
 
 func paneLines(raw string) (filtered []string, working bool) {
+	filtered, working, _ = paneState(raw)
+	return filtered, working
+}
+
+func isBarePromptLine(line string) bool {
+	return idlePromptLineRe.MatchString(strings.TrimSpace(line))
+}
+
+func isIdlePromptChrome(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "? for shortcuts") ||
+		strings.Contains(lower, "ctrl+o to expand") ||
+		strings.HasPrefix(lower, "auto ·") ||
+		strings.HasPrefix(lower, "auto •") ||
+		strings.Contains(lower, "auto ·") ||
+		strings.Contains(lower, "type a message") ||
+		strings.Contains(lower, "ask anything")
+}
+
+func paneState(raw string) (filtered []string, working bool, idlePrompt bool) {
 	clean := stripANSI(raw)
 	clean = strings.ReplaceAll(clean, "\r\n", "\n")
 	clean = strings.ReplaceAll(clean, "\r", "\n")
@@ -121,7 +154,7 @@ func paneLines(raw string) (filtered []string, working bool) {
 		}
 	}
 
-	// Check tail (last up to 6 non-empty lines) for active working state
+	// Check tail (last up to 6 non-empty lines) for active working state or idle TUI prompt
 	tailLen := 6
 	if len(nonEmpty) < tailLen {
 		tailLen = len(nonEmpty)
@@ -131,6 +164,13 @@ func paneLines(raw string) (filtered []string, working bool) {
 			working = true
 			break
 		}
+		trimmedBorder := strings.Trim(nonEmpty[i], "│┃║| \t")
+		if isIdlePromptChrome(nonEmpty[i]) || isIdlePromptChrome(trimmedBorder) || isBarePromptLine(trimmedBorder) {
+			idlePrompt = true
+		}
+	}
+	if working {
+		idlePrompt = false
 	}
 
 	for _, l := range rawLines {
@@ -148,7 +188,7 @@ func paneLines(raw string) (filtered []string, working bool) {
 		filtered = append(filtered, trimmedBorder)
 	}
 
-	return filtered, working
+	return filtered, working, idlePrompt
 }
 
 func matchInputLine(line string) bool {
@@ -187,6 +227,10 @@ func matchInputLine(line string) bool {
 		return strings.HasSuffix(trimmed, "?") || interactivePhraseRe.MatchString(trimmed)
 	}
 
+	if questionSentenceRe.MatchString(trimmed) {
+		return true
+	}
+
 	return inputQuestionRe.MatchString(trimmed) && (strings.HasSuffix(trimmed, "?") || interactivePhraseRe.MatchString(trimmed))
 }
 
@@ -209,6 +253,46 @@ func extractSummary(lines []string, matchIdx int) string {
 	return strings.TrimSpace(summary)
 }
 
+func hasMeaningfulOutput(filtered []string) bool {
+	for _, l := range filtered {
+		if !isBarePromptLine(l) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractIdleSummary(filtered []string) string {
+	var meaningful []string
+	for _, l := range filtered {
+		if !isBarePromptLine(l) {
+			meaningful = append(meaningful, l)
+		}
+	}
+	if len(meaningful) == 0 {
+		return "Worker returned to idle prompt"
+	}
+	start := len(meaningful) - 2
+	if start < 0 {
+		start = 0
+	}
+	summary := strings.TrimSpace(strings.Join(meaningful[start:], " "))
+	if len(summary) > 240 {
+		summary = summary[:237] + "..."
+	}
+	return summary
+}
+
+func detectEventWithIdle(filtered []string, idlePrompt, sawWorking bool, untilSet map[string]bool) (matchedEvent, summary string) {
+	if matchedEvent, summary = detectEvent(filtered, untilSet); matchedEvent != "" {
+		return matchedEvent, summary
+	}
+	if idlePrompt && (untilSet["demo"] || untilSet["done"] || untilSet["any"]) && (sawWorking || hasMeaningfulOutput(filtered)) {
+		return "ready_for_demo", extractIdleSummary(filtered)
+	}
+	return "", ""
+}
+
 func detectEvent(filtered []string, untilSet map[string]bool) (matchedEvent, summary string) {
 	for i := len(filtered) - 1; i >= 0; i-- {
 		line := filtered[i]
@@ -223,10 +307,17 @@ func detectEvent(filtered []string, untilSet map[string]bool) (matchedEvent, sum
 	return "", ""
 }
 
+func isWatchableStatus(status string) bool {
+	switch status {
+	case "running", "planning", "waiting_for_input", "ready_for_demo":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalEvent(status string, untilSet map[string]bool) bool {
 	switch status {
-	case "waiting_for_input":
-		return untilSet["input"] || untilSet["any"]
 	case "ready_for_demo":
 		return untilSet["demo"] || untilSet["done"] || untilSet["any"]
 	case "error":
@@ -279,6 +370,44 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 			startTime := time.Now()
 			deadline := startTime.Add(time.Duration(timeoutSec) * time.Second)
 
+			emitEvent := func(event, proj, task, summary string, alreadyReported bool) error {
+				if !alreadyReported && notifyEnabled {
+					notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", proj, task, event), summary, "Glass", true)
+				}
+				elapsed := int(time.Since(startTime).Seconds())
+				resp := map[string]any{
+					"event":           event,
+					"project":         proj,
+					"task":            task,
+					"summary":         summary,
+					"elapsed_seconds": elapsed,
+				}
+				if alreadyReported {
+					resp["already_reported"] = true
+				}
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(resp)
+			}
+
+			sawWorking := make(map[string]bool)
+			initiallyActive := make(map[string]bool)
+
+			// Snapshot initially active tasks before syncing so we only fire "missing"
+			// if an active task disappears during watch.
+			if initialSt, err := state.LoadState(); err == nil {
+				for pName, pData := range initialSt.Projects {
+					for tName, tData := range pData.Tasks {
+						if isWatchableStatus(tData.Status) {
+							initiallyActive[pName+"/"+tName] = true
+						}
+					}
+				}
+			}
+
+			// Reconcile cache with live Rex sessions before initial checks
+			_ = syncRexFn(cmd.Context())
+
 			// In single target mode, fail fast on missing project/task, missing block ID, or already terminal state
 			if !watchAll {
 				st, err := state.LoadState()
@@ -295,18 +424,23 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 				}
 
 				if isTerminalEvent(t.Status, untilSet) {
-					elapsed := int(time.Since(startTime).Seconds())
-					resp := map[string]any{
-						"event":            t.Status,
-						"project":          p.Name,
-						"task":             t.TaskSlug,
-						"summary":          t.LastSummary,
-						"elapsed_seconds":  elapsed,
-						"already_reported": true,
+					stillTerminal := true
+					if t.AgentBlockID != "" {
+						if eng, err := getEngine(t.GetEngine()); err == nil {
+							if out, err := eng.Capture(cmd.Context(), p.RexSessionID, t.AgentBlockID, 30); err == nil {
+								if _, working := paneLines(out); working {
+									stillTerminal = false
+									sawWorking[p.Name+"/"+t.TaskSlug] = true
+									_ = state.MutateState(func(s *state.State) error {
+										return s.UpdateTask(p.Name, t.TaskSlug, "running", t.LastSummary)
+									})
+								}
+							}
+						}
 					}
-					enc := json.NewEncoder(cmd.OutOrStdout())
-					enc.SetIndent("", "  ")
-					return enc.Encode(resp)
+					if stillTerminal {
+						return emitEvent(t.Status, p.Name, t.TaskSlug, t.LastSummary, true)
+					}
 				}
 
 				if t.AgentBlockID == "" {
@@ -324,6 +458,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 				sessionID string
 				blockID   string
 				engine    string
+				status    string
 			}
 
 			type debounceState struct {
@@ -332,6 +467,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 				consecutive  int
 			}
 			debounceMap := make(map[string]*debounceState)
+			firstPoll := true
 
 			for time.Now().Before(deadline) {
 				select {
@@ -339,6 +475,11 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 					return cmd.Context().Err()
 				default:
 				}
+
+				if !firstPoll {
+					_ = syncRexFn(cmd.Context())
+				}
+				firstPoll = false
 
 				st, err := state.LoadState()
 				if err != nil {
@@ -354,13 +495,18 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 				if watchAll {
 					for pName, pData := range st.Projects {
 						for tName, tData := range pData.Tasks {
-							if tData.Status == "running" && tData.AgentBlockID != "" {
+							key := pName + "/" + tName
+							if tData.Status == "missing" && initiallyActive[key] && (untilSet["missing"] || untilSet["any"]) {
+								return emitEvent("missing", pName, tName, tData.LastSummary, false)
+							}
+							if isWatchableStatus(tData.Status) && tData.AgentBlockID != "" {
 								targets = append(targets, targetTask{
 									project:   pName,
 									task:      tName,
 									sessionID: pData.RexSessionID,
 									blockID:   tData.AgentBlockID,
 									engine:    tData.GetEngine(),
+									status:    tData.Status,
 								})
 							}
 						}
@@ -380,6 +526,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 						sessionID: p.RexSessionID,
 						blockID:   t.AgentBlockID,
 						engine:    t.GetEngine(),
+						status:    t.Status,
 					})
 				}
 
@@ -401,15 +548,27 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 					}
 
 					targetKey := target.project + "/" + target.task
-					filtered, working := paneLines(out)
+					filtered, working, idlePrompt := paneState(out)
 					if working {
-						// Suppress events while actively executing
+						// Suppress events while actively executing and record active turn
+						sawWorking[targetKey] = true
+						delete(debounceMap, targetKey)
+						if target.status == "waiting_for_input" || target.status == "ready_for_demo" {
+							_ = state.MutateState(func(s *state.State) error {
+								return s.UpdateTask(target.project, target.task, "running", "")
+							})
+						}
+						continue
+					}
+
+					matchedEvent, summary := detectEventWithIdle(filtered, idlePrompt, sawWorking[targetKey], untilSet)
+					if matchedEvent == "" {
 						delete(debounceMap, targetKey)
 						continue
 					}
 
-					matchedEvent, summary := detectEvent(filtered, untilSet)
-					if matchedEvent == "" {
+					// Avoid re-firing the same status for a task already in that status unless we saw a working turn
+					if matchedEvent == target.status && !sawWorking[targetKey] {
 						delete(debounceMap, targetKey)
 						continue
 					}
@@ -431,21 +590,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 							return s.UpdateTask(target.project, target.task, matchedEvent, summary)
 						})
 
-						if notifyEnabled {
-							notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", target.project, target.task, matchedEvent), summary, "Glass", true)
-						}
-
-						elapsed := int(time.Since(startTime).Seconds())
-						resp := map[string]any{
-							"event":           matchedEvent,
-							"project":         target.project,
-							"task":            target.task,
-							"summary":         summary,
-							"elapsed_seconds": elapsed,
-						}
-						enc := json.NewEncoder(cmd.OutOrStdout())
-						enc.SetIndent("", "  ")
-						return enc.Encode(resp)
+						return emitEvent(matchedEvent, target.project, target.task, summary, false)
 					}
 				}
 
