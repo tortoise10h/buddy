@@ -26,7 +26,7 @@ Buddy solves the 3 core multi-project orchestration challenges:
                                v
                +-------------------------------+
                |   Buddy Control Tower         |
-               |   Rex Session: 'Buddy'        |
+               |   Current Rex Tab / Session   |
                |   CWD: ~/.buddy/              |
                +-------------------------------+
                  | Layer 1: AGENTS.md (Always-on system prompt)
@@ -211,7 +211,7 @@ Existing `~/.buddy/config.json` files that only define `default_agent` continue 
 ```sh
 buddy
 ```
-Switches to or creates the `Buddy` Rex session and launches your orchestrator agent (`agy`).
+Starts your orchestrator agent (`agy` by default) directly in the current terminal tab with working directory `~/.buddy/`, regardless of the Rex session name.
 
 Use `buddy --help` (or `-h`) to inspect launcher options, supported agents, and agent resolution rules. To pass options directly through to the agent without interpretation, use `--` (e.g. `buddy -- --model pro`). Unrecognized options passed directly to `buddy` will report an error and the full help message to stderr and exit with code 2.
 

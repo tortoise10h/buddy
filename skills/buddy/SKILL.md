@@ -274,7 +274,7 @@ When the user confirms the task is accepted and done:
 Buddy stores per-engine settings under `engines.<name>` in `~/.buddy/config.json`:
 
 1. **Terminal Engines (`rex`, `wezterm`)**:
-   - `orchestrator_agent` (default: `"agy"`): Runs the central Buddy control session (`bin/buddy`).
+   - `orchestrator_agent` (default: `"agy"`): Runs the central Buddy control session (`bin/buddy`, started in the current tab with `cwd ~/.buddy/` regardless of session name).
    - `worker_agent` (default: `"agy"`): Default CLI harness for spawned task tabs (`buddy-ctl dispatch`, `buddy-ctl task start`).
    - `session_name` (default: `"Buddy"`), `capture_lines` (default: `120`).
 2. **T3 Engine (`t3`)**:

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Buddy launcher script
-# Launches or switches to the Buddy session in Rex
+# Starts the Buddy orchestrator agent in the current tab (cwd ~/.buddy)
 
 set -euo pipefail
 
-BUDDY_DIR="$HOME/.buddy"
+BUDDY_DIR="${BUDDY_DIR:-$HOME/.buddy}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUDDY_CTL="$REPO_DIR/bin/buddy-ctl"
@@ -21,10 +21,10 @@ print_help() {
     cat <<'EOF'
 Usage: buddy [options] [agent] [-- <agent-args...>]
 
-Launch or switch to the Buddy orchestrator session in Rex.
+Launch the Buddy orchestrator agent in the current tab (cwd ~/.buddy).
 
 Options:
-  -a, --agent <agent>   Agent to launch in the orchestrator session
+  -a, --agent <agent>   Orchestrator agent to launch
   -h, --help            Show this help message and exit
 
 Positional Agent:
@@ -41,7 +41,7 @@ Passthrough:
   Everything after '--' is forwarded untouched.
 
 Examples:
-  buddy                     Launch or attach using default agent
+  buddy                     Launch using default agent
   buddy opencode            Launch with opencode agent
   buddy -a pi               Launch with pi agent
   buddy -- --model pro      Pass '--model pro' directly to the agent
@@ -178,50 +178,10 @@ if [ ${#RESOLVED_CMD[@]} -eq 0 ]; then
     RESOLVED_CMD=("$RESOLVED_AGENT")
 fi
 
-# Find Rex binary
-REX_BIN="$(command -v rex 2>/dev/null || echo "/Users/sunday/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex")"
-
-# If running inside Rex in the Buddy session, start the agent
-CURRENT_SESS="${REX_SESSION:-}"
-if [ -n "$CURRENT_SESS" ]; then
-    SESS_LABEL="$("$REX_BIN" session inspect "$CURRENT_SESS" --json 2>/dev/null | jq -r '.label // empty' || true)"
-    if [ "$SESS_LABEL" = "Buddy" ]; then
-        cd "$BUDDY_DIR"
-        if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-            exec "${RESOLVED_CMD[@]}" "${EXTRA_ARGS[@]}"
-        else
-            exec "${RESOLVED_CMD[@]}"
-        fi
-    fi
-fi
-
-# Check if a session named Buddy already exists in Rex
-SESSIONS_JSON="$("$REX_BIN" ls --json 2>/dev/null || echo '{"sessions":[]}')"
-BUDDY_SESS_ID="$(echo "$SESSIONS_JSON" | jq -r '.sessions[] | select(.label == "Buddy") | .session_id' | head -n 1)"
-
-# Find connected Rex app client (GUI)
-CLIENTS_JSON="$("$REX_BIN" client ls --json 2>/dev/null || echo '{"clients":[]}')"
-APP_CLIENT_ID="$(echo "$CLIENTS_JSON" | jq -r '.clients[] | select(.info.kind == "app") | .client_id' | head -n 1)"
-
-if [ -n "$BUDDY_SESS_ID" ]; then
-    echo "Buddy session active in Rex ($BUDDY_SESS_ID)."
-    if [ -n "$APP_CLIENT_ID" ]; then
-        "$REX_BIN" -C "$APP_CLIENT_ID" do session.select "session_id=$BUDDY_SESS_ID" >/dev/null 2>&1 || true
-        echo "Switched Rex to Buddy session."
-    fi
+mkdir -p "$BUDDY_DIR"
+cd "$BUDDY_DIR"
+if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+    exec "${RESOLVED_CMD[@]}" "${EXTRA_ARGS[@]}"
 else
-    echo "Creating Buddy session in Rex..."
-    if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "${RESOLVED_CMD[@]}" "${EXTRA_ARGS[@]}")"
-    else
-        NEW_SESS="$("$REX_BIN" new Buddy -c "$BUDDY_DIR" --window Buddy --json -- "${RESOLVED_CMD[@]}")"
-    fi
-    BUDDY_SESS_ID="$(echo "$NEW_SESS" | jq -r '.session_id')"
-    if [ -n "$BUDDY_CTL_CMD" ]; then
-        "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
-    fi
-    if [ -n "$APP_CLIENT_ID" ] && [ -n "$BUDDY_SESS_ID" ]; then
-        "$REX_BIN" -C "$APP_CLIENT_ID" do session.select "session_id=$BUDDY_SESS_ID" >/dev/null 2>&1 || true
-        echo "Created and switched Rex to Buddy session ($BUDDY_SESS_ID)."
-    fi
+    exec "${RESOLVED_CMD[@]}"
 fi
