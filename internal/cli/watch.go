@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend"
 	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
@@ -327,6 +328,61 @@ func isTerminalEvent(status string, untilSet map[string]bool) bool {
 	}
 }
 
+// evalProgramStatus interprets native OSC 7501 program_status records (e.g. from Rex).
+// Returns handled=false when no records exist or when idle without a prior working turn,
+// signaling the caller to fall back to screen text grep.
+func evalProgramStatus(records []backend.ProgramStatusRecord, sawWorking bool, untilSet map[string]bool) (working bool, event, summary, snapshot string, handled bool) {
+	if len(records) == 0 {
+		return false, "", "", "", false
+	}
+
+	pickText := func(r backend.ProgramStatusRecord, fallback string) string {
+		if r.Msg != "" {
+			return r.Msg
+		}
+		if r.Title != "" {
+			return r.Title
+		}
+		return fallback
+	}
+
+	for _, r := range records {
+		if r.State == "blocked" {
+			if untilSet["input"] || untilSet["any"] {
+				fb := "Worker is waiting for input"
+				if r.Kind != "" {
+					fb = fmt.Sprintf("Worker blocked (%s)", r.Kind)
+				}
+				return false, "waiting_for_input", pickText(r, fb), fmt.Sprintf("native:blocked:%s:%s:%s", r.Kind, r.Title, r.Msg), true
+			}
+		}
+	}
+	for _, r := range records {
+		if r.State == "working" {
+			return true, "", "", "", true
+		}
+	}
+	for _, r := range records {
+		if r.State == "error" {
+			if untilSet["error"] || untilSet["any"] {
+				return false, "error", pickText(r, "Worker reported error"), fmt.Sprintf("native:error:%s:%s", r.Title, r.Msg), true
+			}
+		}
+	}
+	for _, r := range records {
+		if r.State == "done" {
+			if untilSet["demo"] || untilSet["done"] || untilSet["any"] {
+				return false, "ready_for_demo", pickText(r, ""), fmt.Sprintf("native:done:%s:%s", r.Title, r.Msg), true
+			}
+		}
+	}
+	if sawWorking && (untilSet["demo"] || untilSet["done"] || untilSet["any"]) {
+		return false, "ready_for_demo", pickText(records[0], ""), fmt.Sprintf("native:idle:%s:%s", records[0].Title, records[0].Msg), true
+	}
+
+	return false, "", "", "", false
+}
+
 func newWatchCmd() *cobra.Command {
 	var (
 		projectName   string
@@ -427,14 +483,29 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 					stillTerminal := true
 					if t.AgentBlockID != "" {
 						if eng, err := getEngine(t.GetEngine()); err == nil {
-							if out, err := eng.Capture(cmd.Context(), p.RexSessionID, t.AgentBlockID, 30); err == nil {
-								if _, working := paneLines(out); working {
-									stillTerminal = false
-									sawWorking[p.Name+"/"+t.TaskSlug] = true
-									_ = state.MutateState(func(s *state.State) error {
-										return s.UpdateTask(p.Name, t.TaskSlug, "running", t.LastSummary)
-									})
+							checkedNative := false
+							if psp, ok := eng.(backend.ProgramStatusProvider); ok {
+								if recs, err := psp.GetProgramStatus(cmd.Context(), p.RexSessionID, t.AgentBlockID); err == nil && len(recs) > 0 {
+									if working, _, _, _, handled := evalProgramStatus(recs, false, untilSet); handled {
+										checkedNative = true
+										if working {
+											stillTerminal = false
+										}
+									}
 								}
+							}
+							if !checkedNative {
+								if out, err := eng.Capture(cmd.Context(), p.RexSessionID, t.AgentBlockID, 30); err == nil {
+									if _, working := paneLines(out); working {
+										stillTerminal = false
+									}
+								}
+							}
+							if !stillTerminal {
+								sawWorking[p.Name+"/"+t.TaskSlug] = true
+								_ = state.MutateState(func(s *state.State) error {
+									return s.UpdateTask(p.Name, t.TaskSlug, "running", t.LastSummary)
+								})
 							}
 						}
 					}
@@ -539,16 +610,50 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 						continue
 					}
 
-					out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 30)
-					if err != nil {
-						if !watchAll {
-							return fmt.Errorf("failed to capture terminal output: %w", err)
+					targetKey := target.project + "/" + target.task
+
+					var (
+						working      bool
+						matchedEvent string
+						summary      string
+						snapshot     string
+						nativeHit    bool
+					)
+
+					// 1. Primary: query native terminal program_status (e.g. Rex OSC 7501) if supported
+					if psp, ok := eng.(backend.ProgramStatusProvider); ok {
+						if recs, err := psp.GetProgramStatus(cmd.Context(), target.sessionID, target.blockID); err == nil {
+							working, matchedEvent, summary, snapshot, nativeHit = evalProgramStatus(recs, sawWorking[targetKey], untilSet)
 						}
-						continue
 					}
 
-					targetKey := target.project + "/" + target.task
-					filtered, working, idlePrompt := paneState(out)
+					// 2. Fallback: capture pane output and grep/analyze screen text
+					if !nativeHit {
+						out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 30)
+						if err != nil {
+							if !watchAll {
+								return fmt.Errorf("failed to capture terminal output: %w", err)
+							}
+							continue
+						}
+
+						var filtered []string
+						var idlePrompt bool
+						filtered, working, idlePrompt = paneState(out)
+						if !working {
+							matchedEvent, summary = detectEventWithIdle(filtered, idlePrompt, sawWorking[targetKey], untilSet)
+							snapshot = strings.Join(filtered, "\n")
+						}
+					} else if !working && matchedEvent != "" && summary == "" {
+						// Enrich empty native summary from pane tail if available
+						if out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 30); err == nil {
+							filtered, _, _ := paneState(out)
+							summary = extractIdleSummary(filtered)
+						} else {
+							summary = "Worker completed task"
+						}
+					}
+
 					if working {
 						// Suppress events while actively executing and record active turn
 						sawWorking[targetKey] = true
@@ -561,7 +666,6 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 						continue
 					}
 
-					matchedEvent, summary := detectEventWithIdle(filtered, idlePrompt, sawWorking[targetKey], untilSet)
 					if matchedEvent == "" {
 						delete(debounceMap, targetKey)
 						continue
@@ -573,7 +677,6 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 						continue
 					}
 
-					snapshot := strings.Join(filtered, "\n")
 					ds, exists := debounceMap[targetKey]
 					if !exists || ds.lastEvent != matchedEvent || ds.lastSnapshot != snapshot {
 						debounceMap[targetKey] = &debounceState{

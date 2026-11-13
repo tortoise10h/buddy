@@ -49,3 +49,22 @@ type TerminalBackend interface {
 	OpenDevSplit(ctx context.Context, sessionID, blockID, cwd, cmd string) (string, error)
 	IsBlockAlive(ctx context.Context, sessionID, blockID string) (bool, error)
 }
+
+// ProgramStatusRecord represents an OSC 7501 status record reported by a program in a terminal block.
+type ProgramStatusRecord struct {
+	ID           string `json:"id,omitempty"`
+	State        string `json:"state"`          // idle, working, done, blocked, error
+	Kind         string `json:"kind,omitempty"` // permission, question, auth
+	Progress     *int   `json:"progress,omitempty"`
+	App          string `json:"app,omitempty"`
+	EffectiveApp string `json:"effective_app,omitempty"`
+	Title        string `json:"title,omitempty"`
+	Msg          string `json:"msg,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+// ProgramStatusProvider is an optional interface implemented by backends or engines
+// that can query native terminal program status (e.g. Rex OSC 7501 program_status).
+type ProgramStatusProvider interface {
+	GetProgramStatus(ctx context.Context, sessionID, blockID string) ([]ProgramStatusRecord, error)
+}

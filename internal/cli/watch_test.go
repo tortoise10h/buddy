@@ -75,6 +75,8 @@ type mockWatchBackend struct {
 	captureErr       error
 	sessions         []backend.SessionInfo
 	windowsBySession map[string][]backend.WindowInfo
+	programStatuses  [][]backend.ProgramStatusRecord
+	programStatusIdx int
 }
 
 func (m *mockWatchBackend) Name() string                         { return "rex" }
@@ -120,6 +122,16 @@ func (m *mockWatchBackend) OpenDevSplit(ctx context.Context, sessionID, blockID,
 }
 func (m *mockWatchBackend) IsBlockAlive(ctx context.Context, sessionID, blockID string) (bool, error) {
 	return true, nil
+}
+func (m *mockWatchBackend) GetProgramStatus(ctx context.Context, sessionID, blockID string) ([]backend.ProgramStatusRecord, error) {
+	if len(m.programStatuses) == 0 {
+		return nil, nil
+	}
+	recs := m.programStatuses[m.programStatusIdx]
+	if m.programStatusIdx < len(m.programStatuses)-1 {
+		m.programStatusIdx++
+	}
+	return recs, nil
 }
 
 // TestWatchRegex_BeforeAfterProvesRegression verifies that old unanchored regexes matched
@@ -1124,5 +1136,119 @@ func TestWatch_ReconcileRexCache(t *testing.T) {
 	recTask, _ := p.FindTask("recovered-task")
 	if recTask.Status == "missing" {
 		t.Errorf("recovered-task status remained missing, expected recovery")
+	}
+}
+
+// TestWatch_ProgramStatus_TableDriven verifies Rex native OSC 7501 program_status
+// takes priority over screen text grep, and falls back to screen text grep when absent.
+func TestWatch_ProgramStatus_TableDriven(t *testing.T) {
+	tests := []struct {
+		name                string
+		programStatuses     [][]backend.ProgramStatusRecord
+		captures            []string
+		wantEvent           string
+		wantSummaryContains string
+	}{
+		{
+			name: "native working then done overrides screen text",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "working", App: "opencode", Title: "Working on fix"}},
+				{{State: "done", App: "opencode", Title: "Fix implemented", Msg: "All checks green"}},
+			},
+			captures:            []string{"plain screen output without markers"},
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "All checks green",
+		},
+		{
+			name: "native working then idle enriches summary from screen",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "working", App: "opencode"}},
+				{{State: "idle", App: "opencode"}},
+			},
+			captures:            []string{"Updated watch.go and ran tests.\n> "},
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Updated watch.go and ran tests.",
+		},
+		{
+			name: "native blocked triggers waiting_for_input",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "blocked", Kind: "question", App: "opencode", Msg: "Allow running git push?"}},
+			},
+			captures:            []string{"no question text in pane"},
+			wantEvent:           "waiting_for_input",
+			wantSummaryContains: "Allow running git push?",
+		},
+		{
+			name: "native error triggers error",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "error", App: "opencode", Msg: "Process crashed"}},
+			},
+			captures:            []string{""},
+			wantEvent:           "error",
+			wantSummaryContains: "Process crashed",
+		},
+		{
+			name:                "empty program_status falls back to screen text grep",
+			programStatuses:     [][]backend.ProgramStatusRecord{{}},
+			captures:            []string{"Tests passed.\n> \n? for shortcuts"},
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Tests passed.",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("BUDDY_DIR", tmpDir)
+
+			recorder := &notificationRecorder{}
+			notifyFn = recorder.Record
+			defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+			mockBackend := &mockWatchBackend{
+				programStatuses: tc.programStatuses,
+				captures:        tc.captures,
+			}
+			getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+			_ = state.MutateState(func(s *state.State) error {
+				s.RecordTask("proj-ps", filepath.Join(tmpDir, "proj-ps"), "sess_ps", "proj-ps", state.TaskState{
+					TaskSlug:     "task-ps",
+					AgentBlockID: "blk_ps",
+					Status:       "running",
+				})
+				return nil
+			})
+
+			buf := new(bytes.Buffer)
+			rootCmd.SetOut(buf)
+			rootCmd.SetErr(buf)
+			rootCmd.SetArgs([]string{
+				"watch",
+				"--project", "proj-ps",
+				"--task", "task-ps",
+				"--debounce", "1",
+				"--interval", "0",
+				"--timeout", "5",
+				"--notify=true",
+			})
+
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("watch execute failed: %v", err)
+			}
+
+			var resp map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+			}
+
+			if resp["event"] != tc.wantEvent {
+				t.Errorf("event = %v, want %v", resp["event"], tc.wantEvent)
+			}
+			summary, _ := resp["summary"].(string)
+			if tc.wantSummaryContains != "" && !strings.Contains(summary, tc.wantSummaryContains) {
+				t.Errorf("summary = %q, want containing %q", summary, tc.wantSummaryContains)
+			}
+		})
 	}
 }

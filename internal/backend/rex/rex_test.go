@@ -79,3 +79,30 @@ func TestRexBackend_Live_ListSessions(t *testing.T) {
 		t.Logf("  - %s (ID: %s)", s.Name, s.SessionID)
 	}
 }
+
+func TestRexBackend_GetProgramStatus(t *testing.T) {
+	mockJSON := `{"records":[{"state":"working","app":"opencode","title":"Implementing feature"},{"id":"child","state":"blocked","kind":"question","msg":"Which port?"}]}`
+	runner := func(ctx context.Context, name string, args ...string) (string, error) {
+		cmdStr := strings.Join(args, " ")
+		if strings.Contains(cmdStr, "block call -b blk_1 -s sess_1 program_status {}") {
+			return mockJSON, nil
+		}
+		t.Fatalf("unexpected call: %v", args)
+		return "", nil
+	}
+
+	b := NewRexBackend(WithRunner(runner))
+	recs, err := b.GetProgramStatus(context.Background(), "sess_1", "blk_1")
+	if err != nil {
+		t.Fatalf("GetProgramStatus failed: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+	if recs[0].State != "working" || recs[0].App != "opencode" {
+		t.Errorf("unexpected first record: %+v", recs[0])
+	}
+	if recs[1].State != "blocked" || recs[1].Kind != "question" || recs[1].Msg != "Which port?" {
+		t.Errorf("unexpected second record: %+v", recs[1])
+	}
+}

@@ -341,3 +341,27 @@ func (r *RexBackend) IsBlockAlive(ctx context.Context, sessionID, blockID string
 	}
 	return true, nil
 }
+
+type rexProgramStatusOutput struct {
+	Records []backend.ProgramStatusRecord `json:"records"`
+}
+
+// GetProgramStatus queries Rex's native OSC 7501 program_status records for a terminal block.
+func (r *RexBackend) GetProgramStatus(ctx context.Context, sessionID, blockID string) ([]backend.ProgramStatusRecord, error) {
+	args := []string{"block", "call", "-b", blockID}
+	if sessionID != "" {
+		args = append(args, "-s", sessionID)
+	}
+	args = append(args, "program_status", "{}")
+
+	out, err := r.runRex(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var data rexProgramStatusOutput
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		return nil, fmt.Errorf("failed to parse rex program_status JSON: %w", err)
+	}
+	return data.Records, nil
+}
