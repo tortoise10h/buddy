@@ -62,16 +62,21 @@ func (nr *notificationRecorder) All() []recordedNotification {
 var globalNotificationRecorder = &notificationRecorder{}
 
 func TestMain(m *testing.M) {
-	// Guard: Ensure notifyFn is pointed to a recorder by default during tests
-	// so real macOS desktop notifications are never sent.
+	// Guard: Ensure notifyFn and syncRexFn are pointed to test-safe stubs by default
+	// so real macOS desktop notifications and live Rex daemons are never touched.
 	notifyFn = globalNotificationRecorder.Record
+	syncRexFn = func(context.Context) error { return nil }
 	os.Exit(m.Run())
 }
 
 type mockWatchBackend struct {
-	captures   []string
-	captureIdx int
-	captureErr error
+	captures         []string
+	captureIdx       int
+	captureErr       error
+	sessions         []backend.SessionInfo
+	windowsBySession map[string][]backend.WindowInfo
+	programStatuses  [][]backend.ProgramStatusRecord
+	programStatusIdx int
 }
 
 func (m *mockWatchBackend) Name() string                         { return "rex" }
@@ -80,9 +85,12 @@ func (m *mockWatchBackend) EnsureSession(ctx context.Context, name string, cwd s
 	return backend.SessionInfo{SessionID: "sess_watch_1", Name: name, Path: cwd}, nil
 }
 func (m *mockWatchBackend) ListSessions(ctx context.Context) ([]backend.SessionInfo, error) {
-	return nil, nil
+	return m.sessions, nil
 }
 func (m *mockWatchBackend) ListWindows(ctx context.Context, sessionID string) ([]backend.WindowInfo, error) {
+	if m.windowsBySession != nil {
+		return m.windowsBySession[sessionID], nil
+	}
 	return nil, nil
 }
 func (m *mockWatchBackend) InspectWindow(ctx context.Context, sessionID, windowID string) (backend.WindowInfo, error) {
@@ -114,6 +122,16 @@ func (m *mockWatchBackend) OpenDevSplit(ctx context.Context, sessionID, blockID,
 }
 func (m *mockWatchBackend) IsBlockAlive(ctx context.Context, sessionID, blockID string) (bool, error) {
 	return true, nil
+}
+func (m *mockWatchBackend) GetProgramStatus(ctx context.Context, sessionID, blockID string) ([]backend.ProgramStatusRecord, error) {
+	if len(m.programStatuses) == 0 {
+		return nil, nil
+	}
+	recs := m.programStatuses[m.programStatusIdx]
+	if m.programStatusIdx < len(m.programStatuses)-1 {
+		m.programStatusIdx++
+	}
+	return recs, nil
 }
 
 // TestWatchRegex_BeforeAfterProvesRegression verifies that old unanchored regexes matched
@@ -824,5 +842,413 @@ func TestWatch_TestG_UnknownTargetFailsFast(t *testing.T) {
 	})
 	if err := rootCmd.Execute(); err == nil {
 		t.Errorf("expected error when capture fails, got nil")
+	}
+}
+
+// TestWatch_DetectionCases_TableDriven covers all key watchdog detection scenarios:
+// - worker finishing without an explicit completion marker (idle prompt + output)
+// - idle prompt after a working turn
+// - worker needing input
+// - already-terminal short-circuit (idle vs resumed working vs waiting_for_input)
+func TestWatch_DetectionCases_TableDriven(t *testing.T) {
+	tests := []struct {
+		name                string
+		initialStatus       string
+		initialSummary      string
+		captures            []string
+		watchAll            bool
+		debounce            string
+		wantEvent           string
+		wantSummaryContains string
+		wantAlreadyReported bool
+		wantSavedStatus     string
+		wantNotifs          int
+	}{
+		{
+			name:          "worker finishes without marker (test results + idle prompt)",
+			initialStatus: "running",
+			captures: []string{
+				"Updated install.sh and init.go to preserve projects_roots.\n" +
+					"ok  github.com/tortoise10h/buddy/internal/cli 1.195s\n" +
+					"────────────────────────────────────────\n" +
+					"│ > │\n" +
+					"────────────────────────────────────────\n" +
+					"? for shortcuts   auto · 100%",
+				"Updated install.sh and init.go to preserve projects_roots.\n" +
+					"ok  github.com/tortoise10h/buddy/internal/cli 1.195s\n" +
+					"────────────────────────────────────────\n" +
+					"│ > │\n" +
+					"────────────────────────────────────────\n" +
+					"? for shortcuts   auto · 100%",
+			},
+			debounce:            "2",
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "internal/cli 1.195s",
+			wantSavedStatus:     "ready_for_demo",
+			wantNotifs:          1,
+		},
+		{
+			name:          "idle prompt after working turn",
+			initialStatus: "running",
+			captures: []string{
+				"Running command: go test ./...\n⠋ Testing... (esc to cancel)\n> Type a message",
+				"All 18 checks passed cleanly.\n❯ ",
+				"All 18 checks passed cleanly.\n❯ ",
+			},
+			debounce:            "2",
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "All 18 checks passed cleanly.",
+			wantSavedStatus:     "ready_for_demo",
+			wantNotifs:          1,
+		},
+		{
+			name:          "worker needs input even with TUI footer present",
+			initialStatus: "running",
+			captures: []string{
+				"Which branch should I rebase onto?\n" +
+					"1) main\n" +
+					"2) develop\n" +
+					"────────────────────────────────────────\n" +
+					"> \n" +
+					"? for shortcuts",
+			},
+			debounce:            "1",
+			wantEvent:           "waiting_for_input",
+			wantSummaryContains: "Which branch should I rebase onto?",
+			wantSavedStatus:     "waiting_for_input",
+			wantNotifs:          1,
+		},
+		{
+			name:                "already-terminal short-circuit when pane is idle",
+			initialStatus:       "ready_for_demo",
+			initialSummary:      "Previously finished feature",
+			captures:            []string{"All done.\n> \n? for shortcuts"},
+			debounce:            "1",
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Previously finished feature",
+			wantAlreadyReported: true,
+			wantSavedStatus:     "ready_for_demo",
+			wantNotifs:          0,
+		},
+		{
+			name:           "cached ready_for_demo does not short-circuit when worker is actively running",
+			initialStatus:  "ready_for_demo",
+			initialSummary: "Old finished turn",
+			captures: []string{
+				"Running command: make test\n⠋ Working (esc to cancel)",
+				"Refactored watchdog loop.\n> \n? for shortcuts",
+			},
+			debounce:            "1",
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Refactored watchdog loop.",
+			wantAlreadyReported: false,
+			wantSavedStatus:     "ready_for_demo",
+			wantNotifs:          1,
+		},
+		{
+			name:           "cached waiting_for_input is re-checked and detects completion",
+			initialStatus:  "waiting_for_input",
+			initialSummary: "Asked about target branch",
+			captures: []string{
+				"Rebased onto main cleanly.\n> \n? for shortcuts",
+			},
+			watchAll:            true,
+			debounce:            "1",
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Rebased onto main cleanly.",
+			wantSavedStatus:     "ready_for_demo",
+			wantNotifs:          1,
+		},
+		{
+			name:           "watch --all re-checks ready_for_demo task if it resumes working",
+			initialStatus:  "ready_for_demo",
+			initialSummary: "First turn done",
+			captures: []string{
+				"Thought for 4s\n⠋ Editing watch.go",
+				"Second turn completed.\n❯ ",
+			},
+			watchAll:            true,
+			debounce:            "1",
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Second turn completed.",
+			wantSavedStatus:     "ready_for_demo",
+			wantNotifs:          1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("BUDDY_DIR", tmpDir)
+
+			recorder := &notificationRecorder{}
+			notifyFn = recorder.Record
+			defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+			mockBackend := &mockWatchBackend{captures: tc.captures}
+			getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+			_ = state.MutateState(func(s *state.State) error {
+				s.RecordTask("proj-tbl", filepath.Join(tmpDir, "proj-tbl"), "sess_tbl", "proj-tbl", state.TaskState{
+					TaskSlug:     "task-tbl",
+					AgentBlockID: "blk_tbl",
+					Status:       tc.initialStatus,
+					LastSummary:  tc.initialSummary,
+				})
+				return nil
+			})
+
+			buf := new(bytes.Buffer)
+			rootCmd.SetOut(buf)
+			rootCmd.SetErr(buf)
+
+			args := []string{
+				"watch",
+				"--debounce", tc.debounce,
+				"--interval", "0",
+				"--timeout", "5",
+				"--notify=true",
+			}
+			if tc.watchAll {
+				args = append(args, "--all")
+			} else {
+				args = append(args, "--project", "proj-tbl", "--task", "task-tbl")
+			}
+			rootCmd.SetArgs(args)
+
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("watch execute failed: %v", err)
+			}
+
+			var resp map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+			}
+
+			if resp["event"] != tc.wantEvent {
+				t.Errorf("event = %v, want %v", resp["event"], tc.wantEvent)
+			}
+			summary, _ := resp["summary"].(string)
+			if tc.wantSummaryContains != "" && !strings.Contains(summary, tc.wantSummaryContains) {
+				t.Errorf("summary = %q, want containing %q", summary, tc.wantSummaryContains)
+			}
+			gotAlready, _ := resp["already_reported"].(bool)
+			if gotAlready != tc.wantAlreadyReported {
+				t.Errorf("already_reported = %v, want %v", gotAlready, tc.wantAlreadyReported)
+			}
+
+			st, _ := state.LoadState()
+			p, _ := st.FindProject("proj-tbl")
+			task, _ := p.FindTask("task-tbl")
+			if task.Status != tc.wantSavedStatus {
+				t.Errorf("saved task status = %q, want %q", task.Status, tc.wantSavedStatus)
+			}
+
+			if len(recorder.All()) != tc.wantNotifs {
+				t.Errorf("notifications count = %d, want %d", len(recorder.All()), tc.wantNotifs)
+			}
+		})
+	}
+}
+
+// TestWatch_ReconcileRexCache verifies that stale 'missing' entries are recovered when Rex
+// still has the session/window (even if session ID changed) and vanished windows are marked missing.
+func TestWatch_ReconcileRexCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+	mockBackend := &mockWatchBackend{
+		sessions: []backend.SessionInfo{
+			{SessionID: "sess_live_new", Name: "proj-sync", Path: filepath.Join(tmpDir, "proj-sync")},
+		},
+		windowsBySession: map[string][]backend.WindowInfo{
+			"sess_live_new": {
+				{WindowID: "win_live", Label: "recovered-task", SessionID: "sess_live_new", BlockIDs: []string{"blk_live"}},
+			},
+		},
+		captures: []string{
+			"Finished sync work.\n> \n? for shortcuts",
+		},
+	}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+	origSync := syncRexFn
+	syncRexFn = func(ctx context.Context) error {
+		return reconcileRexWithBackend(ctx, mockBackend)
+	}
+	defer func() { syncRexFn = origSync }()
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-sync", filepath.Join(tmpDir, "proj-sync"), "sess_stale_old", "proj-sync", state.TaskState{
+			TaskSlug:     "recovered-task",
+			WindowID:     "win_live",
+			WindowLabel:  "recovered-task",
+			AgentBlockID: "blk_live",
+			Status:       "missing",
+			LastSummary:  "Rex session not found",
+		})
+		s.RecordTask("proj-sync", filepath.Join(tmpDir, "proj-sync"), "sess_stale_old", "proj-sync", state.TaskState{
+			TaskSlug:     "gone-task",
+			WindowID:     "win_gone",
+			WindowLabel:  "gone-task",
+			AgentBlockID: "blk_gone",
+			Status:       "running",
+		})
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"watch",
+		"--all",
+		"--debounce", "1",
+		"--interval", "0",
+		"--timeout", "5",
+		"--notify=true",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("watch execute failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+	}
+
+	// Either the vanished running task reports missing, or the recovered task reports ready_for_demo.
+	// Verify state was reconciled: session ID updated, recovered-task restored, gone-task marked missing.
+	st, _ := state.LoadState()
+	p, _ := st.FindProject("proj-sync")
+	if p.RexSessionID != "sess_live_new" {
+		t.Errorf("RexSessionID = %q, want sess_live_new", p.RexSessionID)
+	}
+	goneTask, _ := p.FindTask("gone-task")
+	if goneTask.Status != "missing" {
+		t.Errorf("gone-task status = %q, want missing", goneTask.Status)
+	}
+	recTask, _ := p.FindTask("recovered-task")
+	if recTask.Status == "missing" {
+		t.Errorf("recovered-task status remained missing, expected recovery")
+	}
+}
+
+// TestWatch_ProgramStatus_TableDriven verifies Rex native OSC 7501 program_status
+// takes priority over screen text grep, and falls back to screen text grep when absent.
+func TestWatch_ProgramStatus_TableDriven(t *testing.T) {
+	tests := []struct {
+		name                string
+		programStatuses     [][]backend.ProgramStatusRecord
+		captures            []string
+		wantEvent           string
+		wantSummaryContains string
+	}{
+		{
+			name: "native working then done overrides screen text",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "working", App: "opencode", Title: "Working on fix"}},
+				{{State: "done", App: "opencode", Title: "Fix implemented", Msg: "All checks green"}},
+			},
+			captures:            []string{"plain screen output without markers"},
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "All checks green",
+		},
+		{
+			name: "native working then idle enriches summary from screen",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "working", App: "opencode"}},
+				{{State: "idle", App: "opencode"}},
+			},
+			captures:            []string{"Updated watch.go and ran tests.\n> "},
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Updated watch.go and ran tests.",
+		},
+		{
+			name: "native blocked triggers waiting_for_input",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "blocked", Kind: "question", App: "opencode", Msg: "Allow running git push?"}},
+			},
+			captures:            []string{"no question text in pane"},
+			wantEvent:           "waiting_for_input",
+			wantSummaryContains: "Allow running git push?",
+		},
+		{
+			name: "native error triggers error",
+			programStatuses: [][]backend.ProgramStatusRecord{
+				{{State: "error", App: "opencode", Msg: "Process crashed"}},
+			},
+			captures:            []string{""},
+			wantEvent:           "error",
+			wantSummaryContains: "Process crashed",
+		},
+		{
+			name:                "empty program_status falls back to screen text grep",
+			programStatuses:     [][]backend.ProgramStatusRecord{{}},
+			captures:            []string{"Tests passed.\n> \n? for shortcuts"},
+			wantEvent:           "ready_for_demo",
+			wantSummaryContains: "Tests passed.",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("BUDDY_DIR", tmpDir)
+
+			recorder := &notificationRecorder{}
+			notifyFn = recorder.Record
+			defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+			mockBackend := &mockWatchBackend{
+				programStatuses: tc.programStatuses,
+				captures:        tc.captures,
+			}
+			getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+			_ = state.MutateState(func(s *state.State) error {
+				s.RecordTask("proj-ps", filepath.Join(tmpDir, "proj-ps"), "sess_ps", "proj-ps", state.TaskState{
+					TaskSlug:     "task-ps",
+					AgentBlockID: "blk_ps",
+					Status:       "running",
+				})
+				return nil
+			})
+
+			buf := new(bytes.Buffer)
+			rootCmd.SetOut(buf)
+			rootCmd.SetErr(buf)
+			rootCmd.SetArgs([]string{
+				"watch",
+				"--project", "proj-ps",
+				"--task", "task-ps",
+				"--debounce", "1",
+				"--interval", "0",
+				"--timeout", "5",
+				"--notify=true",
+			})
+
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("watch execute failed: %v", err)
+			}
+
+			var resp map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+			}
+
+			if resp["event"] != tc.wantEvent {
+				t.Errorf("event = %v, want %v", resp["event"], tc.wantEvent)
+			}
+			summary, _ := resp["summary"].(string)
+			if tc.wantSummaryContains != "" && !strings.Contains(summary, tc.wantSummaryContains) {
+				t.Errorf("summary = %q, want containing %q", summary, tc.wantSummaryContains)
+			}
+		})
 	}
 }

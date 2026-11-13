@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,6 +10,9 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/backend/rex"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
 )
@@ -23,8 +27,11 @@ var (
 	toolOutputRe        = regexp.MustCompile(`(?i)(?:^|\s)(?:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+|\./\S+)\s+(?:\[.*\]|\d+(?:\.\d+)?s|\(cached\))`)
 	interactivePhraseRe = regexp.MustCompile(`(?i)(?:(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|proceed\s*\?|clarification\s+needed|approval\s+needed|what\s+would\s+you\s+like|do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\))`)
 	inputQuestionRe     = regexp.MustCompile(`(?i)^(?:(?:\[\?\]|\?)\s+.*|\s*(?:do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|what\s+would\s+you\s+like|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|clarification\s+needed|approval\s+needed|proceed\s*\?).*|.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\)).*$)`)
+	questionSentenceRe  = regexp.MustCompile(`(?i)^(?:which|what|how|where|when|who|should|can|could|would|do|does|did|is|are|will|may|shall)\s+.*\?$`)
 
 	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
+
+	idlePromptLineRe = regexp.MustCompile(`(?i)^(?:[>❯›]\s*(?:type a message|ask anything)?|type a message|ask anything)\s*$`)
 
 	// Legacy aliases kept for compatibility
 	watchDemoRe  = watchDemoLineRe
@@ -33,6 +40,11 @@ var (
 
 	// notifyFn is injectable for testing to intercept desktop notifications.
 	notifyFn = notify.SendDesktopNotification
+
+	// syncRexFn is injectable for testing to reconcile state with live Rex sessions.
+	syncRexFn = func(ctx context.Context) error {
+		return reconcileRexWithBackend(ctx, rex.NewRexBackend())
+	}
 )
 
 func stripANSI(s string) string {
@@ -108,6 +120,29 @@ func isChromeLine(line string) bool {
 }
 
 func paneLines(raw string) (filtered []string, working bool) {
+	filtered, working, _ = paneState(raw)
+	return filtered, working
+}
+
+func isBarePromptLine(line string) bool {
+	return idlePromptLineRe.MatchString(strings.TrimSpace(line))
+}
+
+func isIdlePromptChrome(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "? for shortcuts") ||
+		strings.Contains(lower, "ctrl+o to expand") ||
+		strings.HasPrefix(lower, "auto ·") ||
+		strings.HasPrefix(lower, "auto •") ||
+		strings.Contains(lower, "auto ·") ||
+		strings.Contains(lower, "type a message") ||
+		strings.Contains(lower, "ask anything")
+}
+
+func paneState(raw string) (filtered []string, working bool, idlePrompt bool) {
 	clean := stripANSI(raw)
 	clean = strings.ReplaceAll(clean, "\r\n", "\n")
 	clean = strings.ReplaceAll(clean, "\r", "\n")
@@ -121,7 +156,7 @@ func paneLines(raw string) (filtered []string, working bool) {
 		}
 	}
 
-	// Check tail (last up to 6 non-empty lines) for active working state
+	// Check tail (last up to 6 non-empty lines) for active working state or idle TUI prompt
 	tailLen := 6
 	if len(nonEmpty) < tailLen {
 		tailLen = len(nonEmpty)
@@ -131,6 +166,13 @@ func paneLines(raw string) (filtered []string, working bool) {
 			working = true
 			break
 		}
+		trimmedBorder := strings.Trim(nonEmpty[i], "│┃║| \t")
+		if isIdlePromptChrome(nonEmpty[i]) || isIdlePromptChrome(trimmedBorder) || isBarePromptLine(trimmedBorder) {
+			idlePrompt = true
+		}
+	}
+	if working {
+		idlePrompt = false
 	}
 
 	for _, l := range rawLines {
@@ -148,7 +190,7 @@ func paneLines(raw string) (filtered []string, working bool) {
 		filtered = append(filtered, trimmedBorder)
 	}
 
-	return filtered, working
+	return filtered, working, idlePrompt
 }
 
 func matchInputLine(line string) bool {
@@ -187,6 +229,10 @@ func matchInputLine(line string) bool {
 		return strings.HasSuffix(trimmed, "?") || interactivePhraseRe.MatchString(trimmed)
 	}
 
+	if questionSentenceRe.MatchString(trimmed) {
+		return true
+	}
+
 	return inputQuestionRe.MatchString(trimmed) && (strings.HasSuffix(trimmed, "?") || interactivePhraseRe.MatchString(trimmed))
 }
 
@@ -209,6 +255,46 @@ func extractSummary(lines []string, matchIdx int) string {
 	return strings.TrimSpace(summary)
 }
 
+func hasMeaningfulOutput(filtered []string) bool {
+	for _, l := range filtered {
+		if !isBarePromptLine(l) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractIdleSummary(filtered []string) string {
+	var meaningful []string
+	for _, l := range filtered {
+		if !isBarePromptLine(l) {
+			meaningful = append(meaningful, l)
+		}
+	}
+	if len(meaningful) == 0 {
+		return "Worker returned to idle prompt"
+	}
+	start := len(meaningful) - 2
+	if start < 0 {
+		start = 0
+	}
+	summary := strings.TrimSpace(strings.Join(meaningful[start:], " "))
+	if len(summary) > 240 {
+		summary = summary[:237] + "..."
+	}
+	return summary
+}
+
+func detectEventWithIdle(filtered []string, idlePrompt, sawWorking bool, untilSet map[string]bool) (matchedEvent, summary string) {
+	if matchedEvent, summary = detectEvent(filtered, untilSet); matchedEvent != "" {
+		return matchedEvent, summary
+	}
+	if idlePrompt && (untilSet["demo"] || untilSet["done"] || untilSet["any"]) && (sawWorking || hasMeaningfulOutput(filtered)) {
+		return "ready_for_demo", extractIdleSummary(filtered)
+	}
+	return "", ""
+}
+
 func detectEvent(filtered []string, untilSet map[string]bool) (matchedEvent, summary string) {
 	for i := len(filtered) - 1; i >= 0; i-- {
 		line := filtered[i]
@@ -223,16 +309,465 @@ func detectEvent(filtered []string, untilSet map[string]bool) (matchedEvent, sum
 	return "", ""
 }
 
+func isWatchableStatus(status string) bool {
+	switch status {
+	case "running", "planning", "waiting_for_input", "ready_for_demo":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalEvent(status string, untilSet map[string]bool) bool {
 	switch status {
-	case "waiting_for_input":
-		return untilSet["input"] || untilSet["any"]
 	case "ready_for_demo":
 		return untilSet["demo"] || untilSet["done"] || untilSet["any"]
 	case "error":
 		return untilSet["error"] || untilSet["any"]
 	default:
 		return false
+	}
+}
+
+// evalProgramStatus interprets native OSC 7501 program_status records (e.g. from Rex).
+// Returns handled=false when no records exist or when idle without a prior working turn,
+// signaling the caller to fall back to screen text grep.
+func evalProgramStatus(records []backend.ProgramStatusRecord, sawWorking bool, untilSet map[string]bool) (working bool, event, summary, snapshot string, handled bool) {
+	if len(records) == 0 {
+		return false, "", "", "", false
+	}
+
+	pickText := func(r backend.ProgramStatusRecord, fallback string) string {
+		if r.Msg != "" {
+			return r.Msg
+		}
+		if r.Title != "" {
+			return r.Title
+		}
+		return fallback
+	}
+
+	for _, r := range records {
+		if r.State == "blocked" {
+			if untilSet["input"] || untilSet["any"] {
+				fb := "Worker is waiting for input"
+				if r.Kind != "" {
+					fb = fmt.Sprintf("Worker blocked (%s)", r.Kind)
+				}
+				return false, "waiting_for_input", pickText(r, fb), fmt.Sprintf("native:blocked:%s:%s:%s", r.Kind, r.Title, r.Msg), true
+			}
+		}
+	}
+	for _, r := range records {
+		if r.State == "working" {
+			return true, "", "", "", true
+		}
+	}
+	for _, r := range records {
+		if r.State == "error" {
+			if untilSet["error"] || untilSet["any"] {
+				return false, "error", pickText(r, "Worker reported error"), fmt.Sprintf("native:error:%s:%s", r.Title, r.Msg), true
+			}
+		}
+	}
+	for _, r := range records {
+		if r.State == "done" {
+			if untilSet["demo"] || untilSet["done"] || untilSet["any"] {
+				return false, "ready_for_demo", pickText(r, ""), fmt.Sprintf("native:done:%s:%s", r.Title, r.Msg), true
+			}
+		}
+	}
+	if sawWorking && (untilSet["demo"] || untilSet["done"] || untilSet["any"]) {
+		return false, "ready_for_demo", pickText(records[0], ""), fmt.Sprintf("native:idle:%s:%s", records[0].Title, records[0].Msg), true
+	}
+
+	return false, "", "", "", false
+}
+
+type watchTarget struct {
+	project   string
+	task      string
+	sessionID string
+	blockID   string
+	engine    string
+	status    string
+}
+
+type watchDebounceState struct {
+	lastEvent    string
+	lastSnapshot string
+	consecutive  int
+}
+
+type watchEvent struct {
+	event           string
+	project         string
+	task            string
+	summary         string
+	alreadyReported bool
+}
+
+type watchRunner struct {
+	cmd           *cobra.Command
+	projectName   string
+	taskSlug      string
+	watchAll      bool
+	interval      time.Duration
+	timeout       time.Duration
+	debounceCount int
+	notifyEnabled bool
+	untilSet      map[string]bool
+
+	startTime       time.Time
+	sawWorking      map[string]bool
+	initiallyActive map[string]bool
+	debounceMap     map[string]*watchDebounceState
+}
+
+func newWatchRunner(cmd *cobra.Command, projectName, taskSlug string, watchAll bool, intervalSec, timeoutSec, debounceCount int, untilEvents string, notifyEnabled bool) *watchRunner {
+	if intervalSec < 0 {
+		intervalSec = 5
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = 600
+	}
+	if debounceCount <= 0 {
+		debounceCount = 1
+	}
+
+	untilSet := make(map[string]bool)
+	for _, evt := range strings.Split(strings.ToLower(untilEvents), ",") {
+		if trimmed := strings.TrimSpace(evt); trimmed != "" {
+			untilSet[trimmed] = true
+		}
+	}
+
+	return &watchRunner{
+		cmd:             cmd,
+		projectName:     projectName,
+		taskSlug:        taskSlug,
+		watchAll:        watchAll,
+		interval:        time.Duration(intervalSec) * time.Second,
+		timeout:         time.Duration(timeoutSec) * time.Second,
+		debounceCount:   debounceCount,
+		notifyEnabled:   notifyEnabled,
+		untilSet:        untilSet,
+		startTime:       time.Now(),
+		sawWorking:      make(map[string]bool),
+		initiallyActive: make(map[string]bool),
+		debounceMap:     make(map[string]*watchDebounceState),
+	}
+}
+
+func (w *watchRunner) run() error {
+	w.snapshotInitiallyActive()
+	_ = syncRexFn(w.cmd.Context())
+
+	if !w.watchAll {
+		handled, err := w.preflightSingleTarget()
+		if err != nil || handled {
+			return err
+		}
+	}
+
+	deadline := w.startTime.Add(w.timeout)
+	firstPoll := true
+
+	for time.Now().Before(deadline) {
+		if err := w.cmd.Context().Err(); err != nil {
+			return err
+		}
+
+		if !firstPoll {
+			_ = syncRexFn(w.cmd.Context())
+		}
+		firstPoll = false
+
+		st, err := state.LoadState()
+		if err != nil {
+			if err := w.sleepOrDone(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		targets, missingEv, err := w.collectTargets(st)
+		if err != nil {
+			return err
+		}
+		if missingEv != nil {
+			return w.emitEvent(*missingEv)
+		}
+
+		for _, target := range targets {
+			ev, err := w.pollTarget(target)
+			if err != nil {
+				return err
+			}
+			if ev != nil {
+				return w.emitEvent(*ev)
+			}
+		}
+
+		if err := w.sleepOrDone(); err != nil {
+			return err
+		}
+	}
+
+	return w.emitTimeout()
+}
+
+func (w *watchRunner) snapshotInitiallyActive() {
+	initialSt, err := state.LoadState()
+	if err != nil {
+		return
+	}
+	for pName, pData := range initialSt.Projects {
+		for tName, tData := range pData.Tasks {
+			if isWatchableStatus(tData.Status) {
+				w.initiallyActive[pName+"/"+tName] = true
+			}
+		}
+	}
+}
+
+func (w *watchRunner) preflightSingleTarget() (bool, error) {
+	st, err := state.LoadState()
+	if err != nil {
+		return false, fmt.Errorf("could not load state: %w", err)
+	}
+	p, err := st.FindProject(w.projectName)
+	if err != nil {
+		return false, err
+	}
+	t, err := p.FindTask(w.taskSlug)
+	if err != nil {
+		return false, err
+	}
+
+	if isTerminalEvent(t.Status, w.untilSet) {
+		stillTerminal := true
+		if t.AgentBlockID != "" {
+			if eng, err := getEngine(t.GetEngine()); err == nil {
+				target := watchTarget{
+					project:   p.Name,
+					task:      t.TaskSlug,
+					sessionID: p.RexSessionID,
+					blockID:   t.AgentBlockID,
+					engine:    t.GetEngine(),
+					status:    t.Status,
+				}
+				if working, _, _, _, probeErr := w.probeTarget(eng, target); probeErr == nil && working {
+					stillTerminal = false
+					w.sawWorking[p.Name+"/"+t.TaskSlug] = true
+					_ = state.MutateState(func(s *state.State) error {
+						return s.UpdateTask(p.Name, t.TaskSlug, "running", t.LastSummary)
+					})
+				}
+			}
+		}
+		if stillTerminal {
+			return true, w.emitEvent(watchEvent{
+				event:           t.Status,
+				project:         p.Name,
+				task:            t.TaskSlug,
+				summary:         t.LastSummary,
+				alreadyReported: true,
+			})
+		}
+	}
+
+	if t.AgentBlockID == "" {
+		return false, fmt.Errorf("task %q in project %q has no active agent block", t.TaskSlug, p.Name)
+	}
+	if _, err := getEngine(t.GetEngine()); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (w *watchRunner) collectTargets(st *state.State) ([]watchTarget, *watchEvent, error) {
+	if !w.watchAll {
+		p, err := st.FindProject(w.projectName)
+		if err != nil {
+			return nil, nil, err
+		}
+		t, err := p.FindTask(w.taskSlug)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []watchTarget{{
+			project:   p.Name,
+			task:      t.TaskSlug,
+			sessionID: p.RexSessionID,
+			blockID:   t.AgentBlockID,
+			engine:    t.GetEngine(),
+			status:    t.Status,
+		}}, nil, nil
+	}
+
+	var targets []watchTarget
+	for pName, pData := range st.Projects {
+		for tName, tData := range pData.Tasks {
+			key := pName + "/" + tName
+			if tData.Status == "missing" && w.initiallyActive[key] && (w.untilSet["missing"] || w.untilSet["any"]) {
+				return nil, &watchEvent{
+					event:   "missing",
+					project: pName,
+					task:    tName,
+					summary: tData.LastSummary,
+				}, nil
+			}
+			if isWatchableStatus(tData.Status) && tData.AgentBlockID != "" {
+				targets = append(targets, watchTarget{
+					project:   pName,
+					task:      tName,
+					sessionID: pData.RexSessionID,
+					blockID:   tData.AgentBlockID,
+					engine:    tData.GetEngine(),
+					status:    tData.Status,
+				})
+			}
+		}
+	}
+	return targets, nil, nil
+}
+
+func (w *watchRunner) probeTarget(eng engine.Engine, target watchTarget) (working bool, matchedEvent, summary, snapshot string, err error) {
+	targetKey := target.project + "/" + target.task
+	nativeHit := false
+
+	// 1. Primary: query native terminal program_status (e.g. Rex OSC 7501) if supported
+	if psp, ok := eng.(backend.ProgramStatusProvider); ok {
+		if recs, statusErr := psp.GetProgramStatus(w.cmd.Context(), target.sessionID, target.blockID); statusErr == nil {
+			working, matchedEvent, summary, snapshot, nativeHit = evalProgramStatus(recs, w.sawWorking[targetKey], w.untilSet)
+		}
+	}
+
+	// 2. Fallback: capture pane output and grep/analyze screen text
+	if !nativeHit {
+		out, capErr := eng.Capture(w.cmd.Context(), target.sessionID, target.blockID, 30)
+		if capErr != nil {
+			return false, "", "", "", capErr
+		}
+		filtered, isWorking, idlePrompt := paneState(out)
+		working = isWorking
+		if !working {
+			matchedEvent, summary = detectEventWithIdle(filtered, idlePrompt, w.sawWorking[targetKey], w.untilSet)
+			snapshot = strings.Join(filtered, "\n")
+		}
+		return working, matchedEvent, summary, snapshot, nil
+	}
+
+	// Enrich empty native summary from pane tail if available
+	if !working && matchedEvent != "" && summary == "" {
+		if out, capErr := eng.Capture(w.cmd.Context(), target.sessionID, target.blockID, 30); capErr == nil {
+			filtered, _, _ := paneState(out)
+			summary = extractIdleSummary(filtered)
+		} else {
+			summary = "Worker completed task"
+		}
+	}
+	return working, matchedEvent, summary, snapshot, nil
+}
+
+func (w *watchRunner) pollTarget(target watchTarget) (*watchEvent, error) {
+	eng, err := getEngine(target.engine)
+	if err != nil {
+		if !w.watchAll {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	working, matchedEvent, summary, snapshot, err := w.probeTarget(eng, target)
+	if err != nil {
+		if !w.watchAll {
+			return nil, fmt.Errorf("failed to capture terminal output: %w", err)
+		}
+		return nil, nil
+	}
+
+	targetKey := target.project + "/" + target.task
+	if working {
+		w.sawWorking[targetKey] = true
+		delete(w.debounceMap, targetKey)
+		if target.status == "waiting_for_input" || target.status == "ready_for_demo" {
+			_ = state.MutateState(func(s *state.State) error {
+				return s.UpdateTask(target.project, target.task, "running", "")
+			})
+		}
+		return nil, nil
+	}
+
+	if matchedEvent == "" || (matchedEvent == target.status && !w.sawWorking[targetKey]) {
+		delete(w.debounceMap, targetKey)
+		return nil, nil
+	}
+
+	ds, exists := w.debounceMap[targetKey]
+	if !exists || ds.lastEvent != matchedEvent || ds.lastSnapshot != snapshot {
+		w.debounceMap[targetKey] = &watchDebounceState{
+			lastEvent:    matchedEvent,
+			lastSnapshot: snapshot,
+			consecutive:  1,
+		}
+	} else {
+		ds.consecutive++
+	}
+
+	if w.debounceMap[targetKey].consecutive < w.debounceCount {
+		return nil, nil
+	}
+
+	_ = state.MutateState(func(s *state.State) error {
+		return s.UpdateTask(target.project, target.task, matchedEvent, summary)
+	})
+	return &watchEvent{
+		event:   matchedEvent,
+		project: target.project,
+		task:    target.task,
+		summary: summary,
+	}, nil
+}
+
+func (w *watchRunner) emitEvent(ev watchEvent) error {
+	if !ev.alreadyReported && w.notifyEnabled {
+		notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", ev.project, ev.task, ev.event), ev.summary, "Glass", true)
+	}
+	resp := map[string]any{
+		"event":           ev.event,
+		"project":         ev.project,
+		"task":            ev.task,
+		"summary":         ev.summary,
+		"elapsed_seconds": int(time.Since(w.startTime).Seconds()),
+	}
+	if ev.alreadyReported {
+		resp["already_reported"] = true
+	}
+	enc := json.NewEncoder(w.cmd.OutOrStdout())
+	enc.SetIndent("", "  ")
+	return enc.Encode(resp)
+}
+
+func (w *watchRunner) emitTimeout() error {
+	elapsed := int(time.Since(w.startTime).Seconds())
+	resp := map[string]any{
+		"event":           "timeout",
+		"summary":         fmt.Sprintf("Watch timed out after %ds", elapsed),
+		"elapsed_seconds": elapsed,
+	}
+	enc := json.NewEncoder(w.cmd.OutOrStdout())
+	enc.SetIndent("", "  ")
+	return enc.Encode(resp)
+}
+
+func (w *watchRunner) sleepOrDone() error {
+	select {
+	case <-w.cmd.Context().Done():
+		return w.cmd.Context().Err()
+	case <-time.After(w.interval):
+		return nil
 	}
 }
 
@@ -257,215 +792,8 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 			if !watchAll && (projectName == "" || taskSlug == "") {
 				return fmt.Errorf("provide --project and --task, or use --all to monitor all active tasks")
 			}
-
-			if intervalSec < 0 {
-				intervalSec = 5
-			}
-			if timeoutSec <= 0 {
-				timeoutSec = 600
-			}
-			if debounceCount <= 0 {
-				debounceCount = 1
-			}
-
-			untilSet := make(map[string]bool)
-			for _, evt := range strings.Split(strings.ToLower(untilEvents), ",") {
-				trimmed := strings.TrimSpace(evt)
-				if trimmed != "" {
-					untilSet[trimmed] = true
-				}
-			}
-
-			startTime := time.Now()
-			deadline := startTime.Add(time.Duration(timeoutSec) * time.Second)
-
-			// In single target mode, fail fast on missing project/task, missing block ID, or already terminal state
-			if !watchAll {
-				st, err := state.LoadState()
-				if err != nil {
-					return fmt.Errorf("could not load state: %w", err)
-				}
-				p, err := st.FindProject(projectName)
-				if err != nil {
-					return err
-				}
-				t, err := p.FindTask(taskSlug)
-				if err != nil {
-					return err
-				}
-
-				if isTerminalEvent(t.Status, untilSet) {
-					elapsed := int(time.Since(startTime).Seconds())
-					resp := map[string]any{
-						"event":            t.Status,
-						"project":          p.Name,
-						"task":             t.TaskSlug,
-						"summary":          t.LastSummary,
-						"elapsed_seconds":  elapsed,
-						"already_reported": true,
-					}
-					enc := json.NewEncoder(cmd.OutOrStdout())
-					enc.SetIndent("", "  ")
-					return enc.Encode(resp)
-				}
-
-				if t.AgentBlockID == "" {
-					return fmt.Errorf("task %q in project %q has no active agent block", t.TaskSlug, p.Name)
-				}
-
-				if _, err := getEngine(t.GetEngine()); err != nil {
-					return err
-				}
-			}
-
-			type targetTask struct {
-				project   string
-				task      string
-				sessionID string
-				blockID   string
-				engine    string
-			}
-
-			type debounceState struct {
-				lastEvent    string
-				lastSnapshot string
-				consecutive  int
-			}
-			debounceMap := make(map[string]*debounceState)
-
-			for time.Now().Before(deadline) {
-				select {
-				case <-cmd.Context().Done():
-					return cmd.Context().Err()
-				default:
-				}
-
-				st, err := state.LoadState()
-				if err != nil {
-					select {
-					case <-cmd.Context().Done():
-						return cmd.Context().Err()
-					case <-time.After(time.Duration(intervalSec) * time.Second):
-					}
-					continue
-				}
-
-				var targets []targetTask
-				if watchAll {
-					for pName, pData := range st.Projects {
-						for tName, tData := range pData.Tasks {
-							if tData.Status == "running" && tData.AgentBlockID != "" {
-								targets = append(targets, targetTask{
-									project:   pName,
-									task:      tName,
-									sessionID: pData.RexSessionID,
-									blockID:   tData.AgentBlockID,
-									engine:    tData.GetEngine(),
-								})
-							}
-						}
-					}
-				} else {
-					p, err := st.FindProject(projectName)
-					if err != nil {
-						return err
-					}
-					t, err := p.FindTask(taskSlug)
-					if err != nil {
-						return err
-					}
-					targets = append(targets, targetTask{
-						project:   p.Name,
-						task:      t.TaskSlug,
-						sessionID: p.RexSessionID,
-						blockID:   t.AgentBlockID,
-						engine:    t.GetEngine(),
-					})
-				}
-
-				for _, target := range targets {
-					eng, err := getEngine(target.engine)
-					if err != nil {
-						if !watchAll {
-							return err
-						}
-						continue
-					}
-
-					out, err := eng.Capture(cmd.Context(), target.sessionID, target.blockID, 30)
-					if err != nil {
-						if !watchAll {
-							return fmt.Errorf("failed to capture terminal output: %w", err)
-						}
-						continue
-					}
-
-					targetKey := target.project + "/" + target.task
-					filtered, working := paneLines(out)
-					if working {
-						// Suppress events while actively executing
-						delete(debounceMap, targetKey)
-						continue
-					}
-
-					matchedEvent, summary := detectEvent(filtered, untilSet)
-					if matchedEvent == "" {
-						delete(debounceMap, targetKey)
-						continue
-					}
-
-					snapshot := strings.Join(filtered, "\n")
-					ds, exists := debounceMap[targetKey]
-					if !exists || ds.lastEvent != matchedEvent || ds.lastSnapshot != snapshot {
-						debounceMap[targetKey] = &debounceState{
-							lastEvent:    matchedEvent,
-							lastSnapshot: snapshot,
-							consecutive:  1,
-						}
-					} else {
-						ds.consecutive++
-					}
-
-					if debounceMap[targetKey].consecutive >= debounceCount {
-						_ = state.MutateState(func(s *state.State) error {
-							return s.UpdateTask(target.project, target.task, matchedEvent, summary)
-						})
-
-						if notifyEnabled {
-							notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", target.project, target.task, matchedEvent), summary, "Glass", true)
-						}
-
-						elapsed := int(time.Since(startTime).Seconds())
-						resp := map[string]any{
-							"event":           matchedEvent,
-							"project":         target.project,
-							"task":            target.task,
-							"summary":         summary,
-							"elapsed_seconds": elapsed,
-						}
-						enc := json.NewEncoder(cmd.OutOrStdout())
-						enc.SetIndent("", "  ")
-						return enc.Encode(resp)
-					}
-				}
-
-				select {
-				case <-cmd.Context().Done():
-					return cmd.Context().Err()
-				case <-time.After(time.Duration(intervalSec) * time.Second):
-				}
-			}
-
-			// Timed out
-			elapsed := int(time.Since(startTime).Seconds())
-			resp := map[string]any{
-				"event":           "timeout",
-				"summary":         fmt.Sprintf("Watch timed out after %ds", elapsed),
-				"elapsed_seconds": elapsed,
-			}
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			return enc.Encode(resp)
+			runner := newWatchRunner(cmd, projectName, taskSlug, watchAll, intervalSec, timeoutSec, debounceCount, untilEvents, notifyEnabled)
+			return runner.run()
 		},
 	}
 

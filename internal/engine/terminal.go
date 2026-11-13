@@ -141,3 +141,11 @@ func (e *TerminalEngine) Focus(ctx context.Context, sessionID, windowID string) 
 func (e *TerminalEngine) OpenDevSplit(ctx context.Context, sessionID, blockID, cwd, cmd string) (string, error) {
 	return e.backend.OpenDevSplit(ctx, sessionID, blockID, cwd, cmd)
 }
+
+// GetProgramStatus queries native terminal program status if the underlying backend supports it.
+func (e *TerminalEngine) GetProgramStatus(ctx context.Context, sessionID, blockID string) ([]backend.ProgramStatusRecord, error) {
+	if p, ok := e.backend.(backend.ProgramStatusProvider); ok {
+		return p.GetProgramStatus(ctx, sessionID, blockID)
+	}
+	return nil, nil
+}
