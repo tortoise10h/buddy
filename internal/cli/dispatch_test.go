@@ -3,12 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/backend/t3"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
@@ -113,7 +113,46 @@ func TestDispatch_EndToEnd(t *testing.T) {
 	}
 }
 
-func TestDispatch_T3Routing_ReturnsErrNotImplemented(t *testing.T) {
+type mockCLIT3Runner struct {
+	projectAdded []string
+	started      []t3.ThreadStartOptions
+	sent         []struct{ threadID, message string }
+}
+
+func (m *mockCLIT3Runner) ProjectAdd(_ context.Context, projectPath, _ string) error {
+	m.projectAdded = append(m.projectAdded, projectPath)
+	return nil
+}
+
+func (m *mockCLIT3Runner) ThreadStart(_ context.Context, opts t3.ThreadStartOptions) (*t3.ThreadStartOutput, error) {
+	m.started = append(m.started, opts)
+	return &t3.ThreadStartOutput{
+		ThreadID:  "mcp:t3-thread-1",
+		ProjectID: "t3-proj-1",
+		RunID:     "run-1",
+	}, nil
+}
+
+func (m *mockCLIT3Runner) ThreadShow(_ context.Context, threadID string) (*t3.ThreadShowOutput, error) {
+	return &t3.ThreadShowOutput{
+		Thread: t3.ThreadInfo{
+			ThreadID: threadID,
+			Status:   "completed",
+			Model:    "gemini-3.8-flash-medium",
+		},
+		Messages: []t3.MessageInfo{
+			{Role: "user", Text: "test prompt"},
+			{Role: "assistant", Text: "Done!"},
+		},
+	}, nil
+}
+
+func (m *mockCLIT3Runner) ThreadSend(_ context.Context, threadID, message string) error {
+	m.sent = append(m.sent, struct{ threadID, message string }{threadID, message})
+	return nil
+}
+
+func TestDispatchAndSend_T3Routing_UsesT3Engine(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
 	t.Setenv("T3CODE_THREAD_ID", "th_test123")
@@ -130,33 +169,76 @@ func TestDispatch_T3Routing_ReturnsErrNotImplemented(t *testing.T) {
 		t.Fatalf("failed to save test config: %v", err)
 	}
 
-	// Register mock backend for Rex to verify it is NOT touched
+	// Register mock backend for Rex to verify it is NOT touched, and mock T3Runner for t3
 	mockBackend := &mockTerminalBackend{}
 	mockEngine := engine.NewTerminalEngine(mockBackend)
+	mockT3 := &mockCLIT3Runner{}
 	reg := getRegistry()
+	origT3, _ := reg.Get("t3")
 	reg.Register("rex", mockEngine)
+	reg.Register("t3", engine.NewT3EngineWithRunner(mockT3))
+	t.Cleanup(func() {
+		if origT3 != nil {
+			reg.Register("t3", origT3)
+		}
+	})
 
 	cmd := newDispatchCmd()
 	cmd.SetArgs([]string{
 		"-p", "buddy",
+		"-t", "feat-t3",
 		"-m", "test prompt",
 	})
 
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected dispatch to fail under T3 environment, got nil error")
-	}
-
-	var notImpl *engine.ErrNotImplemented
-	if !errors.As(err, &notImpl) {
-		t.Fatalf("expected error to be *engine.ErrNotImplemented, got: %v", err)
-	}
-
-	if notImpl.Engine != "t3" {
-		t.Errorf("expected ErrNotImplemented.Engine = 't3', got %q", notImpl.Engine)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("expected dispatch to succeed under T3 environment, got: %v", err)
 	}
 
 	if mockBackend.dispatched {
 		t.Errorf("rex backend should NOT have been touched during T3 dispatch")
+	}
+	if len(mockT3.projectAdded) != 1 || mockT3.projectAdded[0] != projDir {
+		t.Errorf("expected ProjectAdd(%q), got %+v", projDir, mockT3.projectAdded)
+	}
+	if len(mockT3.started) != 1 || mockT3.started[0].Prompt != "test prompt" {
+		t.Errorf("expected ThreadStart with prompt, got %+v", mockT3.started)
+	}
+
+	st, err := state.LoadState()
+	if err != nil {
+		t.Fatalf("failed to load state: %v", err)
+	}
+	proj, err := st.FindProject("buddy")
+	if err != nil {
+		t.Fatalf("expected buddy project in state: %v", err)
+	}
+	taskState, err := proj.FindTask("feat-t3")
+	if err != nil {
+		t.Fatalf("expected feat-t3 task in state: %v", err)
+	}
+	if taskState.GetEngine() != "t3" || taskState.AgentBlockID != "mcp:t3-thread-1" {
+		t.Errorf("unexpected task state: %+v", taskState)
+	}
+
+	sendCmd := newSendCmd()
+	sendCmd.SetArgs([]string{
+		"-p", "buddy",
+		"-t", "feat-t3",
+		"--text", "follow-up answer",
+	})
+	if err := sendCmd.Execute(); err != nil {
+		t.Fatalf("expected send to succeed under T3 environment, got: %v", err)
+	}
+	if len(mockT3.sent) != 1 || mockT3.sent[0].threadID != "mcp:t3-thread-1" || mockT3.sent[0].message != "follow-up answer" {
+		t.Errorf("expected ThreadSend to mcp:t3-thread-1, got %+v", mockT3.sent)
+	}
+
+	captureCmd := newCaptureCmd()
+	captureCmd.SetArgs([]string{
+		"-p", "buddy",
+		"-t", "feat-t3",
+	})
+	if err := captureCmd.Execute(); err != nil {
+		t.Fatalf("expected capture to succeed under T3 environment, got: %v", err)
 	}
 }

@@ -19,9 +19,11 @@ type ThreadStartOutput struct {
 
 // ThreadInfo contains metadata about a thread from `t3 thread show --json`.
 type ThreadInfo struct {
-	ThreadID string `json:"threadId"`
-	Status   string `json:"status"`
-	Model    string `json:"model"`
+	ThreadID            string `json:"threadId"`
+	Title               string `json:"title,omitempty"`
+	Status              string `json:"status"`
+	Model               string `json:"model"`
+	PendingRequestCount int    `json:"pendingRequestCount,omitempty"`
 }
 
 // MessageInfo represents an individual message from `t3 thread show --json`.
