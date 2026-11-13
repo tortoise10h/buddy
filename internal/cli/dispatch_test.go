@@ -52,6 +52,7 @@ func (m *mockTerminalBackend) IsBlockAlive(ctx context.Context, sessionID, block
 }
 
 func TestDispatch_EndToEnd(t *testing.T) {
+	clearAllHostSignals(t)
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
 

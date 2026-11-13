@@ -13,6 +13,7 @@ import (
 )
 
 func TestBatch_Execution(t *testing.T) {
+	clearAllHostSignals(t)
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
 
