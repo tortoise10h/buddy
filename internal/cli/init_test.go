@@ -44,7 +44,9 @@ func TestInit_ExistingConfigMergesProjectsRoots(t *testing.T) {
 	t.Setenv("BUDDY_DIR", tmpDir)
 
 	initial := config.DefaultConfig()
-	initial.BuddySessionName = "CustomBuddy"
+	rexCfg := initial.Engines["rex"]
+	rexCfg.SessionName = "CustomBuddy"
+	initial.Engines["rex"] = rexCfg
 	initial.ProjectsRoots = []string{"/tmp/existing-1", "/tmp/existing-2"}
 	if err := config.SaveConfig(initial); err != nil {
 		t.Fatalf("SaveConfig failed: %v", err)
@@ -57,8 +59,11 @@ func TestInit_ExistingConfigMergesProjectsRoots(t *testing.T) {
 	cmd.SetArgs([]string{
 		"--projects-root", "/tmp/existing-2",
 		"--projects-root", "/tmp/new-3",
+		"--default-engine", "t3",
 		"--orchestrator-agent", "pi",
 		"--worker-agent", "opencode",
+		"--t3-provider", "antigravity",
+		"--t3-model", "gemini-3.8-flash-medium",
 	})
 
 	if err := cmd.Execute(); err != nil {
@@ -74,14 +79,24 @@ func TestInit_ExistingConfigMergesProjectsRoots(t *testing.T) {
 	if !reflect.DeepEqual(cfg.ProjectsRoots, wantRoots) {
 		t.Fatalf("ProjectsRoots = %v, want %v", cfg.ProjectsRoots, wantRoots)
 	}
-	if cfg.BuddySessionName != "CustomBuddy" {
-		t.Fatalf("BuddySessionName = %q, want %q", cfg.BuddySessionName, "CustomBuddy")
+	if cfg.DefaultEngine != "t3" {
+		t.Fatalf("DefaultEngine = %q, want %q", cfg.DefaultEngine, "t3")
 	}
-	if cfg.OrchestratorAgent != "pi" {
-		t.Fatalf("OrchestratorAgent = %q, want %q", cfg.OrchestratorAgent, "pi")
+	if cfg.GetSessionName("rex") != "CustomBuddy" {
+		t.Fatalf("rex SessionName = %q, want %q", cfg.GetSessionName("rex"), "CustomBuddy")
 	}
-	if cfg.WorkerAgent != "opencode" {
-		t.Fatalf("WorkerAgent = %q, want %q", cfg.WorkerAgent, "opencode")
+	if cfg.GetEffectiveOrchestratorAgent("rex") != "pi" {
+		t.Fatalf("rex OrchestratorAgent = %q, want %q", cfg.GetEffectiveOrchestratorAgent("rex"), "pi")
+	}
+	if cfg.GetEffectiveWorkerAgent("rex") != "opencode" {
+		t.Fatalf("rex WorkerAgent = %q, want %q", cfg.GetEffectiveWorkerAgent("rex"), "opencode")
+	}
+	if cfg.GetEffectiveWorkerAgent("wezterm") != "opencode" {
+		t.Fatalf("wezterm WorkerAgent = %q, want %q", cfg.GetEffectiveWorkerAgent("wezterm"), "opencode")
+	}
+	p, m := cfg.GetT3ProviderModel()
+	if p != "antigravity" || m != "gemini-3.8-flash-medium" {
+		t.Fatalf("T3 provider/model = %q/%q, want antigravity/gemini-3.8-flash-medium", p, m)
 	}
 }
 
@@ -91,7 +106,7 @@ func TestInit_ExistingConfigNoFlagsIsIdempotent(t *testing.T) {
 
 	initial := config.DefaultConfig()
 	initial.ProjectsRoots = []string{filepath.Join(tmpDir, "kept")}
-	initial.OrchestratorAgent = "codex"
+	initial.SetTerminalAgents("codex", "")
 	if err := config.SaveConfig(initial); err != nil {
 		t.Fatalf("SaveConfig failed: %v", err)
 	}
@@ -114,7 +129,7 @@ func TestInit_ExistingConfigNoFlagsIsIdempotent(t *testing.T) {
 	if !reflect.DeepEqual(cfg.ProjectsRoots, initial.ProjectsRoots) {
 		t.Fatalf("ProjectsRoots = %v, want %v", cfg.ProjectsRoots, initial.ProjectsRoots)
 	}
-	if cfg.OrchestratorAgent != "codex" {
-		t.Fatalf("OrchestratorAgent = %q, want %q", cfg.OrchestratorAgent, "codex")
+	if cfg.GetEffectiveOrchestratorAgent("rex") != "codex" {
+		t.Fatalf("rex OrchestratorAgent = %q, want %q", cfg.GetEffectiveOrchestratorAgent("rex"), "codex")
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/config"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
 )
 
@@ -106,8 +107,20 @@ func newContextInjectCmd() *cobra.Command {
 				tasksStr = strings.Join(taskSummaries, "; ")
 			}
 
-			orchAgent := cfg.GetEffectiveOrchestratorAgent()
-			workerAgent := cfg.GetEffectiveWorkerAgent()
+			resEngine := engine.ResolveEngine("", os.Getenv, cfg)
+			var orchAgent, workerAgent string
+			if resEngine.EngineName == "t3" {
+				orchAgent = "t3 (direct)"
+				p, m := cfg.GetT3ProviderModel()
+				if p != "" && m != "" {
+					workerAgent = p + "/" + m
+				} else {
+					workerAgent = "unconfigured"
+				}
+			} else {
+				orchAgent = cfg.GetEffectiveOrchestratorAgent(resEngine.EngineName)
+				workerAgent = cfg.GetEffectiveWorkerAgent(resEngine.EngineName)
+			}
 
 			var nudgeBanner string
 			if len(nudges) > 0 {

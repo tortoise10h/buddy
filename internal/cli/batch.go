@@ -110,11 +110,17 @@ func newBatchCmd() *cobra.Command {
 					continue
 				}
 
-				agentName := spec.Agent
-				if agentName == "" {
-					agentName = cfg.GetEffectiveWorkerAgent()
+				agentName, agentCmd, err := resolveWorkerForEngine(engineName, spec.Agent, cfg)
+				if err != nil {
+					results = append(results, BatchTaskResult{
+						Status:  "error",
+						Project: projName,
+						Task:    slug,
+						Error:   err.Error(),
+					})
+					failCount++
+					continue
 				}
-				agentCmd, _, _ := cfg.GetAgentCommand(agentName)
 
 				res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{
 					ProjectName: projName,

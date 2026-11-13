@@ -10,11 +10,6 @@ import (
 	"github.com/tortoise10h/buddy/internal/backend/t3"
 )
 
-const (
-	defaultT3Provider = "antigravity"
-	defaultT3Model    = "gemini-3.8-flash-medium"
-)
-
 // T3Runner defines the t3 CLI operations used by T3Engine.
 type T3Runner interface {
 	ProjectAdd(ctx context.Context, projectPath string, title string) error
@@ -53,11 +48,18 @@ func (e *T3Engine) Dispatch(ctx context.Context, req DispatchRequest) (*Dispatch
 		return nil, fmt.Errorf("t3 dispatch: prompt is required")
 	}
 
+	provider, model := parseProviderModel(req.AgentCmd)
+	if provider == "" || model == "" {
+		provider, model = resolveEnvProviderModel()
+	}
+	if provider == "" || model == "" {
+		return nil, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --agent <provider>/<model>, or set BUDDY_T3_MODEL=<provider>/<model>")
+	}
+
 	if err := e.runner.ProjectAdd(ctx, req.ProjectPath, req.ProjectName); err != nil && !isProjectAlreadyExistsError(err) {
 		return nil, fmt.Errorf("t3 project add: %w", err)
 	}
 
-	provider, model := parseProviderModel(req.AgentCmd)
 	opts := t3.ThreadStartOptions{
 		ProjectPath: req.ProjectPath,
 		Prompt:      req.Prompt,
@@ -65,10 +67,6 @@ func (e *T3Engine) Dispatch(ctx context.Context, req DispatchRequest) (*Dispatch
 		Model:       model,
 	}
 	out, err := e.runner.ThreadStart(ctx, opts)
-	if err != nil && provider == "" && isNoDefaultModelError(err) {
-		opts.Provider, opts.Model = resolveFallbackProviderModel()
-		out, err = e.runner.ThreadStart(ctx, opts)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("t3 thread start: %w", err)
 	}
@@ -169,20 +167,13 @@ func isProjectAlreadyExistsError(err error) bool {
 	return strings.Contains(msg, "ProjectAlreadyExistsError") || strings.Contains(msg, "already exists")
 }
 
-func isNoDefaultModelError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "no default model")
-}
-
-func resolveFallbackProviderModel() (string, string) {
+func resolveEnvProviderModel() (string, string) {
 	if env := strings.TrimSpace(os.Getenv("BUDDY_T3_MODEL")); env != "" {
 		if p, m, ok := strings.Cut(env, "/"); ok && p != "" && m != "" {
 			return p, m
 		}
 	}
-	return defaultT3Provider, defaultT3Model
+	return "", ""
 }
 
 // parseProviderModel extracts a <provider>/<model> pair from AgentCmd.

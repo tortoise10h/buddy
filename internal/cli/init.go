@@ -12,8 +12,11 @@ import (
 func newInitCmd() *cobra.Command {
 	var (
 		force             bool
+		defaultEngine     string
 		orchestratorAgent string
 		workerAgent       string
+		t3Provider        string
+		t3Model           string
 		projectsRoots     []string
 	)
 
@@ -28,17 +31,34 @@ func newInitCmd() *cobra.Command {
 
 			var created []string
 
+			applyFlags := func(cfg *config.Config) {
+				if defaultEngine != "" {
+					cfg.DefaultEngine = defaultEngine
+				}
+				if orchestratorAgent != "" || workerAgent != "" {
+					cfg.SetTerminalAgents(orchestratorAgent, workerAgent)
+				}
+				if t3Provider != "" || t3Model != "" {
+					if cfg.Engines == nil {
+						cfg.Engines = make(map[string]config.EngineConfig)
+					}
+					t3Cfg := cfg.Engines["t3"]
+					if t3Provider != "" {
+						t3Cfg.Provider = t3Provider
+					}
+					if t3Model != "" {
+						t3Cfg.Model = t3Model
+					}
+					cfg.Engines["t3"] = t3Cfg
+				}
+			}
+
 			// 1. config.json
 			configPath := config.GetConfigPath()
 			_, err := os.Stat(configPath)
 			if os.IsNotExist(err) || force {
 				cfg := config.DefaultConfig()
-				if orchestratorAgent != "" {
-					cfg.OrchestratorAgent = orchestratorAgent
-				}
-				if workerAgent != "" {
-					cfg.WorkerAgent = workerAgent
-				}
+				applyFlags(cfg)
 				if len(projectsRoots) > 0 {
 					cfg.ProjectsRoots = mergeUniqueRoots(nil, projectsRoots)
 				}
@@ -46,7 +66,7 @@ func newInitCmd() *cobra.Command {
 					return err
 				}
 				created = append(created, "config.json")
-			} else if err == nil && (len(projectsRoots) > 0 || orchestratorAgent != "" || workerAgent != "") {
+			} else if err == nil && (len(projectsRoots) > 0 || defaultEngine != "" || orchestratorAgent != "" || workerAgent != "" || t3Provider != "" || t3Model != "") {
 				cfg, loadErr := config.LoadConfig()
 				if loadErr != nil {
 					return loadErr
@@ -54,12 +74,7 @@ func newInitCmd() *cobra.Command {
 				if len(projectsRoots) > 0 {
 					cfg.ProjectsRoots = mergeUniqueRoots(cfg.ProjectsRoots, projectsRoots)
 				}
-				if orchestratorAgent != "" {
-					cfg.OrchestratorAgent = orchestratorAgent
-				}
-				if workerAgent != "" {
-					cfg.WorkerAgent = workerAgent
-				}
+				applyFlags(cfg)
 				if err := config.SaveConfig(cfg); err != nil {
 					return err
 				}
@@ -93,8 +108,11 @@ func newInitCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&force, "force", false, "Force overwrite existing config and state")
-	cmd.Flags().StringVar(&orchestratorAgent, "orchestrator-agent", "", "Default orchestrator agent (e.g. agy, opencode)")
-	cmd.Flags().StringVar(&workerAgent, "worker-agent", "", "Default worker agent (e.g. agy, pi)")
+	cmd.Flags().StringVar(&defaultEngine, "default-engine", "", "Default execution engine (rex, wezterm, t3)")
+	cmd.Flags().StringVar(&orchestratorAgent, "orchestrator-agent", "", "Default terminal orchestrator agent (e.g. agy, opencode)")
+	cmd.Flags().StringVar(&workerAgent, "worker-agent", "", "Default terminal worker agent (e.g. agy, pi)")
+	cmd.Flags().StringVar(&t3Provider, "t3-provider", "", "Default T3 provider (e.g. antigravity, anthropic)")
+	cmd.Flags().StringVar(&t3Model, "t3-model", "", "Default T3 model (e.g. gemini-3.8-flash-medium)")
 	cmd.Flags().StringArrayVar(&projectsRoots, "projects-root", nil, "Default project root directory (can be specified multiple times)")
 
 	return cmd

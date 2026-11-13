@@ -33,9 +33,8 @@ Positional Agent:
 Agent Resolution:
   1. CLI argument (--agent, -a, or positional)
   2. BUDDY_AGENT environment variable
-  3. config.orchestrator_agent (in ~/.buddy/config.json)
-  4. config.default_agent
-  5. Default fallback: agy
+  3. config.engines.rex.orchestrator_agent (in ~/.buddy/config.json)
+  4. Default fallback: agy
 
 Passthrough:
   Use '--' to pass flags and options directly to the underlying agent.
@@ -133,24 +132,16 @@ if [ -z "$CHOSEN_AGENT" ] && [ -n "${BUDDY_AGENT:-}" ]; then
 fi
 
 # Resolve orchestrator agent name:
-# Precedence: CLI argument (--agent/-a/positional) -> BUDDY_AGENT env -> orchestrator_agent config -> default_agent config -> "agy"
+# Precedence: CLI argument (--agent/-a/positional) -> BUDDY_AGENT env -> engines.rex.orchestrator_agent -> "agy"
 RESOLVED_AGENT="$CHOSEN_AGENT"
 if [ -z "$RESOLVED_AGENT" ]; then
     ORCH_AGENT=""
     if [ -n "$BUDDY_CTL_CMD" ]; then
-        CFG_OUT="$("$BUDDY_CTL_CMD" config get orchestrator_agent 2>/dev/null || true)"
+        CFG_OUT="$("$BUDDY_CTL_CMD" config get engines.rex.orchestrator_agent 2>/dev/null || true)"
         if command -v jq >/dev/null 2>&1; then
             ORCH_AGENT="$(echo "$CFG_OUT" | jq -r '.value // empty' 2>/dev/null || true)"
         else
             ORCH_AGENT="$(echo "$CFG_OUT" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
-        fi
-        if [ "$ORCH_AGENT" = "null" ] || [ -z "$ORCH_AGENT" ]; then
-            CFG_OUT="$("$BUDDY_CTL_CMD" config get default_agent 2>/dev/null || true)"
-            if command -v jq >/dev/null 2>&1; then
-                ORCH_AGENT="$(echo "$CFG_OUT" | jq -r '.value // empty' 2>/dev/null || true)"
-            else
-                ORCH_AGENT="$(echo "$CFG_OUT" | grep -o '"value": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
-            fi
         fi
     fi
     if [ "$ORCH_AGENT" = "null" ] || [ -z "$ORCH_AGENT" ]; then

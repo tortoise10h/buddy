@@ -59,11 +59,11 @@ func newDispatchCmd() *cobra.Command {
 				return err
 			}
 
-			// 4. Resolve agent command
-			if agentName == "" {
-				agentName = cfg.GetEffectiveWorkerAgent()
+			// 4. Resolve worker agent / model for target engine
+			agentName, agentCmd, err := resolveWorkerForEngine(engineName, agentName, cfg)
+			if err != nil {
+				return err
 			}
-			agentCmd, _, _ := cfg.GetAgentCommand(agentName)
 
 			// 5. Dispatch via engine
 			res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{

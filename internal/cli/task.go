@@ -76,10 +76,10 @@ func newTaskStartCmd() *cobra.Command {
 				return err
 			}
 
-			if agentName == "" {
-				agentName = cfg.GetEffectiveWorkerAgent()
+			agentName, agentCmd, err := resolveWorkerForEngine(engineName, agentName, cfg)
+			if err != nil {
+				return err
 			}
-			agentCmd, _, _ := cfg.GetAgentCommand(agentName)
 
 			res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{
 				ProjectName: projName,

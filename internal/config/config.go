@@ -16,18 +16,27 @@ type AgentConfig struct {
 	SubmitKey     string   `json:"submit_key"`
 }
 
+// EngineConfig holds engine-specific settings.
+// Terminal engines (rex, wezterm) use SessionName, CaptureLines, OrchestratorAgent, and WorkerAgent.
+// API/thread engines (t3) use Provider and Model.
+type EngineConfig struct {
+	SessionName       string `json:"session_name,omitempty"`
+	CaptureLines      int    `json:"capture_lines,omitempty"`
+	OrchestratorAgent string `json:"orchestrator_agent,omitempty"`
+	WorkerAgent       string `json:"worker_agent,omitempty"`
+
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
 type Config struct {
-	Version              int                    `json:"version"`
-	BuddySessionName     string                 `json:"buddy_session_name"`
-	DefaultEngine        string                 `json:"default_engine,omitempty"`
-	OrchestratorAgent    string                 `json:"orchestrator_agent"`
-	WorkerAgent          string                 `json:"worker_agent"`
-	DefaultAgent         string                 `json:"default_agent"`
-	ProjectsRoots        []string               `json:"projects_roots"`
-	UseWorktreeByDefault bool                   `json:"use_worktree_by_default"`
-	CaptureLines         int                    `json:"capture_lines"`
-	Notifications        map[string]any         `json:"notifications"`
-	Agents               map[string]AgentConfig `json:"agents"`
+	Version              int                     `json:"version"`
+	DefaultEngine        string                  `json:"default_engine,omitempty"`
+	ProjectsRoots        []string                `json:"projects_roots"`
+	UseWorktreeByDefault bool                    `json:"use_worktree_by_default"`
+	Notifications        map[string]any          `json:"notifications"`
+	Engines              map[string]EngineConfig `json:"engines"`
+	Agents               map[string]AgentConfig  `json:"agents"`
 }
 
 func GetConfigPath() string {
@@ -39,15 +48,10 @@ func DefaultConfig() *Config {
 	defaultProjectRoot := filepath.Join(home, "Dev", "Personal", "Projects")
 
 	return &Config{
-		Version:              1,
-		BuddySessionName:     "Buddy",
+		Version:              2,
 		DefaultEngine:        "rex",
-		OrchestratorAgent:    "agy",
-		WorkerAgent:          "agy",
-		DefaultAgent:         "agy",
 		ProjectsRoots:        []string{defaultProjectRoot},
 		UseWorktreeByDefault: false,
-		CaptureLines:         120,
 		Notifications: map[string]any{
 			"desktop_enabled":          true,
 			"sound":                    "Glass",
@@ -55,6 +59,24 @@ func DefaultConfig() *Config {
 			"watchdog_mode":            "all",
 			"poll_interval_seconds":    5,
 			"watchdog_timeout_seconds": 600,
+		},
+		Engines: map[string]EngineConfig{
+			"rex": {
+				SessionName:       "Buddy",
+				CaptureLines:      120,
+				OrchestratorAgent: "agy",
+				WorkerAgent:       "agy",
+			},
+			"wezterm": {
+				SessionName:       "Buddy",
+				CaptureLines:      120,
+				OrchestratorAgent: "agy",
+				WorkerAgent:       "agy",
+			},
+			"t3": {
+				Provider: "",
+				Model:    "",
+			},
 		},
 		Agents: map[string]AgentConfig{
 			"agy": {
@@ -92,7 +114,9 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config JSON: %w", err)
 	}
 
-	// Ensure agents map exists
+	if cfg.Engines == nil {
+		cfg.Engines = make(map[string]EngineConfig)
+	}
 	if cfg.Agents == nil {
 		cfg.Agents = make(map[string]AgentConfig)
 	}
@@ -121,29 +145,102 @@ func SaveConfig(cfg *Config) error {
 	return os.Rename(tmpPath, GetConfigPath())
 }
 
-func (c *Config) GetEffectiveWorkerAgent() string {
-	if c.WorkerAgent != "" {
-		return c.WorkerAgent
+// GetEngineConfig returns the configuration block for the given engine name.
+func (c *Config) GetEngineConfig(engineName string) EngineConfig {
+	if c == nil || c.Engines == nil {
+		return EngineConfig{}
 	}
-	if c.DefaultAgent != "" {
-		return c.DefaultAgent
+	return c.Engines[engineName]
+}
+
+// GetEffectiveWorkerAgent returns the worker agent harness for a terminal engine.
+// For non-terminal engines like "t3", it returns an empty string.
+func (c *Config) GetEffectiveWorkerAgent(engineName string) string {
+	if engineName == "t3" {
+		return ""
+	}
+	if ec, ok := c.Engines[engineName]; ok && ec.WorkerAgent != "" {
+		return ec.WorkerAgent
+	}
+	if engineName != "" && engineName != c.DefaultEngine && c.DefaultEngine != "" && c.DefaultEngine != "t3" {
+		if ec, ok := c.Engines[c.DefaultEngine]; ok && ec.WorkerAgent != "" {
+			return ec.WorkerAgent
+		}
 	}
 	return "agy"
 }
 
-func (c *Config) GetEffectiveOrchestratorAgent() string {
-	if c.OrchestratorAgent != "" {
-		return c.OrchestratorAgent
+// GetEffectiveOrchestratorAgent returns the orchestrator agent harness for a terminal engine.
+// For "t3", the user chats with the orchestrator thread directly, so it returns "".
+func (c *Config) GetEffectiveOrchestratorAgent(engineName string) string {
+	if engineName == "t3" {
+		return ""
 	}
-	if c.DefaultAgent != "" {
-		return c.DefaultAgent
+	if ec, ok := c.Engines[engineName]; ok && ec.OrchestratorAgent != "" {
+		return ec.OrchestratorAgent
+	}
+	if engineName != "" && engineName != c.DefaultEngine && c.DefaultEngine != "" && c.DefaultEngine != "t3" {
+		if ec, ok := c.Engines[c.DefaultEngine]; ok && ec.OrchestratorAgent != "" {
+			return ec.OrchestratorAgent
+		}
 	}
 	return "agy"
+}
+
+// GetT3ProviderModel returns the configured provider and model for the T3 engine.
+func (c *Config) GetT3ProviderModel() (string, string) {
+	if c == nil || c.Engines == nil {
+		return "", ""
+	}
+	ec := c.Engines["t3"]
+	return strings.TrimSpace(ec.Provider), strings.TrimSpace(ec.Model)
+}
+
+// GetSessionName returns the Buddy session name for a terminal engine.
+func (c *Config) GetSessionName(engineName string) string {
+	if ec, ok := c.Engines[engineName]; ok && ec.SessionName != "" {
+		return ec.SessionName
+	}
+	return "Buddy"
+}
+
+// GetCaptureLines returns the capture line count for a terminal engine.
+func (c *Config) GetCaptureLines(engineName string) int {
+	if ec, ok := c.Engines[engineName]; ok && ec.CaptureLines > 0 {
+		return ec.CaptureLines
+	}
+	return 120
+}
+
+// SetTerminalAgents updates orchestrator_agent and/or worker_agent across terminal engines (rex, wezterm).
+func (c *Config) SetTerminalAgents(orchestratorAgent, workerAgent string) {
+	if c.Engines == nil {
+		c.Engines = make(map[string]EngineConfig)
+	}
+	for _, name := range []string{"rex", "wezterm"} {
+		ec := c.Engines[name]
+		if ec.SessionName == "" {
+			ec.SessionName = "Buddy"
+		}
+		if ec.CaptureLines <= 0 {
+			ec.CaptureLines = 120
+		}
+		if orchestratorAgent != "" {
+			ec.OrchestratorAgent = orchestratorAgent
+		}
+		if workerAgent != "" {
+			ec.WorkerAgent = workerAgent
+		}
+		c.Engines[name] = ec
+	}
 }
 
 func (c *Config) GetAgentCommand(agentName string) ([]string, int, string) {
 	if agentName == "" {
-		agentName = c.GetEffectiveWorkerAgent()
+		agentName = c.GetEffectiveWorkerAgent(c.DefaultEngine)
+	}
+	if agentName == "" {
+		agentName = "agy"
 	}
 
 	if a, ok := c.Agents[agentName]; ok && len(a.Command) > 0 {

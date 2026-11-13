@@ -63,6 +63,10 @@ func TestDispatch_EndToEnd(t *testing.T) {
 	// Create default config pointing to tmpDir
 	cfg := config.DefaultConfig()
 	cfg.ProjectsRoots = []string{tmpDir}
+	cfg.Engines["t3"] = config.EngineConfig{
+		Provider: "antigravity",
+		Model:    "gemini-3.8-flash-medium",
+	}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatalf("failed to save test config: %v", err)
 	}
@@ -165,6 +169,10 @@ func TestDispatchAndSend_T3Routing_UsesT3Engine(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.ProjectsRoots = []string{tmpDir}
+	cfg.Engines["t3"] = config.EngineConfig{
+		Provider: "antigravity",
+		Model:    "gemini-3.8-flash-medium",
+	}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatalf("failed to save test config: %v", err)
 	}
@@ -240,5 +248,48 @@ func TestDispatchAndSend_T3Routing_UsesT3Engine(t *testing.T) {
 	})
 	if err := captureCmd.Execute(); err != nil {
 		t.Fatalf("expected capture to succeed under T3 environment, got: %v", err)
+	}
+}
+
+func TestDispatch_T3_MissingModelFailsFast(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+	t.Setenv("BUDDY_T3_MODEL", "")
+	t.Setenv("T3CODE_THREAD_ID", "th_test123")
+	t.Setenv("REX_SESSION", "")
+	t.Setenv("TERM_PROGRAM", "")
+
+	projDir := filepath.Join(tmpDir, "buddy")
+	_ = os.MkdirAll(projDir, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to save test config: %v", err)
+	}
+
+	mockT3 := &mockCLIT3Runner{}
+	reg := getRegistry()
+	origT3, _ := reg.Get("t3")
+	reg.Register("t3", engine.NewT3EngineWithRunner(mockT3))
+	t.Cleanup(func() {
+		if origT3 != nil {
+			reg.Register("t3", origT3)
+		}
+	})
+
+	cmd := newDispatchCmd()
+	cmd.SetArgs([]string{
+		"-p", "buddy",
+		"-t", "feat-t3-missing",
+		"-m", "test prompt",
+	})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error when T3 provider/model is not configured")
+	}
+	if len(mockT3.started) != 0 {
+		t.Errorf("expected fail-fast before ThreadStart, got %d calls", len(mockT3.started))
 	}
 }

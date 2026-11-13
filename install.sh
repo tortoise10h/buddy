@@ -27,8 +27,11 @@ for arg in "${@:-}"; do
             echo "  BUDDY_BUILD=1             Equivalent to --build"
             echo "  BUDDY_NONINTERACTIVE=1    Run without interactive prompts"
             echo "  BUDDY_PROJECTS_ROOTS=...  Colon-separated list of roots"
-            echo "  BUDDY_ORCHESTRATOR_AGENT= Orchestrator agent harness (default: agy)"
-            echo "  BUDDY_WORKER_AGENT=       Worker agent harness (default: agy)"
+            echo "  BUDDY_ORCHESTRATOR_AGENT= Terminal orchestrator harness (default: agy)"
+            echo "  BUDDY_WORKER_AGENT=       Terminal worker harness (default: agy)"
+            echo "  BUDDY_DEFAULT_ENGINE=     Fallback engine when host is unknown (rex, wezterm, t3)"
+            echo "  BUDDY_T3_PROVIDER=        T3 provider (when t3 is installed)"
+            echo "  BUDDY_T3_MODEL=           T3 model or <provider>/<model> (when t3 is installed)"
             exit 0
             ;;
     esac
@@ -474,28 +477,60 @@ if [ ${#AVAILABLE_AGENTS[@]} -eq 0 ]; then
     AVAILABLE_AGENTS=("${HARNESS_CANDIDATES[@]}")
 fi
 
-# Detect existing configured agents to preserve choices on re-install
+# Detect existing configured agents and engines to preserve choices on re-install
 EXISTING_ORCH=""
 EXISTING_WORKER=""
+EXISTING_ENGINE=""
+EXISTING_T3_PROVIDER=""
+EXISTING_T3_MODEL=""
 if [ -f "$CONFIG_FILE" ]; then
-    EXISTING_AGENTS_RAW=$(python3 -c "
+    EXISTING_CFG_RAW=$(python3 -c "
 import json
 try:
     with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
         cfg = json.load(f)
-    legacy = cfg.get('default_agent')
-    orch = cfg.get('orchestrator_agent') or legacy or ''
-    worker = cfg.get('worker_agent') or legacy or ''
-    print(f'{orch}\t{worker}')
+    engines = cfg.get('engines') or {}
+    rex = engines.get('rex') or {}
+    t3 = engines.get('t3') or {}
+    orch = rex.get('orchestrator_agent') or ''
+    worker = rex.get('worker_agent') or ''
+    def_eng = cfg.get('default_engine') or ''
+    t3_prov = t3.get('provider') or ''
+    t3_mod = t3.get('model') or ''
+    print(f'{orch}\t{worker}\t{def_eng}\t{t3_prov}\t{t3_mod}')
 except Exception:
     pass
 " 2>/dev/null || true)
-    if [ -n "$EXISTING_AGENTS_RAW" ]; then
-        EXISTING_ORCH="$(echo "$EXISTING_AGENTS_RAW" | cut -f1)"
-        EXISTING_WORKER="$(echo "$EXISTING_AGENTS_RAW" | cut -f2)"
+    if [ -n "$EXISTING_CFG_RAW" ]; then
+        EXISTING_ORCH="$(echo "$EXISTING_CFG_RAW" | cut -f1)"
+        EXISTING_WORKER="$(echo "$EXISTING_CFG_RAW" | cut -f2)"
+        EXISTING_ENGINE="$(echo "$EXISTING_CFG_RAW" | cut -f3)"
+        EXISTING_T3_PROVIDER="$(echo "$EXISTING_CFG_RAW" | cut -f4)"
+        EXISTING_T3_MODEL="$(echo "$EXISTING_CFG_RAW" | cut -f5)"
     fi
 fi
 
+HAS_REX=0
+if command -v rex >/dev/null 2>&1; then
+    HAS_REX=1
+fi
+HAS_T3=0
+if command -v t3 >/dev/null 2>&1 || [ -x "$HOME/.local/bin/t3" ]; then
+    HAS_T3=1
+fi
+
+DEFAULT_ENGINE="$EXISTING_ENGINE"
+if [ -z "$DEFAULT_ENGINE" ]; then
+    if [ "$HAS_REX" -eq 1 ]; then
+        DEFAULT_ENGINE="rex"
+    elif [ "$HAS_T3" -eq 1 ]; then
+        DEFAULT_ENGINE="t3"
+    else
+        DEFAULT_ENGINE="rex"
+    fi
+fi
+
+CHOSEN_ENGINE="${BUDDY_DEFAULT_ENGINE:-$DEFAULT_ENGINE}"
 DEFAULT_ORCH="${EXISTING_ORCH:-agy}"
 DEFAULT_WORKER="${EXISTING_WORKER:-agy}"
 
@@ -563,8 +598,61 @@ else
 fi
 
 echo "✔ Agents configured:"
-echo "  • Orchestrator: $CHOSEN_ORCH"
-echo "  • Worker: $CHOSEN_WORKER"
+echo "  • Default Engine: $CHOSEN_ENGINE"
+echo "  • Terminal Orchestrator: $CHOSEN_ORCH"
+echo "  • Terminal Worker: $CHOSEN_WORKER"
+
+# Configure T3 provider/model when T3 CLI is installed or env vars are provided
+CHOSEN_T3_PROVIDER="$EXISTING_T3_PROVIDER"
+CHOSEN_T3_MODEL="$EXISTING_T3_MODEL"
+
+if [ "$HAS_T3" -eq 1 ] || [ -n "${BUDDY_T3_MODEL:-}" ] || [ -n "${BUDDY_T3_PROVIDER:-}" ]; then
+    if [ "$IS_NONINTERACTIVE" -eq 1 ]; then
+        if [ -n "${BUDDY_T3_PROVIDER:-}" ]; then
+            CHOSEN_T3_PROVIDER="$BUDDY_T3_PROVIDER"
+            if [ -n "${BUDDY_T3_MODEL:-}" ]; then
+                CHOSEN_T3_MODEL="$BUDDY_T3_MODEL"
+            fi
+        elif [ -n "${BUDDY_T3_MODEL:-}" ]; then
+            if [[ "$BUDDY_T3_MODEL" == *"/"* ]]; then
+                CHOSEN_T3_PROVIDER="${BUDDY_T3_MODEL%%/*}"
+                CHOSEN_T3_MODEL="${BUDDY_T3_MODEL#*/}"
+            else
+                CHOSEN_T3_MODEL="$BUDDY_T3_MODEL"
+            fi
+        fi
+    else
+        echo ""
+        echo "T3 Code CLI detected."
+        T3_DEFAULT_SPEC=""
+        if [ -n "$EXISTING_T3_PROVIDER" ] && [ -n "$EXISTING_T3_MODEL" ]; then
+            T3_DEFAULT_SPEC="${EXISTING_T3_PROVIDER}/${EXISTING_T3_MODEL}"
+        fi
+        while true; do
+            if [ -n "$T3_DEFAULT_SPEC" ]; then
+                read -r -p "T3 worker model (<provider>/<model>) [$T3_DEFAULT_SPEC]: " input_t3
+                input_t3="${input_t3:-$T3_DEFAULT_SPEC}"
+            else
+                read -r -p "T3 worker model (<provider>/<model>, e.g. antigravity/gemini-3.8-flash-medium): " input_t3
+            fi
+            input_t3="$(echo "$input_t3" | tr -d '[:space:]')"
+            if [[ "$input_t3" == *"/"* ]]; then
+                p_part="${input_t3%%/*}"
+                m_part="${input_t3#*/}"
+                if [ -n "$p_part" ] && [ -n "$m_part" ]; then
+                    CHOSEN_T3_PROVIDER="$p_part"
+                    CHOSEN_T3_MODEL="$m_part"
+                    break
+                fi
+            fi
+            echo "✖ Please enter both provider and model separated by '/' (e.g. antigravity/gemini-3.8-flash-medium)."
+        done
+    fi
+
+    if [ -n "$CHOSEN_T3_PROVIDER" ] && [ -n "$CHOSEN_T3_MODEL" ]; then
+        echo "  • T3 Worker: ${CHOSEN_T3_PROVIDER}/${CHOSEN_T3_MODEL}"
+    fi
+fi
 
 # 6. Initialize ~/.buddy Control Tower & symlink workspace rules
 echo "Initializing ~/.buddy Control Tower..."
@@ -638,7 +726,10 @@ INIT_ARGS=()
 for r in "${COLLECTED_ROOTS[@]}"; do
     INIT_ARGS+=(--projects-root "$r")
 done
-INIT_ARGS+=(--orchestrator-agent "$CHOSEN_ORCH" --worker-agent "$CHOSEN_WORKER")
+INIT_ARGS+=(--default-engine "$CHOSEN_ENGINE" --orchestrator-agent "$CHOSEN_ORCH" --worker-agent "$CHOSEN_WORKER")
+if [ -n "$CHOSEN_T3_PROVIDER" ] && [ -n "$CHOSEN_T3_MODEL" ]; then
+    INIT_ARGS+=(--t3-provider "$CHOSEN_T3_PROVIDER" --t3-model "$CHOSEN_T3_MODEL")
+fi
 
 "$LOCAL_BIN/buddy-ctl" init "${INIT_ARGS[@]}"
 

@@ -240,7 +240,7 @@ When the user confirms the task is accepted and done:
 | `buddy-ctl projects add-root <path>` | Add a new project root directory to configuration. |
 | `buddy-ctl projects remove-root <path>` | Remove a project root directory from configuration. |
 | `buddy-ctl config show` | View current Buddy configuration. |
-| `buddy-ctl config set <key> <val>` | Change configuration (e.g. `orchestrator_agent opencode-flash`, `worker_agent agy`). |
+| `buddy-ctl config set <key> <val>` | Change configuration (e.g. `engines.rex.orchestrator_agent opencode`, `engines.t3.model gemini-3.8-flash-medium`). |
 | `buddy-ctl ensure-session -p <proj>` | Ensure Rex session exists for a project. |
 | `buddy-ctl task start -p <proj> -t <slug>` | Spawn worker agent in a new task tab. |
 | `buddy-ctl capture -p <proj> -t <slug>` | Read last 120 lines from worker pane. |
@@ -269,40 +269,50 @@ When the user confirms the task is accepted and done:
 
 ---
 
-## 6. Agent Roles & Configuration
+## 6. Engine & Agent Configuration
 
-Buddy cleanly separates two distinct agent roles:
+Buddy stores per-engine settings under `engines.<name>` in `~/.buddy/config.json`:
 
-1. **Orchestrator Agent** (`orchestrator_agent`, default: `"agy"`):
-   - Runs the central Buddy control session in Rex (`bin/buddy`).
-   - Acts as dispatcher, status monitor, and Q&A relay.
-2. **Worker Agent** (`worker_agent`, default: `"agy"`):
-   - The default agent used when spawning new feature or bugfix tabs (`buddy-ctl dispatch`, `buddy-ctl task start`).
-   - Writes code, runs tests, and executes task-specific commands.
+1. **Terminal Engines (`rex`, `wezterm`)**:
+   - `orchestrator_agent` (default: `"agy"`): Runs the central Buddy control session (`bin/buddy`).
+   - `worker_agent` (default: `"agy"`): Default CLI harness for spawned task tabs (`buddy-ctl dispatch`, `buddy-ctl task start`).
+   - `session_name` (default: `"Buddy"`), `capture_lines` (default: `120`).
+2. **T3 Engine (`t3`)**:
+   - No `orchestrator_agent` is needed (the user chats directly with the orchestrator thread in T3 Code).
+   - `provider` and `model`: Required for `t3 thread start` (no hard-coded fallback).
 
-### Concrete Example: Opencode Orchestrator with Agy Workers
-You can configure `opencode` to run the control tower while using `agy` as the worker agent:
-
+### Concrete Example: Opencode Orchestrator in Rex + T3 Worker Model
 ```json
 {
-  "orchestrator_agent": "opencode",
-  "worker_agent": "agy"
+  "default_engine": "rex",
+  "engines": {
+    "rex": {
+      "orchestrator_agent": "opencode",
+      "worker_agent": "agy"
+    },
+    "t3": {
+      "provider": "antigravity",
+      "model": "gemini-3.8-flash-medium"
+    }
+  }
 }
 ```
 
 Or update using `buddy-ctl`:
 ```sh
-buddy-ctl config set orchestrator_agent opencode
-buddy-ctl config set worker_agent agy
+buddy-ctl config set engines.rex.orchestrator_agent opencode
+buddy-ctl config set engines.rex.worker_agent agy
+buddy-ctl config set engines.t3.provider antigravity
+buddy-ctl config set engines.t3.model gemini-3.8-flash-medium
 ```
 
 ### Pinning a Model (Model Variants)
-The install prompt narrows agent choices to base harnesses. To use a model-pinned variant:
+The install prompt narrows terminal agent choices to base harnesses. To use a model-pinned variant in terminal engines:
 1. Add an entry to `agents` in `~/.buddy/config.json` with the model args in its `command` array (e.g. `"agy-flash": {"command": ["agy", "--model", "gemini-3.8-flash-medium"]}`).
-2. Select it with `--agent` (`buddy-ctl dispatch --agent agy-flash`) or set it as a persistent default (`buddy-ctl config set worker_agent agy-flash`).
+2. Select it with `--agent` (`buddy-ctl dispatch --agent agy-flash`) or set it as a persistent default (`buddy-ctl config set engines.rex.worker_agent agy-flash`).
 
-### Precedence & Compatibility
-- **Orchestrator**: explicit CLI `--agent` / `-a` > `BUDDY_AGENT` env var > `config.orchestrator_agent` (set via `install.sh`, `buddy-ctl config set`, or config file) > `config.default_agent` (legacy) > `"agy"`
-- **Worker**: explicit CLI `--agent` / `-a` > `config.worker_agent` (set via `install.sh`, `buddy-ctl config set`, or config file) > `config.default_agent` (legacy) > `"agy"`
-- **Command Array Resolution**: Agents resolve their full command array from `config.agents.<name>.command` (e.g. `agy-flash` -> `["agy", "--model", "gemini-3.8-flash-medium"]`), ensuring variant flags are passed directly without word-splitting errors.
-- **Backward Compatibility**: Existing configuration files containing only `default_agent` remain fully supported as a fallback for both roles.
+### Precedence
+- **Terminal Orchestrator**: explicit CLI `--agent` / `-a` > `BUDDY_AGENT` env var > `engines.<engine>.orchestrator_agent` > `"agy"`
+- **Terminal Worker**: explicit CLI `--agent` / `-a` > `BUDDY_WORKER_AGENT` env var > `engines.<engine>.worker_agent` > `"agy"`
+- **T3 Worker**: explicit CLI `--agent <provider>/<model>` > `BUDDY_T3_MODEL` env var (`<provider>/<model>`) > `engines.t3.provider` + `engines.t3.model` (fails fast if missing)
+- **Command Array Resolution**: Terminal agents resolve their full command array from `config.agents.<name>.command` (e.g. `agy-flash` -> `["agy", "--model", "gemini-3.8-flash-medium"]`).

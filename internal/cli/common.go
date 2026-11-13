@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/config"
@@ -32,6 +34,54 @@ func getRegistry() *engine.Registry {
 
 func getEngine(name string) (engine.Engine, error) {
 	return getRegistry().Get(name)
+}
+
+// resolveWorkerForEngine resolves the worker label and command arguments for the target engine.
+// For "t3", it resolves <provider>/<model> from --agent, BUDDY_T3_MODEL, or cfg.Engines["t3"].
+// For terminal engines, it resolves the CLI harness from --agent, BUDDY_WORKER_AGENT, or cfg.Engines[engine].
+func resolveWorkerForEngine(engineName, flagAgent string, cfg *config.Config) (string, []string, error) {
+	if engineName == "t3" {
+		if flagAgent != "" {
+			p, m, ok := strings.Cut(strings.TrimSpace(flagAgent), "/")
+			if !ok || p == "" || m == "" {
+				return "", nil, fmt.Errorf("t3 engine requires <provider>/<model> for --agent (got %q), e.g. antigravity/gemini-3.8-flash-medium", flagAgent)
+			}
+			spec := p + "/" + m
+			return spec, []string{spec}, nil
+		}
+		if env := strings.TrimSpace(os.Getenv("BUDDY_T3_MODEL")); env != "" {
+			p, m, ok := strings.Cut(env, "/")
+			if !ok || p == "" || m == "" {
+				return "", nil, fmt.Errorf("invalid BUDDY_T3_MODEL %q: expected <provider>/<model>", env)
+			}
+			spec := p + "/" + m
+			return spec, []string{spec}, nil
+		}
+		if cfg != nil {
+			p, m := cfg.GetT3ProviderModel()
+			if p != "" && m != "" {
+				spec := p + "/" + m
+				return spec, []string{spec}, nil
+			}
+		}
+		return "", nil, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --agent <provider>/<model>, or set BUDDY_T3_MODEL=<provider>/<model>")
+	}
+
+	agentName := strings.TrimSpace(flagAgent)
+	if agentName == "" {
+		agentName = strings.TrimSpace(os.Getenv("BUDDY_WORKER_AGENT"))
+	}
+	if agentName == "" && cfg != nil {
+		agentName = cfg.GetEffectiveWorkerAgent(engineName)
+	}
+	if agentName == "" {
+		agentName = "agy"
+	}
+	if cfg != nil {
+		agentCmd, _, _ := cfg.GetAgentCommand(agentName)
+		return agentName, agentCmd, nil
+	}
+	return agentName, []string{agentName}, nil
 }
 
 func resolveTarget(project, task, flagSession, flagWindow, flagBlock string) (sessionID, windowID, blockID string, projName, taskSlug, engineName string, err error) {

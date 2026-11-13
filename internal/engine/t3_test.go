@@ -93,7 +93,8 @@ func TestT3Engine_Dispatch_AddsProjectAndStartsThread(t *testing.T) {
 	}
 }
 
-func TestT3Engine_Dispatch_NonPairAgentCmdOmitsProviderAndModel(t *testing.T) {
+func TestT3Engine_Dispatch_MissingProviderModelFailsFast(t *testing.T) {
+	t.Setenv("BUDDY_T3_MODEL", "")
 	mock := &mockT3Runner{
 		threadStartOut: &t3.ThreadStartOutput{ThreadID: "th-1", ProjectID: "p-1"},
 	}
@@ -105,15 +106,19 @@ func TestT3Engine_Dispatch_NonPairAgentCmdOmitsProviderAndModel(t *testing.T) {
 		Prompt:      "Hello",
 		AgentCmd:    []string{"agy"},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatalf("expected error for missing provider/model, got nil")
 	}
-	if mock.threadStartCalls[0].Provider != "" || mock.threadStartCalls[0].Model != "" {
-		t.Errorf("expected empty provider/model for non-pair AgentCmd, got %+v", mock.threadStartCalls[0])
+	if !strings.Contains(err.Error(), "engines.t3.provider") {
+		t.Errorf("expected actionable error mentioning engines.t3.provider, got: %v", err)
+	}
+	if len(mock.projectAddCalls) != 0 || len(mock.threadStartCalls) != 0 {
+		t.Errorf("expected fail-fast before calling runner, got projectAdd=%d threadStart=%d", len(mock.projectAddCalls), len(mock.threadStartCalls))
 	}
 }
 
 func TestT3Engine_Dispatch_ValidationAndErrors(t *testing.T) {
+	t.Setenv("BUDDY_T3_MODEL", "")
 	eng := NewT3EngineWithRunner(&mockT3Runner{})
 	ctx := context.Background()
 
@@ -125,7 +130,11 @@ func TestT3Engine_Dispatch_ValidationAndErrors(t *testing.T) {
 	}
 
 	engAddFail := NewT3EngineWithRunner(&mockT3Runner{projectAddErr: errors.New("boom")})
-	if _, err := engAddFail.Dispatch(ctx, DispatchRequest{ProjectPath: "/tmp/p", Prompt: "hi"}); err == nil {
+	if _, err := engAddFail.Dispatch(ctx, DispatchRequest{
+		ProjectPath: "/tmp/p",
+		Prompt:      "hi",
+		AgentCmd:    []string{"antigravity/gemini-3.8-flash-medium"},
+	}); err == nil {
 		t.Error("expected error when ProjectAdd fails")
 	}
 
@@ -133,7 +142,11 @@ func TestT3Engine_Dispatch_ValidationAndErrors(t *testing.T) {
 		projectAddErr:  errors.New("t3 command failed (exit 1): ProjectAlreadyExistsError: An active project already exists for '/tmp/p'."),
 		threadStartOut: &t3.ThreadStartOutput{ThreadID: "th-existing", ProjectID: "proj-existing"},
 	})
-	res, err := engAlreadyExists.Dispatch(ctx, DispatchRequest{ProjectPath: "/tmp/p", Prompt: "hi"})
+	res, err := engAlreadyExists.Dispatch(ctx, DispatchRequest{
+		ProjectPath: "/tmp/p",
+		Prompt:      "hi",
+		AgentCmd:    []string{"antigravity/gemini-3.8-flash-medium"},
+	})
 	if err != nil {
 		t.Fatalf("expected Dispatch to ignore ProjectAlreadyExistsError, got: %v", err)
 	}
@@ -142,22 +155,10 @@ func TestT3Engine_Dispatch_ValidationAndErrors(t *testing.T) {
 	}
 }
 
-func TestT3Engine_Dispatch_RetriesWithFallbackWhenNoDefaultModel(t *testing.T) {
-	calls := 0
-	mock := &mockT3RunnerWithFn{
-		threadStartFn: func(opts t3.ThreadStartOptions) (*t3.ThreadStartOutput, error) {
-			calls++
-			if calls == 1 {
-				if opts.Provider != "" || opts.Model != "" {
-					t.Errorf("expected first attempt to omit provider/model, got %+v", opts)
-				}
-				return nil, errors.New("Pass modelSelection: the project has no default model.")
-			}
-			if opts.Provider != defaultT3Provider || opts.Model != defaultT3Model {
-				t.Errorf("expected fallback %s/%s, got %s/%s", defaultT3Provider, defaultT3Model, opts.Provider, opts.Model)
-			}
-			return &t3.ThreadStartOutput{ThreadID: "th-fallback", ProjectID: "proj-1", RunID: "run-1"}, nil
-		},
+func TestT3Engine_Dispatch_UsesEnvProviderModelFallback(t *testing.T) {
+	t.Setenv("BUDDY_T3_MODEL", "anthropic/claude-sonnet-4-5")
+	mock := &mockT3Runner{
+		threadStartOut: &t3.ThreadStartOutput{ThreadID: "th-env", ProjectID: "proj-1", RunID: "run-1"},
 	}
 	eng := NewT3EngineWithRunner(mock)
 
@@ -165,31 +166,20 @@ func TestT3Engine_Dispatch_RetriesWithFallbackWhenNoDefaultModel(t *testing.T) {
 		ProjectName: "docnotate",
 		ProjectPath: "/tmp/docnotate",
 		Prompt:      "Implement search",
-		AgentCmd:    []string{"agy"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected Dispatch error: %v", err)
 	}
-	if calls != 2 {
-		t.Errorf("expected 2 ThreadStart calls, got %d", calls)
+	if len(mock.threadStartCalls) != 1 {
+		t.Fatalf("expected 1 ThreadStart call, got %d", len(mock.threadStartCalls))
 	}
-	if res.WindowID != "th-fallback" {
-		t.Errorf("expected thread ID th-fallback, got %s", res.WindowID)
+	if mock.threadStartCalls[0].Provider != "anthropic" || mock.threadStartCalls[0].Model != "claude-sonnet-4-5" {
+		t.Errorf("expected anthropic/claude-sonnet-4-5, got %s/%s", mock.threadStartCalls[0].Provider, mock.threadStartCalls[0].Model)
+	}
+	if res.WindowID != "th-env" {
+		t.Errorf("expected thread ID th-env, got %s", res.WindowID)
 	}
 }
-
-type mockT3RunnerWithFn struct {
-	threadStartFn func(opts t3.ThreadStartOptions) (*t3.ThreadStartOutput, error)
-}
-
-func (m *mockT3RunnerWithFn) ProjectAdd(context.Context, string, string) error { return nil }
-func (m *mockT3RunnerWithFn) ThreadStart(_ context.Context, opts t3.ThreadStartOptions) (*t3.ThreadStartOutput, error) {
-	return m.threadStartFn(opts)
-}
-func (m *mockT3RunnerWithFn) ThreadShow(context.Context, string) (*t3.ThreadShowOutput, error) {
-	return nil, nil
-}
-func (m *mockT3RunnerWithFn) ThreadSend(context.Context, string, string) error { return nil }
 
 func TestT3Engine_Send(t *testing.T) {
 	mock := &mockT3Runner{}
