@@ -17,11 +17,12 @@ type DispatchRequest struct {
 
 // DispatchResult represents the outcome of a task dispatch operation.
 type DispatchResult struct {
-	SessionID string         `json:"session_id"`
-	WindowID  string         `json:"window_id"`
-	BlockID   string         `json:"block_id"`
-	PickedUp  bool           `json:"picked_up"`
-	Extra     map[string]any `json:"extra,omitempty"`
+	SessionID    string         `json:"session_id"`
+	WindowID     string         `json:"window_id"`
+	BlockID      string         `json:"block_id"`
+	PickedUp     bool           `json:"picked_up"`
+	PickupReason string         `json:"pickup_reason,omitempty"`
+	Extra        map[string]any `json:"extra,omitempty"`
 }
 
 // Engine defines the high-level task lifecycle interface that CLI commands interact with.
