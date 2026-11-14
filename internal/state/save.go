@@ -62,7 +62,6 @@ func MutateState(fn func(s *State) error) error {
 // MutateStateForEngine executes a read-modify-write cycle on ~/.buddy/state/<engine>.json
 // inside an exclusive file lock, preventing concurrent processes from overwriting or corrupting state.
 func MutateStateForEngine(engine string, fn func(s *State) error) error {
-	migrateLegacyStateIfNeeded()
 	return withEngineLock(engine, func() error {
 		st, err := readStateFile(GetStatePathForEngine(engine))
 		if err != nil {
@@ -109,99 +108,6 @@ func writeStateDirectForEngine(engine string, s *State) error {
 	}
 
 	return nil
-}
-
-// migrateLegacyStateIfNeeded splits a legacy ~/.buddy/state.json into ~/.buddy/state/<engine>.json
-// files and renames the legacy file to state.json.bak.
-func migrateLegacyStateIfNeeded() {
-	legacyPath := GetLegacyStatePath()
-	if _, err := os.Stat(legacyPath); err != nil {
-		return
-	}
-
-	lockPath := filepath.Join(GetBuddyDir(), ".migrate.lock")
-	_ = withLockFile(lockPath, func() error {
-		if _, err := os.Stat(legacyPath); err != nil {
-			return nil
-		}
-
-		legacy, err := readStateFile(legacyPath)
-		if err != nil {
-			return nil
-		}
-
-		partitioned := make(map[string]*State)
-		ensureEngineState := func(eng string) *State {
-			norm := NormalizeEngine(eng)
-			if es, ok := partitioned[norm]; ok {
-				return es
-			}
-			es := &State{
-				Version:        legacy.Version,
-				BuddySessionID: legacy.BuddySessionID,
-				UpdatedAt:      legacy.UpdatedAt,
-				Projects:       make(map[string]ProjectState),
-			}
-			if es.Version == 0 {
-				es.Version = 1
-			}
-			partitioned[norm] = es
-			return es
-		}
-
-		for pName, pData := range legacy.Projects {
-			if len(pData.Tasks) == 0 {
-				if pData.RexSessionID != "" {
-					es := ensureEngineState("rex")
-					pCopy := pData
-					pCopy.Tasks = make(map[string]TaskState)
-					es.Projects[pName] = pCopy
-				}
-				continue
-			}
-
-			tasksByEngine := make(map[string]map[string]TaskState)
-			for tSlug, tData := range pData.Tasks {
-				eng := NormalizeEngine(tData.GetEngine())
-				if tasksByEngine[eng] == nil {
-					tasksByEngine[eng] = make(map[string]TaskState)
-				}
-				tasksByEngine[eng][tSlug] = tData
-			}
-
-			for eng, tasks := range tasksByEngine {
-				es := ensureEngineState(eng)
-				pCopy := pData
-				pCopy.Tasks = tasks
-				if eng != "rex" && strings.HasPrefix(pCopy.RexSessionID, "session:") {
-					pCopy.RexSessionID = ""
-					pCopy.RexSessionLabel = ""
-				}
-				es.Projects[pName] = pCopy
-			}
-		}
-
-		for eng, es := range partitioned {
-			targetPath := GetStatePathForEngine(eng)
-			if _, statErr := os.Stat(targetPath); os.IsNotExist(statErr) {
-				if err := writeStateDirectForEngine(eng, es); err != nil {
-					return err
-				}
-			}
-		}
-
-		legacySeen := filepath.Join(GetBuddyDir(), ".state_seen.json")
-		rexSeen := GetStateSeenPathForEngine("rex")
-		if _, err := os.Stat(legacySeen); err == nil {
-			if _, err := os.Stat(rexSeen); os.IsNotExist(err) {
-				if err := os.MkdirAll(GetStateDir(), 0755); err == nil {
-					_ = os.Rename(legacySeen, rexSeen)
-				}
-			}
-		}
-
-		return os.Rename(legacyPath, legacyPath+".bak")
-	})
 }
 
 // RecordTask atomically inserts or updates a task under a project in state.

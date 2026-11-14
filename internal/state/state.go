@@ -97,11 +97,6 @@ func GetStateSeenPathForEngine(engine string) string {
 	return filepath.Join(GetStateDir(), "."+NormalizeEngine(engine)+"_seen.json")
 }
 
-// GetLegacyStatePath returns the legacy shared state.json path.
-func GetLegacyStatePath() string {
-	return filepath.Join(GetBuddyDir(), "state.json")
-}
-
 // GetStatePath returns the path to the default ("rex") state file.
 func GetStatePath() string {
 	return GetStatePathForEngine("rex")
@@ -112,10 +107,8 @@ func LoadState() (*State, error) {
 	return LoadStateForEngine("rex")
 }
 
-// LoadStateForEngine reads ~/.buddy/state/<engine>.json without modifying it,
-// running one-time migration from legacy state.json if present.
+// LoadStateForEngine reads ~/.buddy/state/<engine>.json without modifying it.
 func LoadStateForEngine(engine string) (*State, error) {
-	migrateLegacyStateIfNeeded()
 	return readStateFile(GetStatePathForEngine(engine))
 }
 
@@ -143,7 +136,6 @@ func readStateFile(path string) (*State, error) {
 
 // ListStateEngines returns the sorted list of engine names that have state files in ~/.buddy/state/.
 func ListStateEngines() ([]string, error) {
-	migrateLegacyStateIfNeeded()
 	dir := GetStateDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {

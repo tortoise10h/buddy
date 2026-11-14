@@ -149,76 +149,54 @@ func TestState_PerEngineIsolation(t *testing.T) {
 	}
 }
 
-func TestState_LegacyMigration(t *testing.T) {
+func TestState_PerEnginePathsAndFreshStart(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
 
-	legacyJSON := `{
-  "version": 1,
-  "buddy_session_id": "legacy-1",
-  "projects": {
-    "buddy": {
-      "name": "buddy",
-      "project_path": "/tmp/buddy",
-      "rex_session_id": "session:rex-1",
-      "rex_session_label": "Buddy",
-      "tasks": {
-        "rex-task": {
-          "task_slug": "rex-task",
-          "window_id": "win-1",
-          "agent_block_id": "blk-1",
-          "status": "running"
-        },
-        "t3-task": {
-          "task_slug": "t3-task",
-          "engine": "t3",
-          "window_id": "thread-1",
-          "agent_block_id": "thread-1",
-          "status": "running"
-        }
-      }
-    }
-  }
-}`
-	if err := os.WriteFile(filepath.Join(tmpDir, "state.json"), []byte(legacyJSON), 0644); err != nil {
-		t.Fatalf("failed to write legacy state.json: %v", err)
+	if got := NormalizeEngine(""); got != "rex" {
+		t.Errorf("NormalizeEngine(\"\") = %q, want \"rex\"", got)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, ".state_seen.json"), []byte(`{"buddy/rex-task":{"status":"running"}}`), 0644); err != nil {
-		t.Fatalf("failed to write legacy .state_seen.json: %v", err)
+	if got := NormalizeEngine("  T3 "); got != "t3" {
+		t.Errorf("NormalizeEngine(\"  T3 \") = %q, want \"t3\"", got)
 	}
 
-	t3State, err := LoadStateForEngine("t3")
+	wantRexPath := filepath.Join(tmpDir, "state", "rex.json")
+	if got := GetStatePathForEngine(""); got != wantRexPath {
+		t.Errorf("GetStatePathForEngine(\"\") = %q, want %q", got, wantRexPath)
+	}
+	wantT3Seen := filepath.Join(tmpDir, "state", ".t3_seen.json")
+	if got := GetStateSeenPathForEngine("t3"); got != wantT3Seen {
+		t.Errorf("GetStateSeenPathForEngine(\"t3\") = %q, want %q", got, wantT3Seen)
+	}
+
+	// Fresh-start: missing per-engine state file returns an empty initialized State.
+	st, err := LoadStateForEngine("t3")
 	if err != nil {
-		t.Fatalf("LoadStateForEngine(t3) failed: %v", err)
+		t.Fatalf("LoadStateForEngine(t3) on missing file failed: %v", err)
 	}
-	if _, ok := t3State.Projects["buddy"].Tasks["t3-task"]; !ok {
-		t.Errorf("expected t3-task in migrated t3 state")
-	}
-	if _, ok := t3State.Projects["buddy"].Tasks["rex-task"]; ok {
-		t.Errorf("did not expect rex-task in migrated t3 state")
-	}
-	if t3State.Projects["buddy"].RexSessionID != "" {
-		t.Errorf("expected rex session ID cleared for t3 project, got %q", t3State.Projects["buddy"].RexSessionID)
+	if st.Version != 1 || st.Projects == nil || len(st.Projects) != 0 {
+		t.Errorf("expected empty initialized state, got %+v", st)
 	}
 
-	rexState, err := LoadStateForEngine("rex")
+	engines, err := ListStateEngines()
 	if err != nil {
-		t.Fatalf("LoadStateForEngine(rex) failed: %v", err)
+		t.Fatalf("ListStateEngines on fresh dir failed: %v", err)
 	}
-	if _, ok := rexState.Projects["buddy"].Tasks["rex-task"]; !ok {
-		t.Errorf("expected rex-task in migrated rex state")
-	}
-	if rexState.Projects["buddy"].RexSessionID != "session:rex-1" {
-		t.Errorf("expected rex session ID preserved, got %q", rexState.Projects["buddy"].RexSessionID)
+	if len(engines) != 0 {
+		t.Errorf("expected no engines on fresh dir, got %v", engines)
 	}
 
-	if _, err := os.Stat(filepath.Join(tmpDir, "state.json")); !os.IsNotExist(err) {
-		t.Errorf("expected legacy state.json to be renamed")
+	// SaveStateForEngine creates the per-engine file atomically.
+	st.RecordTask("buddy", "/tmp/buddy", "proj-t3-1", "buddy", TaskState{
+		TaskSlug:     "feat-save",
+		Engine:       "t3",
+		WindowID:     "thread-1",
+		AgentBlockID: "thread-1",
+	})
+	if err := SaveStateForEngine("t3", st); err != nil {
+		t.Fatalf("SaveStateForEngine(t3) failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "state.json.bak")); err != nil {
-		t.Errorf("expected state.json.bak to exist: %v", err)
-	}
-	if _, err := os.Stat(GetStateSeenPathForEngine("rex")); err != nil {
-		t.Errorf("expected migrated .rex_seen.json to exist: %v", err)
+	if _, err := os.Stat(GetStatePathForEngine("t3")); err != nil {
+		t.Errorf("expected t3 state file to exist: %v", err)
 	}
 }
