@@ -11,20 +11,21 @@ import (
 
 func newSendCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		session string
-		block   string
-		text    string
-		key     string
-		noEnter bool
+		project    string
+		task       string
+		session    string
+		block      string
+		text       string
+		key        string
+		noEnter    bool
+		engineName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send text or keys to worker agent pane",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, _, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, session, "", block)
+			sessID, _, blkID, projName, taskSlug, engName, err := resolveTargetWithEngine(project, task, session, "", block, engineName)
 			if err != nil {
 				return err
 			}
@@ -71,6 +72,7 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().StringVar(&text, "text", "", "Text to send to the pane")
 	cmd.Flags().StringVar(&key, "key", "", "Key or shortcut to send (e.g. enter, ctrl+c, esc)")
 	cmd.Flags().BoolVar(&noEnter, "no-enter", false, "Do not press enter after typing text")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }

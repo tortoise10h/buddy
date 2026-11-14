@@ -37,7 +37,7 @@ func reconcileRexWithBackend(ctx context.Context, tb backend.TerminalBackend) er
 
 	windowsBySession := make(map[string][]backend.WindowInfo)
 
-	return state.MutateState(func(s *state.State) error {
+	return state.MutateStateForEngine("rex", func(s *state.State) error {
 		for pName, pData := range s.Projects {
 			sess, found := byID[pData.RexSessionID]
 			if !found && pData.RexSessionLabel != "" {

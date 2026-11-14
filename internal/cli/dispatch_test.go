@@ -95,7 +95,7 @@ func TestDispatch_EndToEnd(t *testing.T) {
 		t.Errorf("expected CreateTaskWindow to be invoked on backend")
 	}
 
-	// Verify state.json was written and contains the task
+	// Verify state file was written and contains the task
 	st, err := state.LoadState()
 	if err != nil {
 		t.Fatalf("failed to load state after dispatch: %v", err)
@@ -212,7 +212,7 @@ func TestDispatchAndSend_T3Routing_UsesT3Engine(t *testing.T) {
 		t.Errorf("expected ThreadStart with prompt, got %+v", mockT3.started)
 	}
 
-	st, err := state.LoadState()
+	st, err := state.LoadStateForEngine("t3")
 	if err != nil {
 		t.Fatalf("failed to load state: %v", err)
 	}

@@ -92,3 +92,52 @@ func TestStatusCmd_HostPayload(t *testing.T) {
 		t.Errorf("expected table header to contain 'ENGINE', got: %q", stdoutTable)
 	}
 }
+
+func TestStatusCmd_EngineStateIsolation(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+	t.Setenv("T3CODE_THREAD_ID", "th_123")
+
+	cfg := config.DefaultConfig()
+	_ = config.SaveConfig(cfg)
+
+	_ = state.MutateStateForEngine("rex", func(s *state.State) error {
+		s.RecordTask("rex-proj", "/tmp/rex", "session:1", "rex-proj", state.TaskState{
+			TaskSlug: "rex-task",
+			Engine:   "rex",
+			Status:   "running",
+		})
+		return nil
+	})
+	_ = state.MutateStateForEngine("t3", func(s *state.State) error {
+		s.RecordTask("t3-proj", "/tmp/t3", "proj-1", "t3-proj", state.TaskState{
+			TaskSlug: "t3-task",
+			Engine:   "t3",
+			Status:   "running",
+		})
+		return nil
+	})
+
+	// Under T3 host, status should only show T3 state by default.
+	cmdT3 := newStatusCmd()
+	cmdT3.SetArgs([]string{"--format", "json"})
+	outT3, _, err := captureOutput(t, func() error { return cmdT3.Execute() })
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if strings.Contains(outT3, "rex-proj") || !strings.Contains(outT3, "t3-proj") {
+		t.Errorf("expected only t3-proj in t3 status, got: %s", outT3)
+	}
+
+	// --all-engines should show both.
+	cmdAll := newStatusCmd()
+	cmdAll.SetArgs([]string{"--format", "json", "--all-engines"})
+	outAll, _, err := captureOutput(t, func() error { return cmdAll.Execute() })
+	if err != nil {
+		t.Fatalf("status --all-engines failed: %v", err)
+	}
+	if !strings.Contains(outAll, "rex-proj") || !strings.Contains(outAll, "t3-proj") {
+		t.Errorf("expected both rex-proj and t3-proj with --all-engines, got: %s", outAll)
+	}
+}

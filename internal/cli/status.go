@@ -18,19 +18,72 @@ func newStatusCmd() *cobra.Command {
 		formatStr   string
 		projectName string
 		syncLive    bool
+		flagEngine  string
+		allEngines  bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show tracked projects and tasks from cache",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if syncLive {
+			cfg, _ := config.LoadConfig()
+			res := engine.ResolveEngine(flagEngine, os.Getenv, cfg)
+
+			if syncLive && (allEngines || res.EngineName == "rex") {
 				_ = reconcileRexWithBackend(cmd.Context(), rex.NewRexBackend())
 			}
 
-			st, err := state.LoadState()
-			if err != nil {
-				return err
+			var st *state.State
+			var err error
+			if allEngines {
+				st = &state.State{
+					Version:  1,
+					Projects: make(map[string]state.ProjectState),
+				}
+				engines, listErr := state.ListStateEngines()
+				if listErr != nil {
+					return listErr
+				}
+				for _, engName := range engines {
+					engState, loadErr := state.LoadStateForEngine(engName)
+					if loadErr != nil {
+						return loadErr
+					}
+					if engState.UpdatedAt > st.UpdatedAt {
+						st.UpdatedAt = engState.UpdatedAt
+					}
+					if st.BuddySessionID == "" && engState.BuddySessionID != "" {
+						st.BuddySessionID = engState.BuddySessionID
+					}
+					for pName, pData := range engState.Projects {
+						existing, exists := st.Projects[pName]
+						if !exists {
+							pCopy := pData
+							pCopy.Tasks = make(map[string]state.TaskState, len(pData.Tasks))
+							for k, v := range pData.Tasks {
+								pCopy.Tasks[k] = v
+							}
+							st.Projects[pName] = pCopy
+							continue
+						}
+						if existing.RexSessionID == "" && pData.RexSessionID != "" {
+							existing.RexSessionID = pData.RexSessionID
+							existing.RexSessionLabel = pData.RexSessionLabel
+						}
+						if existing.Tasks == nil {
+							existing.Tasks = make(map[string]state.TaskState)
+						}
+						for k, v := range pData.Tasks {
+							existing.Tasks[k] = v
+						}
+						st.Projects[pName] = existing
+					}
+				}
+			} else {
+				st, err = state.LoadStateForEngine(res.EngineName)
+				if err != nil {
+					return err
+				}
 			}
 
 			projects := st.Projects
@@ -43,9 +96,6 @@ func newStatusCmd() *cobra.Command {
 					matched.Name: *matched,
 				}
 			}
-
-			cfg, _ := config.LoadConfig()
-			res := engine.ResolveEngine("", os.Getenv, cfg)
 
 			format := strings.ToLower(formatStr)
 			if format == "" || format == "json" {
@@ -120,6 +170,8 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&formatStr, "format", "f", "json", "Output format: json, brief, table")
 	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Filter by project name")
 	cmd.Flags().BoolVar(&syncLive, "sync", false, "Reconcile cache with live Rex sessions and windows")
+	cmd.Flags().StringVar(&flagEngine, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().BoolVar(&allEngines, "all-engines", false, "Show state across all engines")
 
 	return cmd
 }

@@ -10,17 +10,18 @@ import (
 
 func newDemoCmd() *cobra.Command {
 	var (
-		project   string
-		task      string
-		cmdStr    string
-		focusOnly bool
+		project    string
+		task       string
+		cmdStr     string
+		focusOnly  bool
+		engineName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "demo",
 		Short: "Focus task tab in Rex and optionally launch dev server split",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, "", "", "")
+			sessID, winID, blkID, projName, taskSlug, engName, err := resolveTargetWithEngine(project, task, "", "", "", engineName)
 			if err != nil {
 				return err
 			}
@@ -62,6 +63,7 @@ func newDemoCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVar(&cmdStr, "cmd", "", "Command to run in dev split pane (e.g. 'npm run dev')")
 	cmd.Flags().BoolVar(&focusOnly, "focus-only", false, "Only switch focus without launching dev split")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }

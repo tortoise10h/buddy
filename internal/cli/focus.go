@@ -9,17 +9,18 @@ import (
 
 func newFocusCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		window  string
-		session string
+		project    string
+		task       string
+		window     string
+		session    string
+		engineName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "focus",
 		Short: "Focus a project tab, task tab, or window in Rex",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, _, _, _, engName, err := resolveTarget(project, task, session, window, "")
+			sessID, winID, _, _, _, engName, err := resolveTargetWithEngine(project, task, session, window, "", engineName)
 			if err != nil {
 				return err
 			}
@@ -46,6 +47,7 @@ func newFocusCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVarP(&window, "window", "w", "", "Direct window ID")
 	cmd.Flags().StringVarP(&session, "session", "s", "", "Direct session ID")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }

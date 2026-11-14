@@ -56,7 +56,16 @@ func newTaskStartCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, err := state.LoadState()
+
+			resEngine := engine.ResolveEngine(engineName, os.Getenv, cfg)
+			resEngine.WarnUnknownHost(os.Stderr)
+			engineName = resEngine.EngineName
+			eng, err := getEngine(engineName)
+			if err != nil {
+				return err
+			}
+
+			st, err := state.LoadStateForEngine(engineName)
 			if err != nil {
 				return err
 			}
@@ -67,14 +76,6 @@ func newTaskStartCmd() *cobra.Command {
 			}
 
 			slug := project.DeriveSlug(taskSlug, prompt, projName)
-
-			resEngine := engine.ResolveEngine(engineName, os.Getenv, cfg)
-			resEngine.WarnUnknownHost(os.Stderr)
-			engineName = resEngine.EngineName
-			eng, err := getEngine(engineName)
-			if err != nil {
-				return err
-			}
 
 			agentName, agentCmd, err := resolveWorkerForEngine(engineName, agentName, cfg)
 			if err != nil {
@@ -105,7 +106,7 @@ func newTaskStartCmd() *cobra.Command {
 				initialPrompt = &prompt
 			}
 
-			err = state.MutateState(func(s *state.State) error {
+			err = state.MutateStateForEngine(engineName, func(s *state.State) error {
 				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
 					TaskSlug:      slug,
 					Engine:        engineName,
@@ -150,10 +151,11 @@ func newTaskStartCmd() *cobra.Command {
 
 func newTaskUpdateCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		status  string
-		summary string
+		project    string
+		task       string
+		status     string
+		summary    string
+		engineName string
 	)
 
 	cmd := &cobra.Command{
@@ -164,8 +166,9 @@ func newTaskUpdateCmd() *cobra.Command {
 				return fmt.Errorf("both --project (-p) and --task (-t) are required")
 			}
 
+			engName := resolveActiveEngine(engineName)
 			var updatedProj, updatedTask string
-			err := state.MutateState(func(s *state.State) error {
+			err := state.MutateStateForEngine(engName, func(s *state.State) error {
 				p, err := s.FindProject(project)
 				if err != nil {
 					return err
@@ -212,23 +215,25 @@ func newTaskUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVar(&status, "status", "", "New task status")
 	cmd.Flags().StringVar(&summary, "summary", "", "New task summary")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }
 
 func newTaskCloseCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		window  string
-		session string
+		project    string
+		task       string
+		window     string
+		session    string
+		engineName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "close",
 		Short: "Close task tab in Rex and update state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, _, projName, taskSlug, engName, err := resolveTarget(project, task, session, window, "")
+			sessID, winID, _, projName, taskSlug, engName, err := resolveTargetWithEngine(project, task, session, window, "", engineName)
 			if err != nil {
 				return err
 			}
@@ -244,7 +249,7 @@ func newTaskCloseCmd() *cobra.Command {
 				return err
 			}
 
-			_ = state.MutateState(func(s *state.State) error {
+			_ = state.MutateStateForEngine(engName, func(s *state.State) error {
 				return s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
 			})
 
@@ -264,6 +269,7 @@ func newTaskCloseCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVarP(&window, "window", "w", "", "Direct window ID")
 	cmd.Flags().StringVarP(&session, "session", "s", "", "Direct session ID")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }

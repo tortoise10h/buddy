@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -60,14 +61,53 @@ func GetBuddyDir() string {
 	return filepath.Join(home, ".buddy")
 }
 
-// GetStatePath returns the path to state.json.
-func GetStatePath() string {
+// GetStateDir returns the directory for per-engine state files (~/.buddy/state).
+func GetStateDir() string {
+	return filepath.Join(GetBuddyDir(), "state")
+}
+
+// NormalizeEngine normalizes an engine name, defaulting empty to "rex".
+func NormalizeEngine(engine string) string {
+	e := strings.ToLower(strings.TrimSpace(engine))
+	if e == "" {
+		return "rex"
+	}
+	return filepath.Base(e)
+}
+
+// GetStatePathForEngine returns the path to ~/.buddy/state/<engine>.json.
+func GetStatePathForEngine(engine string) string {
+	return filepath.Join(GetStateDir(), NormalizeEngine(engine)+".json")
+}
+
+// GetStateSeenPathForEngine returns the path to ~/.buddy/state/.<engine>_seen.json.
+func GetStateSeenPathForEngine(engine string) string {
+	return filepath.Join(GetStateDir(), "."+NormalizeEngine(engine)+"_seen.json")
+}
+
+// GetLegacyStatePath returns the legacy shared state.json path.
+func GetLegacyStatePath() string {
 	return filepath.Join(GetBuddyDir(), "state.json")
 }
 
-// LoadState reads state.json without modifying it.
+// GetStatePath returns the path to the default ("rex") state file.
+func GetStatePath() string {
+	return GetStatePathForEngine("rex")
+}
+
+// LoadState reads the default ("rex") state file without modifying it.
 func LoadState() (*State, error) {
-	path := GetStatePath()
+	return LoadStateForEngine("rex")
+}
+
+// LoadStateForEngine reads ~/.buddy/state/<engine>.json without modifying it,
+// running one-time migration from legacy state.json if present.
+func LoadStateForEngine(engine string) (*State, error) {
+	migrateLegacyStateIfNeeded()
+	return readStateFile(GetStatePathForEngine(engine))
+}
+
+func readStateFile(path string) (*State, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -87,6 +127,32 @@ func LoadState() (*State, error) {
 		s.Projects = make(map[string]ProjectState)
 	}
 	return &s, nil
+}
+
+// ListStateEngines returns the sorted list of engine names that have state files in ~/.buddy/state/.
+func ListStateEngines() ([]string, error) {
+	migrateLegacyStateIfNeeded()
+	dir := GetStateDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var engines []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		engines = append(engines, strings.TrimSuffix(name, ".json"))
+	}
+	sort.Strings(engines)
+	return engines, nil
 }
 
 // FindProject looks up a project by exact match or case-insensitive prefix/substring.

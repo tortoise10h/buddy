@@ -36,21 +36,8 @@ func newDispatchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, err := state.LoadState()
-			if err != nil {
-				return err
-			}
 
-			// 1. Resolve project
-			projName, projPath, err := project.ResolveProject(projectName, cfg, st)
-			if err != nil {
-				return err
-			}
-
-			// 2. Resolve task slug
-			slug := project.DeriveSlug(taskSlug, prompt, projName)
-
-			// 3. Resolve engine
+			// 1. Resolve engine
 			resEngine := engine.ResolveEngine(engineName, os.Getenv, cfg)
 			resEngine.WarnUnknownHost(os.Stderr)
 			engineName = resEngine.EngineName
@@ -58,6 +45,20 @@ func newDispatchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			st, err := state.LoadStateForEngine(engineName)
+			if err != nil {
+				return err
+			}
+
+			// 2. Resolve project
+			projName, projPath, err := project.ResolveProject(projectName, cfg, st)
+			if err != nil {
+				return err
+			}
+
+			// 3. Resolve task slug
+			slug := project.DeriveSlug(taskSlug, prompt, projName)
 
 			// 4. Resolve worker agent / model for target engine
 			agentName, agentCmd, err := resolveWorkerForEngine(engineName, agentName, cfg)
@@ -77,13 +78,13 @@ func newDispatchCmd() *cobra.Command {
 				return err
 			}
 
-			// 6. Atomically record in state
+			// 6. Atomically record in engine-specific state
 			preview := prompt
 			if len(preview) > 60 {
 				preview = preview[:60] + "..."
 			}
 
-			err = state.MutateState(func(s *state.State) error {
+			err = state.MutateStateForEngine(engineName, func(s *state.State) error {
 				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
 					TaskSlug:      slug,
 					Engine:        engineName,

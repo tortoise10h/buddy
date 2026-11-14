@@ -411,6 +411,7 @@ type watchRunner struct {
 	cmd           *cobra.Command
 	projectName   string
 	taskSlug      string
+	engineName    string
 	watchAll      bool
 	interval      time.Duration
 	timeout       time.Duration
@@ -446,6 +447,7 @@ func newWatchRunner(cmd *cobra.Command, projectName, taskSlug string, watchAll b
 		cmd:             cmd,
 		projectName:     projectName,
 		taskSlug:        taskSlug,
+		engineName:      resolveActiveEngine(""),
 		watchAll:        watchAll,
 		interval:        time.Duration(intervalSec) * time.Second,
 		timeout:         time.Duration(timeoutSec) * time.Second,
@@ -460,8 +462,13 @@ func newWatchRunner(cmd *cobra.Command, projectName, taskSlug string, watchAll b
 }
 
 func (w *watchRunner) run() error {
+	if w.engineName == "" {
+		w.engineName = resolveActiveEngine("")
+	}
 	w.snapshotInitiallyActive()
-	_ = syncRexFn(w.cmd.Context())
+	if w.engineName == "rex" {
+		_ = syncRexFn(w.cmd.Context())
+	}
 
 	if !w.watchAll {
 		handled, err := w.preflightSingleTarget()
@@ -478,12 +485,12 @@ func (w *watchRunner) run() error {
 			return err
 		}
 
-		if !firstPoll {
+		if !firstPoll && w.engineName == "rex" {
 			_ = syncRexFn(w.cmd.Context())
 		}
 		firstPoll = false
 
-		st, err := state.LoadState()
+		st, err := state.LoadStateForEngine(w.engineName)
 		if err != nil {
 			if err := w.sleepOrDone(); err != nil {
 				return err
@@ -518,7 +525,7 @@ func (w *watchRunner) run() error {
 }
 
 func (w *watchRunner) snapshotInitiallyActive() {
-	initialSt, err := state.LoadState()
+	initialSt, err := state.LoadStateForEngine(w.engineName)
 	if err != nil {
 		return
 	}
@@ -532,7 +539,7 @@ func (w *watchRunner) snapshotInitiallyActive() {
 }
 
 func (w *watchRunner) preflightSingleTarget() (bool, error) {
-	st, err := state.LoadState()
+	st, err := state.LoadStateForEngine(w.engineName)
 	if err != nil {
 		return false, fmt.Errorf("could not load state: %w", err)
 	}
@@ -560,7 +567,7 @@ func (w *watchRunner) preflightSingleTarget() (bool, error) {
 				if working, _, _, _, probeErr := w.probeTarget(eng, target); probeErr == nil && working {
 					stillTerminal = false
 					w.sawWorking[p.Name+"/"+t.TaskSlug] = true
-					_ = state.MutateState(func(s *state.State) error {
+					_ = state.MutateStateForEngine(w.engineName, func(s *state.State) error {
 						return s.UpdateTask(p.Name, t.TaskSlug, "running", t.LastSummary)
 					})
 				}
@@ -693,7 +700,7 @@ func (w *watchRunner) pollTarget(target watchTarget) (*watchEvent, error) {
 		w.sawWorking[targetKey] = true
 		delete(w.debounceMap, targetKey)
 		if target.status == "waiting_for_input" || target.status == "ready_for_demo" {
-			_ = state.MutateState(func(s *state.State) error {
+			_ = state.MutateStateForEngine(w.engineName, func(s *state.State) error {
 				return s.UpdateTask(target.project, target.task, "running", "")
 			})
 		}
@@ -720,7 +727,7 @@ func (w *watchRunner) pollTarget(target watchTarget) (*watchEvent, error) {
 		return nil, nil
 	}
 
-	_ = state.MutateState(func(s *state.State) error {
+	_ = state.MutateStateForEngine(w.engineName, func(s *state.State) error {
 		return s.UpdateTask(target.project, target.task, matchedEvent, summary)
 	})
 	return &watchEvent{
@@ -775,6 +782,7 @@ func newWatchCmd() *cobra.Command {
 	var (
 		projectName   string
 		taskSlug      string
+		engineName    string
 		watchAll      bool
 		intervalSec   int
 		timeoutSec    int
@@ -793,12 +801,14 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 				return fmt.Errorf("provide --project and --task, or use --all to monitor all active tasks")
 			}
 			runner := newWatchRunner(cmd, projectName, taskSlug, watchAll, intervalSec, timeoutSec, debounceCount, untilEvents, notifyEnabled)
+			runner.engineName = resolveActiveEngine(engineName)
 			return runner.run()
 		},
 	}
 
 	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Project name")
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 	cmd.Flags().BoolVar(&watchAll, "all", false, "Monitor all active tasks across projects")
 	cmd.Flags().IntVar(&intervalSec, "interval", 5, "Polling interval in seconds")
 	cmd.Flags().IntVar(&timeoutSec, "timeout", 600, "Timeout in seconds")

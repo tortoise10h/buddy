@@ -84,13 +84,22 @@ func resolveWorkerForEngine(engineName, flagAgent string, cfg *config.Config) (s
 	return agentName, []string{agentName}, nil
 }
 
+func resolveActiveEngine(flagEngine string) string {
+	cfg, _ := config.LoadConfig()
+	return engine.ResolveEngine(flagEngine, os.Getenv, cfg).EngineName
+}
+
 func resolveTarget(project, task, flagSession, flagWindow, flagBlock string) (sessionID, windowID, blockID string, projName, taskSlug, engineName string, err error) {
+	return resolveTargetWithEngine(project, task, flagSession, flagWindow, flagBlock, "")
+}
+
+func resolveTargetWithEngine(project, task, flagSession, flagWindow, flagBlock, flagEngine string) (sessionID, windowID, blockID string, projName, taskSlug, engineName string, err error) {
 	sessionID = flagSession
 	windowID = flagWindow
 	blockID = flagBlock
 	projName = project
 	taskSlug = task
-	engineName = "rex"
+	engineName = resolveActiveEngine(flagEngine)
 
 	if sessionID != "" && (blockID != "" || windowID != "") {
 		return sessionID, windowID, blockID, projName, taskSlug, engineName, nil
@@ -100,7 +109,7 @@ func resolveTarget(project, task, flagSession, flagWindow, flagBlock string) (se
 		return "", "", "", "", "", "", fmt.Errorf("missing --project (-p) or explicit -s/-w/-b flags")
 	}
 
-	st, err := state.LoadState()
+	st, err := state.LoadStateForEngine(engineName)
 	if err != nil {
 		return "", "", "", "", "", "", fmt.Errorf("could not load state: %w", err)
 	}

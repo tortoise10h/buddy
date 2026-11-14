@@ -15,16 +15,17 @@ var errorIndicators = []string{
 
 func newDiagnoseCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		lines   int
+		project    string
+		task       string
+		lines      int
+		engineName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "diagnose",
 		Short: "Diagnostician helper: Analyzes full terminal log for errors and stack traces",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, _, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, "", "", "")
+			sessID, _, blkID, projName, taskSlug, engName, err := resolveTargetWithEngine(project, task, "", "", "", engineName)
 			if err != nil {
 				return err
 			}
@@ -100,6 +101,7 @@ func newDiagnoseCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&project, "project", "p", "", "Project name")
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().IntVarP(&lines, "lines", "n", 300, "Number of trailing lines to analyze")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }

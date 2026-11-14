@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/config"
@@ -82,18 +83,26 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 
-			// 2. state.json
-			statePath := state.GetStatePath()
+			// 2. state/<engine>.json
+			activeEngine := "rex"
+			if cfg, cfgErr := config.LoadConfig(); cfgErr == nil && cfg.DefaultEngine != "" {
+				activeEngine = cfg.DefaultEngine
+			}
+			if !force {
+				// Trigger one-time migration from legacy state.json if present.
+				_, _ = state.LoadStateForEngine(activeEngine)
+			}
+			statePath := state.GetStatePathForEngine(activeEngine)
 			_, err = os.Stat(statePath)
 			if os.IsNotExist(err) || force {
 				st := &state.State{
 					Version:  1,
 					Projects: make(map[string]state.ProjectState),
 				}
-				if err := state.SaveState(st); err != nil {
+				if err := state.SaveStateForEngine(activeEngine, st); err != nil {
 					return err
 				}
-				created = append(created, "state.json")
+				created = append(created, filepath.Join("state", state.NormalizeEngine(activeEngine)+".json"))
 			}
 
 			resp := map[string]any{

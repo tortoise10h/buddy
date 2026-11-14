@@ -23,7 +23,7 @@ func newProjectsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, _ := state.LoadState()
+			st, _ := state.LoadStateForEngine(resolveActiveEngine(""))
 
 			projects, err := project.ListProjects(cfg.ProjectsRoots, query, st)
 			if err != nil {

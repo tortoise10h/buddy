@@ -11,19 +11,20 @@ import (
 
 func newCaptureCmd() *cobra.Command {
 	var (
-		project string
-		task    string
-		session string
-		block   string
-		lines   int
-		raw     bool
+		project    string
+		task       string
+		session    string
+		block      string
+		lines      int
+		raw        bool
+		engineName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "capture",
 		Short: "Capture output from worker agent pane in O(1)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, _, blkID, projName, taskSlug, engName, err := resolveTarget(project, task, session, "", block)
+			sessID, _, blkID, projName, taskSlug, engName, err := resolveTargetWithEngine(project, task, session, "", block, engineName)
 			if err != nil {
 				return err
 			}
@@ -73,6 +74,7 @@ func newCaptureCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&block, "block", "b", "", "Direct block ID")
 	cmd.Flags().IntVarP(&lines, "lines", "n", 100, "Number of trailing lines to capture")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Print raw terminal output directly")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
 
 	return cmd
 }

@@ -39,14 +39,16 @@ func newContextInjectCmd() *cobra.Command {
 				cfg = config.DefaultConfig()
 			}
 
-			st, err := state.LoadState()
+			resEngine := engine.ResolveEngine("", os.Getenv, cfg)
+
+			st, err := state.LoadStateForEngine(resEngine.EngineName)
 			if err != nil {
 				fmt.Println("{}")
 				return nil
 			}
 
-			// Read .state_seen.json for diffing
-			seenPath := filepath.Join(state.GetBuddyDir(), ".state_seen.json")
+			// Read per-engine .<engine>_seen.json for diffing
+			seenPath := state.GetStateSeenPathForEngine(resEngine.EngineName)
 			stateSeen := make(map[string]seenTaskInfo)
 			if seenData, err := os.ReadFile(seenPath); err == nil {
 				_ = json.Unmarshal(seenData, &stateSeen)
@@ -99,6 +101,7 @@ func newContextInjectCmd() *cobra.Command {
 
 			// Save updated seen state asynchronously or quickly
 			if seenData, err := json.MarshalIndent(newSeen, "", "  "); err == nil {
+				_ = os.MkdirAll(filepath.Dir(seenPath), 0755)
 				_ = os.WriteFile(seenPath, seenData, 0644)
 			}
 
@@ -107,7 +110,6 @@ func newContextInjectCmd() *cobra.Command {
 				tasksStr = strings.Join(taskSummaries, "; ")
 			}
 
-			resEngine := engine.ResolveEngine("", os.Getenv, cfg)
 			var orchAgent, workerAgent string
 			if resEngine.EngineName == "t3" {
 				orchAgent = "t3 (direct)"

@@ -31,7 +31,7 @@ func newEnsureSessionCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, err := state.LoadState()
+			st, err := state.LoadStateForEngine("rex")
 			if err != nil {
 				return err
 			}
@@ -48,7 +48,7 @@ func newEnsureSessionCmd() *cobra.Command {
 			}
 
 			status := "exists"
-			err = state.MutateState(func(s *state.State) error {
+			err = state.MutateStateForEngine("rex", func(s *state.State) error {
 				if p, ok := s.Projects[projName]; ok {
 					if p.RexSessionID == "" {
 						status = "adopted"

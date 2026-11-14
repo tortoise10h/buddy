@@ -62,9 +62,17 @@ func newBatchCmd() *cobra.Command {
 			if err != nil {
 				cfg = config.DefaultConfig()
 			}
-			st, err := state.LoadState()
-			if err != nil {
-				st = &state.State{}
+			stateByEngine := make(map[string]*state.State)
+			getStateForEngine := func(engName string) *state.State {
+				if st, ok := stateByEngine[engName]; ok {
+					return st
+				}
+				st, err := state.LoadStateForEngine(engName)
+				if err != nil {
+					st = &state.State{}
+				}
+				stateByEngine[engName] = st
+				return st
 			}
 
 			var results []BatchTaskResult
@@ -81,7 +89,11 @@ func newBatchCmd() *cobra.Command {
 					continue
 				}
 
-				projName, projPath, err := project.ResolveProject(spec.Project, cfg, st)
+				resEngine := engine.ResolveEngine(spec.Engine, os.Getenv, cfg)
+				resEngine.WarnUnknownHost(os.Stderr)
+				engineName := resEngine.EngineName
+
+				projName, projPath, err := project.ResolveProject(spec.Project, cfg, getStateForEngine(engineName))
 				if err != nil {
 					results = append(results, BatchTaskResult{
 						Status:  "error",
@@ -93,10 +105,6 @@ func newBatchCmd() *cobra.Command {
 				}
 
 				slug := project.DeriveSlug(spec.Task, spec.Prompt, projName)
-
-				resEngine := engine.ResolveEngine(spec.Engine, os.Getenv, cfg)
-				resEngine.WarnUnknownHost(os.Stderr)
-				engineName := resEngine.EngineName
 
 				eng, err := getEngine(engineName)
 				if err != nil {
@@ -145,7 +153,7 @@ func newBatchCmd() *cobra.Command {
 					preview = preview[:60] + "..."
 				}
 
-				_ = state.MutateState(func(s *state.State) error {
+				_ = state.MutateStateForEngine(engineName, func(s *state.State) error {
 					var initialPrompt *string
 					if spec.Prompt != "" {
 						initialPrompt = &spec.Prompt

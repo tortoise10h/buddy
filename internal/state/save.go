@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -13,14 +14,12 @@ func nowISO() string {
 	return time.Now().Format("2006-01-02T15:04:05.999999-07:00")
 }
 
-// withLock acquires an exclusive advisory file lock on .state.lock while executing fn.
-func withLock(fn func() error) error {
-	dir := GetBuddyDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+// withLockFile acquires an exclusive advisory file lock on lockPath while executing fn.
+func withLockFile(lockPath string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
 		return err
 	}
 
-	lockPath := filepath.Join(dir, ".state.lock")
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
@@ -37,18 +36,35 @@ func withLock(fn func() error) error {
 	return fn()
 }
 
-// SaveState writes the state struct atomically to state.json under an advisory flock.
+// withEngineLock acquires an exclusive advisory file lock for the given engine's state file.
+func withEngineLock(engine string, fn func() error) error {
+	lockPath := filepath.Join(GetStateDir(), "."+NormalizeEngine(engine)+".lock")
+	return withLockFile(lockPath, fn)
+}
+
+// SaveState writes the state struct atomically to the default ("rex") state file.
 func SaveState(s *State) error {
-	return withLock(func() error {
-		return writeStateDirect(s)
+	return SaveStateForEngine("rex", s)
+}
+
+// SaveStateForEngine writes the state struct atomically to ~/.buddy/state/<engine>.json under an advisory flock.
+func SaveStateForEngine(engine string, s *State) error {
+	return withEngineLock(engine, func() error {
+		return writeStateDirectForEngine(engine, s)
 	})
 }
 
-// MutateState executes a read-modify-write cycle inside an exclusive file lock,
-// preventing concurrent processes from overwriting or corrupting state.
+// MutateState executes a read-modify-write cycle on the default ("rex") state file.
 func MutateState(fn func(s *State) error) error {
-	return withLock(func() error {
-		st, err := LoadState()
+	return MutateStateForEngine("rex", fn)
+}
+
+// MutateStateForEngine executes a read-modify-write cycle on ~/.buddy/state/<engine>.json
+// inside an exclusive file lock, preventing concurrent processes from overwriting or corrupting state.
+func MutateStateForEngine(engine string, fn func(s *State) error) error {
+	migrateLegacyStateIfNeeded()
+	return withEngineLock(engine, func() error {
+		st, err := readStateFile(GetStatePathForEngine(engine))
 		if err != nil {
 			return err
 		}
@@ -57,12 +73,12 @@ func MutateState(fn func(s *State) error) error {
 			return err
 		}
 
-		return writeStateDirect(st)
+		return writeStateDirectForEngine(engine, st)
 	})
 }
 
-func writeStateDirect(s *State) error {
-	dir := GetBuddyDir()
+func writeStateDirectForEngine(engine string, s *State) error {
+	dir := GetStateDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -81,17 +97,111 @@ func writeStateDirect(s *State) error {
 	}
 	data = append(data, '\n')
 
-	tmpPath := filepath.Join(dir, ".state.json.tmp")
+	norm := NormalizeEngine(engine)
+	tmpPath := filepath.Join(dir, "."+norm+".json.tmp")
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write tmp state file: %w", err)
 	}
 
-	finalPath := GetStatePath()
+	finalPath := GetStatePathForEngine(norm)
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return fmt.Errorf("failed to commit state file: %w", err)
 	}
 
 	return nil
+}
+
+// migrateLegacyStateIfNeeded splits a legacy ~/.buddy/state.json into ~/.buddy/state/<engine>.json
+// files and renames the legacy file to state.json.bak.
+func migrateLegacyStateIfNeeded() {
+	legacyPath := GetLegacyStatePath()
+	if _, err := os.Stat(legacyPath); err != nil {
+		return
+	}
+
+	lockPath := filepath.Join(GetBuddyDir(), ".migrate.lock")
+	_ = withLockFile(lockPath, func() error {
+		if _, err := os.Stat(legacyPath); err != nil {
+			return nil
+		}
+
+		legacy, err := readStateFile(legacyPath)
+		if err != nil {
+			return nil
+		}
+
+		partitioned := make(map[string]*State)
+		ensureEngineState := func(eng string) *State {
+			norm := NormalizeEngine(eng)
+			if es, ok := partitioned[norm]; ok {
+				return es
+			}
+			es := &State{
+				Version:        legacy.Version,
+				BuddySessionID: legacy.BuddySessionID,
+				UpdatedAt:      legacy.UpdatedAt,
+				Projects:       make(map[string]ProjectState),
+			}
+			if es.Version == 0 {
+				es.Version = 1
+			}
+			partitioned[norm] = es
+			return es
+		}
+
+		for pName, pData := range legacy.Projects {
+			if len(pData.Tasks) == 0 {
+				if pData.RexSessionID != "" {
+					es := ensureEngineState("rex")
+					pCopy := pData
+					pCopy.Tasks = make(map[string]TaskState)
+					es.Projects[pName] = pCopy
+				}
+				continue
+			}
+
+			tasksByEngine := make(map[string]map[string]TaskState)
+			for tSlug, tData := range pData.Tasks {
+				eng := NormalizeEngine(tData.GetEngine())
+				if tasksByEngine[eng] == nil {
+					tasksByEngine[eng] = make(map[string]TaskState)
+				}
+				tasksByEngine[eng][tSlug] = tData
+			}
+
+			for eng, tasks := range tasksByEngine {
+				es := ensureEngineState(eng)
+				pCopy := pData
+				pCopy.Tasks = tasks
+				if eng != "rex" && strings.HasPrefix(pCopy.RexSessionID, "session:") {
+					pCopy.RexSessionID = ""
+					pCopy.RexSessionLabel = ""
+				}
+				es.Projects[pName] = pCopy
+			}
+		}
+
+		for eng, es := range partitioned {
+			targetPath := GetStatePathForEngine(eng)
+			if _, statErr := os.Stat(targetPath); os.IsNotExist(statErr) {
+				if err := writeStateDirectForEngine(eng, es); err != nil {
+					return err
+				}
+			}
+		}
+
+		legacySeen := filepath.Join(GetBuddyDir(), ".state_seen.json")
+		rexSeen := GetStateSeenPathForEngine("rex")
+		if _, err := os.Stat(legacySeen); err == nil {
+			if _, err := os.Stat(rexSeen); os.IsNotExist(err) {
+				if err := os.MkdirAll(GetStateDir(), 0755); err == nil {
+					_ = os.Rename(legacySeen, rexSeen)
+				}
+			}
+		}
+
+		return os.Rename(legacyPath, legacyPath+".bak")
+	})
 }
 
 // RecordTask atomically inserts or updates a task under a project in state.
