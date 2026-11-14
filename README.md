@@ -220,10 +220,10 @@ Use `buddy --help` (or `-h`) to inspect launcher options, supported agents, and 
 Run `buddy-ctl --help` for top-level command usage or `buddy-ctl <subcommand> --help` for command-specific flags. Any unknown options or invalid subcommands print an error and the full help message to stderr and exit with code 2.
 
 ```sh
-# View tracked projects and tasks from cache (O(1))
+# View tracked projects, tasks, and untracked live tabs (auto-reconciles if Rex cache >45s old)
 buddy-ctl status
 
-# Reconcile cache against live Rex sessions
+# Force an immediate deep reconcile against live Rex panes and discover untracked tabs
 buddy-ctl status --sync
 
 # List available projects across all configured project roots
@@ -235,11 +235,15 @@ buddy-ctl projects roots
 buddy-ctl projects add-root ~/Dev/Work/repos
 buddy-ctl projects remove-root ~/Dev/Work/repos
 
-# Fast-path atomic dispatch (auto-slug, spawn, prompt, verify in 1 shot)
-buddy-ctl dispatch --project docnotate --prompt "Add shortcut to resolve comments" [--task inline-comments]
+# Fast-path atomic dispatch (auto-slug, spawn, prompt, verify pickup in 1 shot)
+# Note: Include any planning requirements directly inside --prompt.
+buddy-ctl dispatch --project docnotate --prompt "First draft a plan, then add shortcut to resolve comments" [--task inline-comments] [--force]
+
+# Adopt an untracked tab that you opened manually in Rex so Buddy can track and message it
+buddy-ctl task adopt --project docnotate --window manual-refactor [--task manual-refactor]
 
 # Start a new task tab with worker agent (agy by default)
-buddy-ctl task start --project docnotate --task inline-comments --plan-first --prompt "Add shortcut to resolve comments"
+buddy-ctl task start --project docnotate --task inline-comments --prompt "Add shortcut to resolve comments"
 
 # Start with a specific worker agent (pi or opencode)
 buddy-ctl task start --project daily-catch --task sync-engine --agent pi --prompt "Fix sync timeout"
@@ -247,14 +251,16 @@ buddy-ctl task start --project daily-catch --task sync-engine --agent pi --promp
 # Inspect worker terminal output (O(1))
 buddy-ctl capture --project docnotate --task inline-comments
 
-# Relay user input or answer questions to worker agent
+# Relay user input or answer questions to worker agent (transitions task back to running)
 buddy-ctl send --project docnotate --task inline-comments --text "Use Cmd+Shift+E"
 
 # Focus task in Rex and launch dev server split
 buddy-ctl demo --project docnotate --task inline-comments --cmd "npm run dev"
 
-# Watchdog: Wait asynchronously until worker asks a question or finishes
+# Situational Watchdog: Monitor a single task, all active tasks in one project, or all projects
 buddy-ctl watch --project docnotate --task inline-comments --interval 5 --timeout 600
+buddy-ctl watch --project docnotate --interval 5 --timeout 600
+buddy-ctl watch --all --interval 5 --timeout 600
 
 # Diagnostician: Extract error snippets and failure analysis from worker pane
 buddy-ctl diagnose --project docnotate --task inline-comments --lines 300
