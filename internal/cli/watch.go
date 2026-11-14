@@ -359,6 +359,9 @@ func evalProgramStatus(records []backend.ProgramStatusRecord, sawWorking bool, u
 		return fallback
 	}
 
+	// Scan in priority order (blocked > working > error > done) rather than a single
+	// pass so a block with multiple concurrent records (e.g. parent + child tool)
+	// never lets slice order override a higher-priority state.
 	for _, r := range records {
 		if r.State == "blocked" {
 			if untilSet["input"] || untilSet["any"] {
