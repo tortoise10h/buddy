@@ -239,6 +239,12 @@ func (s *State) RecordTask(projectName, projectPath, sessionID, sessionLabel str
 		task.CreatedAt = now
 	}
 	task.UpdatedAt = now
+	if task.LastVerifiedAt == "" {
+		task.LastVerifiedAt = now
+	}
+	if task.Origin == "" {
+		task.Origin = "buddy"
+	}
 	if task.Status == "" {
 		task.Status = "running"
 	}
@@ -268,9 +274,31 @@ func (s *State) UpdateTask(projectName, taskSlug, status, summary string) error 
 	if summary != "" {
 		task.LastSummary = summary
 	}
-	task.UpdatedAt = nowISO()
+	now := nowISO()
+	task.UpdatedAt = now
+	task.LastVerifiedAt = now
 
 	proj.Tasks[task.TaskSlug] = *task
 	s.Projects[proj.Name] = *proj
 	return nil
+}
+
+// NowISO returns the current timestamp in ISO-8601 format.
+func NowISO() string {
+	return nowISO()
+}
+
+// IsFreshWithin returns true if the given ISO timestamp is non-empty and within ttl of now.
+func IsFreshWithin(isoTimestamp string, ttl time.Duration) bool {
+	if strings.TrimSpace(isoTimestamp) == "" || ttl <= 0 {
+		return false
+	}
+	t, err := time.Parse("2006-01-02T15:04:05.999999-07:00", isoTimestamp)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, isoTimestamp)
+		if err != nil {
+			return false
+		}
+	}
+	return time.Since(t) <= ttl
 }

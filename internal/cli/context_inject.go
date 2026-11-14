@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -40,6 +41,9 @@ func newContextInjectCmd() *cobra.Command {
 			}
 
 			resEngine := engine.ResolveEngine("", os.Getenv, cfg)
+			if resEngine.EngineName == "rex" {
+				reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
+			}
 
 			st, err := state.LoadStateForEngine(resEngine.EngineName)
 			if err != nil {
@@ -59,24 +63,35 @@ func newContextInjectCmd() *cobra.Command {
 				newSeen[k] = v
 			}
 
-			var taskSummaries []string
-			var nudges []string
+			projNames := make([]string, 0, len(st.Projects))
+			for pName := range st.Projects {
+				projNames = append(projNames, pName)
+			}
+			sort.Strings(projNames)
 
-			for pName, pData := range st.Projects {
-				for tName, tData := range pData.Tasks {
+			var taskSummaries []string
+			var untrackedSummaries []string
+			var nudges []string
+			activeProjectsCount := 0
+
+			for _, pName := range projNames {
+				pData := st.Projects[pName]
+				taskNames := make([]string, 0, len(pData.Tasks))
+				for tName := range pData.Tasks {
+					taskNames = append(taskNames, tName)
+				}
+				sort.Strings(taskNames)
+
+				projHasLive := len(pData.UntrackedWindows) > 0
+				for _, tName := range taskNames {
+					tData := pData.Tasks[tName]
 					tKey := fmt.Sprintf("%s/%s", pName, tName)
-					agent := tData.Agent
-					if agent == "" {
-						agent = "agy"
-					}
 					status := tData.Status
 					if status == "" {
 						status = "unknown"
 					}
-					summary := tData.LastSummary
+					summary := cleanTaskSummary(tData)
 					updated := tData.UpdatedAt
-
-					taskSummaries = append(taskSummaries, fmt.Sprintf("%s (%s, %s: '%s')", tKey, agent, status, summary))
 
 					prevSeen, exists := stateSeen[tKey]
 					if status == "waiting_for_input" || status == "ready_for_demo" || status == "error" {
@@ -96,10 +111,34 @@ func newContextInjectCmd() *cobra.Command {
 						Status:    status,
 						UpdatedAt: updated,
 					}
+
+					// Filter out dead/completed tasks from active task list
+					if !isLiveOpenTaskStatus(status) {
+						continue
+					}
+					projHasLive = true
+
+					agent := tData.Agent
+					if agent == "" {
+						agent = "agy"
+					}
+					staleTag := ""
+					if tData.LastVerifiedAt != "" && !state.IsFreshWithin(tData.LastVerifiedAt, defaultSyncTTL) {
+						staleTag = ", stale"
+					}
+					taskSummaries = append(taskSummaries, fmt.Sprintf("%s (%s, %s%s: '%s')", tKey, agent, status, staleTag, summary))
+				}
+
+				for _, uw := range pData.UntrackedWindows {
+					untrackedSummaries = append(untrackedSummaries, fmt.Sprintf("%s/%s [window=%s, %s: '%s']", pName, uw.Label, uw.WindowID, uw.DetectedStatus, uw.Summary))
+				}
+
+				if projHasLive {
+					activeProjectsCount++
 				}
 			}
 
-			// Save updated seen state asynchronously or quickly
+			// Save updated seen state quickly
 			if seenData, err := json.MarshalIndent(newSeen, "", "  "); err == nil {
 				_ = os.MkdirAll(filepath.Dir(seenPath), 0755)
 				_ = os.WriteFile(seenPath, seenData, 0644)
@@ -108,6 +147,17 @@ func newContextInjectCmd() *cobra.Command {
 			tasksStr := "None active"
 			if len(taskSummaries) > 0 {
 				tasksStr = strings.Join(taskSummaries, "; ")
+			}
+
+			untrackedSegment := ""
+			if len(untrackedSummaries) > 0 {
+				untrackedSegment = fmt.Sprintf(" | Untracked live tabs: %s (use 'buddy-ctl task adopt -p <proj> -w <window>' to adopt)", strings.Join(untrackedSummaries, "; "))
+			}
+
+			recWatch := computeRecommendedWatch(st)
+			watchSegment := ""
+			if recWatch != "" {
+				watchSegment = fmt.Sprintf(" | Situational Watchdog: '%s'", recWatch)
 			}
 
 			var orchAgent, workerAgent string
@@ -129,8 +179,8 @@ func newContextInjectCmd() *cobra.Command {
 				nudgeBanner = fmt.Sprintf("\n\n[🚨 BUDDY PROACTIVE NUDGE] State transitions requiring immediate attention:\n%s\nACTION REQUIRED: Prioritize notifying the user about these worker milestones/questions before addressing other requests!", strings.Join(nudges, "\n"))
 			}
 
-			ephemeralText := fmt.Sprintf("[Buddy Live State] Orchestrator: %s | Worker: %s | Active projects: %d | Tasks: %s. 🚨 ZERO-TOLERANCE GUARDRAIL (RULE #1): NEVER edit project files, docs, or code in this session. Even for minor edits, typos, or READMEs, ALWAYS dispatch a task tab via 'buddy-ctl dispatch'.%s",
-				orchAgent, workerAgent, len(st.Projects), tasksStr, nudgeBanner)
+			ephemeralText := fmt.Sprintf("[Buddy Live State] Orchestrator: %s | Worker: %s | Active projects: %d | Open tasks: %s%s%s. 🚨 GUARDRAILS: (1) NEVER edit project files directly in ~/.buddy/. (2) 3-Tier Tab Triage: reuse via 'send' ONLY on strong/unambiguous match; if related but uncertain, list candidate slug/status/summary and ASK the user; if distinct, 'dispatch'.%s",
+				orchAgent, workerAgent, activeProjectsCount, tasksStr, untrackedSegment, watchSegment, nudgeBanner)
 
 			out := map[string]any{
 				"injectSteps": []map[string]any{

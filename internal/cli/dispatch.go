@@ -19,6 +19,7 @@ func newDispatchCmd() *cobra.Command {
 		prompt      string
 		agentName   string
 		engineName  string
+		force       bool
 	)
 
 	cmd := &cobra.Command{
@@ -46,6 +47,10 @@ func newDispatchCmd() *cobra.Command {
 				return err
 			}
 
+			if engineName == "rex" {
+				reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
+			}
+
 			st, err := state.LoadStateForEngine(engineName)
 			if err != nil {
 				return err
@@ -60,13 +65,20 @@ func newDispatchCmd() *cobra.Command {
 			// 3. Resolve task slug
 			slug := project.DeriveSlug(taskSlug, prompt, projName)
 
-			// 4. Resolve worker agent / model for target engine
+			// 4. Candidate collision guard (unless --force is passed)
+			if !force {
+				if candidates := findCandidateCollisions(st, projName, slug, prompt); len(candidates) > 0 {
+					return formatCandidateCollisionError(projName, slug, candidates)
+				}
+			}
+
+			// 5. Resolve worker agent / model for target engine
 			agentName, agentCmd, err := resolveWorkerForEngine(engineName, agentName, cfg)
 			if err != nil {
 				return err
 			}
 
-			// 5. Dispatch via engine
+			// 6. Dispatch via engine
 			res, err := eng.Dispatch(cmd.Context(), engine.DispatchRequest{
 				ProjectName: projName,
 				ProjectPath: projPath,
@@ -78,12 +90,13 @@ func newDispatchCmd() *cobra.Command {
 				return err
 			}
 
-			// 6. Atomically record in engine-specific state
+			// 7. Atomically record in engine-specific state
 			preview := prompt
 			if len(preview) > 60 {
 				preview = preview[:60] + "..."
 			}
 
+			var updatedState *state.State
 			err = state.MutateStateForEngine(engineName, func(s *state.State) error {
 				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
 					TaskSlug:      slug,
@@ -94,26 +107,36 @@ func newDispatchCmd() *cobra.Command {
 					Agent:         agentName,
 					Cwd:           projPath,
 					Status:        "running",
+					Origin:        "buddy",
 					InitialPrompt: &prompt,
 					LastSummary:   preview,
 				})
+				updatedState = s
 				return nil
 			})
 			if err != nil {
 				return fmt.Errorf("failed to record task in state: %w", err)
 			}
 
+			recWatch := computeRecommendedWatch(updatedState)
+			activeInProj := collectActiveTasksInProject(updatedState, projName)
+
 			resp := map[string]any{
-				"status":         "dispatched",
-				"project":        projName,
-				"task":           slug,
-				"picked_up":      res.PickedUp,
-				"preview":        preview,
-				"window_id":      res.WindowID,
-				"agent_block_id": res.BlockID,
-				"agent":          agentName,
+				"status":                  "dispatched",
+				"project":                 projName,
+				"task":                    slug,
+				"picked_up":               res.PickedUp,
+				"preview":                 preview,
+				"window_id":               res.WindowID,
+				"agent_block_id":          res.BlockID,
+				"agent":                   agentName,
+				"active_tasks_in_project": activeInProj,
+				"recommended_watch":       recWatch,
 			}
-			enc := json.NewEncoder(os.Stdout)
+			if res.PickupReason != "" {
+				resp["pickup_reason"] = res.PickupReason
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(resp)
 		},
@@ -124,6 +147,7 @@ func newDispatchCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
 	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch (agy, pi, opencode, etc.)")
 	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().BoolVar(&force, "force", false, "Bypass candidate duplicate guard and start a new task tab")
 
 	return cmd
 }

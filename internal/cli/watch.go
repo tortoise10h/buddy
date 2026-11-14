@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/backend"
-	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
@@ -43,7 +43,7 @@ var (
 
 	// syncRexFn is injectable for testing to reconcile state with live Rex sessions.
 	syncRexFn = func(ctx context.Context) error {
-		return reconcileRexWithBackend(ctx, rex.NewRexBackend())
+		return reconcileRexWithBackend(ctx, defaultRexBackend())
 	}
 )
 
@@ -105,12 +105,24 @@ func isChromeLine(line string) bool {
 	lower := strings.ToLower(trimmed)
 	if strings.Contains(lower, "? for shortcuts") ||
 		strings.Contains(lower, "esc to cancel") ||
+		strings.Contains(lower, "esc to dismiss") ||
+		strings.Contains(lower, "press enter to dismiss") ||
 		strings.Contains(lower, "ctrl+o to expand") ||
 		strings.HasPrefix(lower, "tip:") ||
 		strings.Contains(lower, "tip: use /diff") ||
 		strings.HasPrefix(lower, "auto ·") ||
 		strings.HasPrefix(lower, "auto •") ||
-		strings.Contains(lower, "auto ·") {
+		strings.Contains(lower, "auto ·") ||
+		strings.HasPrefix(lower, "auto mode:") ||
+		strings.Contains(lower, "edits & safe commands auto-approved") ||
+		strings.Contains(lower, "safe commands auto-approved") ||
+		strings.HasPrefix(lower, "welcome to antigravity") ||
+		strings.HasPrefix(lower, "welcome to opencode") ||
+		strings.HasPrefix(lower, "welcome to claude") ||
+		strings.HasPrefix(lower, "antigravity v") ||
+		strings.HasPrefix(lower, "opencode v") ||
+		strings.Contains(lower, "type a message") ||
+		strings.Contains(lower, "ask anything") {
 		return true
 	}
 	if isPureGlyphs(trimmed) {
@@ -470,9 +482,13 @@ func (w *watchRunner) run() error {
 		_ = syncRexFn(w.cmd.Context())
 	}
 
-	if !w.watchAll {
+	if !w.watchAll && w.taskSlug != "" {
 		handled, err := w.preflightSingleTarget()
 		if err != nil || handled {
+			return err
+		}
+	} else if !w.watchAll && w.projectName != "" {
+		if err := w.preflightProjectTargets(); err != nil {
 			return err
 		}
 	}
@@ -522,6 +538,15 @@ func (w *watchRunner) run() error {
 	}
 
 	return w.emitTimeout()
+}
+
+func (w *watchRunner) preflightProjectTargets() error {
+	st, err := state.LoadStateForEngine(w.engineName)
+	if err != nil {
+		return fmt.Errorf("could not load state: %w", err)
+	}
+	_, err = st.FindProject(w.projectName)
+	return err
 }
 
 func (w *watchRunner) snapshotInitiallyActive() {
@@ -594,7 +619,7 @@ func (w *watchRunner) preflightSingleTarget() (bool, error) {
 }
 
 func (w *watchRunner) collectTargets(st *state.State) ([]watchTarget, *watchEvent, error) {
-	if !w.watchAll {
+	if !w.watchAll && w.taskSlug != "" {
 		p, err := st.FindProject(w.projectName)
 		if err != nil {
 			return nil, nil, err
@@ -613,9 +638,60 @@ func (w *watchRunner) collectTargets(st *state.State) ([]watchTarget, *watchEven
 		}}, nil, nil
 	}
 
+	if !w.watchAll && w.projectName != "" {
+		p, err := st.FindProject(w.projectName)
+		if err != nil {
+			return nil, nil, err
+		}
+		tNames := make([]string, 0, len(p.Tasks))
+		for tName := range p.Tasks {
+			tNames = append(tNames, tName)
+		}
+		sort.Strings(tNames)
+
+		var targets []watchTarget
+		for _, tName := range tNames {
+			tData := p.Tasks[tName]
+			key := p.Name + "/" + tName
+			if tData.Status == "missing" && w.initiallyActive[key] && (w.untilSet["missing"] || w.untilSet["any"]) {
+				return nil, &watchEvent{
+					event:   "missing",
+					project: p.Name,
+					task:    tName,
+					summary: tData.LastSummary,
+				}, nil
+			}
+			if isWatchableStatus(tData.Status) && tData.AgentBlockID != "" {
+				targets = append(targets, watchTarget{
+					project:   p.Name,
+					task:      tName,
+					sessionID: p.RexSessionID,
+					blockID:   tData.AgentBlockID,
+					engine:    tData.GetEngine(),
+					status:    tData.Status,
+				})
+			}
+		}
+		return targets, nil, nil
+	}
+
+	pNames := make([]string, 0, len(st.Projects))
+	for pName := range st.Projects {
+		pNames = append(pNames, pName)
+	}
+	sort.Strings(pNames)
+
 	var targets []watchTarget
-	for pName, pData := range st.Projects {
-		for tName, tData := range pData.Tasks {
+	for _, pName := range pNames {
+		pData := st.Projects[pName]
+		tNames := make([]string, 0, len(pData.Tasks))
+		for tName := range pData.Tasks {
+			tNames = append(tNames, tName)
+		}
+		sort.Strings(tNames)
+
+		for _, tName := range tNames {
+			tData := pData.Tasks[tName]
 			key := pName + "/" + tName
 			if tData.Status == "missing" && w.initiallyActive[key] && (w.untilSet["missing"] || w.untilSet["any"]) {
 				return nil, &watchEvent{
@@ -679,9 +755,10 @@ func (w *watchRunner) probeTarget(eng engine.Engine, target watchTarget) (workin
 }
 
 func (w *watchRunner) pollTarget(target watchTarget) (*watchEvent, error) {
+	isSingleTask := !w.watchAll && w.taskSlug != ""
 	eng, err := getEngine(target.engine)
 	if err != nil {
-		if !w.watchAll {
+		if isSingleTask {
 			return nil, err
 		}
 		return nil, nil
@@ -689,7 +766,7 @@ func (w *watchRunner) pollTarget(target watchTarget) (*watchEvent, error) {
 
 	working, matchedEvent, summary, snapshot, err := w.probeTarget(eng, target)
 	if err != nil {
-		if !w.watchAll {
+		if isSingleTask {
 			return nil, fmt.Errorf("failed to capture terminal output: %w", err)
 		}
 		return nil, nil
@@ -797,8 +874,8 @@ func newWatchCmd() *cobra.Command {
 		Long: `Watchdog monitor: Polls worker agent pane(s) until input needed, finished, or error.
 Filters TUI chrome and verifies event stability across debounced polls before reporting.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !watchAll && (projectName == "" || taskSlug == "") {
-				return fmt.Errorf("provide --project and --task, or use --all to monitor all active tasks")
+			if !watchAll && projectName == "" {
+				return fmt.Errorf("provide --project (optionally with --task), or use --all to monitor all active tasks")
 			}
 			runner := newWatchRunner(cmd, projectName, taskSlug, watchAll, intervalSec, timeoutSec, debounceCount, untilEvents, notifyEnabled)
 			runner.engineName = resolveActiveEngine(engineName)

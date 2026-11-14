@@ -3,10 +3,10 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/state"
 )
 
 func newSendCmd() *cobra.Command {
@@ -52,6 +52,23 @@ func newSendCmd() *cobra.Command {
 				sentKey = "enter"
 			}
 
+			var recWatch string
+			if text != "" && projName != "" && taskSlug != "" {
+				var updatedState *state.State
+				_ = state.MutateStateForEngine(engName, func(s *state.State) error {
+					if p, pErr := s.FindProject(projName); pErr == nil {
+						if t, tErr := p.FindTask(taskSlug); tErr == nil {
+							if t.Status == "waiting_for_input" || t.Status == "ready_for_demo" {
+								_ = s.UpdateTask(projName, taskSlug, "running", "")
+							}
+						}
+					}
+					updatedState = s
+					return nil
+				})
+				recWatch = computeRecommendedWatch(updatedState)
+			}
+
 			resp := map[string]any{
 				"status":    "ok",
 				"project":   projName,
@@ -59,7 +76,10 @@ func newSendCmd() *cobra.Command {
 				"sent_text": text != "",
 				"sent_key":  sentKey,
 			}
-			enc := json.NewEncoder(os.Stdout)
+			if recWatch != "" {
+				resp["recommended_watch"] = recWatch
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(resp)
 		},

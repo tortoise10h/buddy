@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -16,9 +17,46 @@ var rootCmd = &cobra.Command{
 	Use:   "buddy-ctl",
 	Short: "Controller CLI for Buddy, the multi-project Rex terminal orchestrator.",
 	Long:  "Controller CLI for Buddy, the multi-project Rex terminal orchestrator.",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		cmd.Flags().VisitAll(func(f *pflag.Flag) {
+			if !f.Changed {
+				_ = f.Value.Set(f.DefValue)
+			}
+		})
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
+}
+
+func resetCommandTreeFlags(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	})
+	cmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	})
+	for _, sub := range cmd.Commands() {
+		resetCommandTreeFlags(sub)
+	}
+}
+
+func wrapSubcommandsResetFlags(cmd *cobra.Command) {
+	if cmd.RunE != nil {
+		origRunE := cmd.RunE
+		cmd.RunE = func(c *cobra.Command, args []string) error {
+			defer resetCommandTreeFlags(rootCmd)
+			return origRunE(c, args)
+		}
+	}
+	for _, sub := range cmd.Commands() {
+		wrapSubcommandsResetFlags(sub)
+	}
 }
 
 func Execute() error {
@@ -47,4 +85,6 @@ func init() {
 	rootCmd.AddCommand(newEngineCmd())
 	rootCmd.AddCommand(newBatchCmd())
 	rootCmd.AddCommand(newContextInjectCmd())
+
+	wrapSubcommandsResetFlags(rootCmd)
 }

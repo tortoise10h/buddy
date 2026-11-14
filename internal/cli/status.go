@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
@@ -18,6 +17,7 @@ func newStatusCmd() *cobra.Command {
 		formatStr   string
 		projectName string
 		syncLive    bool
+		noSync      bool
 		flagEngine  string
 		allEngines  bool
 	)
@@ -29,8 +29,12 @@ func newStatusCmd() *cobra.Command {
 			cfg, _ := config.LoadConfig()
 			res := engine.ResolveEngine(flagEngine, os.Getenv, cfg)
 
-			if syncLive && (allEngines || res.EngineName == "rex") {
-				_ = reconcileRexWithBackend(cmd.Context(), rex.NewRexBackend())
+			if !noSync && (allEngines || res.EngineName == "rex") {
+				if syncLive {
+					_ = reconcileRexWithBackend(cmd.Context(), defaultRexBackend())
+				} else {
+					reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
+				}
 			}
 
 			var st *state.State
@@ -110,6 +114,7 @@ func newStatusCmd() *cobra.Command {
 					"host":             hostBlock,
 					"buddy_session_id": st.BuddySessionID,
 					"updated_at":       st.UpdatedAt,
+					"last_synced_at":   st.LastSyncedAt,
 					"projects":         projects,
 				}
 				enc := json.NewEncoder(os.Stdout)
@@ -121,7 +126,7 @@ func newStatusCmd() *cobra.Command {
 				fmt.Printf("Host: %s | Engine: %s (source: %s)\n", res.HostInfo.Kind, res.EngineName, res.Source)
 				var lines []string
 				for pName, pData := range projects {
-					if len(pData.Tasks) == 0 {
+					if len(pData.Tasks) == 0 && len(pData.UntrackedWindows) == 0 {
 						lines = append(lines, fmt.Sprintf("%s: No active tasks (session: %s)", pName, pData.RexSessionID))
 						continue
 					}
@@ -131,6 +136,9 @@ func newStatusCmd() *cobra.Command {
 							agent = "agy"
 						}
 						lines = append(lines, fmt.Sprintf("• %s/%s [%s | %s]: %s", pName, tSlug, agent, tData.Status, tData.LastSummary))
+					}
+					for _, uw := range pData.UntrackedWindows {
+						lines = append(lines, fmt.Sprintf("• %s/%s [untracked | %s]: %s (window: %s)", pName, uw.Label, uw.DetectedStatus, uw.Summary, uw.WindowID))
 					}
 				}
 				if len(lines) == 0 {
@@ -146,7 +154,7 @@ func newStatusCmd() *cobra.Command {
 			fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", "PROJECT", "TASK", "AGENT", "ENGINE", "STATUS", "SUMMARY")
 			fmt.Println(strings.Repeat("-", 80))
 			for pName, pData := range projects {
-				if len(pData.Tasks) == 0 {
+				if len(pData.Tasks) == 0 && len(pData.UntrackedWindows) == 0 {
 					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, "(none)", "-", "-", "idle", "Rex session: "+pData.RexSessionID)
 					continue
 				}
@@ -162,6 +170,13 @@ func newStatusCmd() *cobra.Command {
 					}
 					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, tSlug, agent, eng, tData.Status, summary)
 				}
+				for _, uw := range pData.UntrackedWindows {
+					summary := uw.Summary
+					if len(summary) > 40 {
+						summary = summary[:40] + "..."
+					}
+					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, uw.Label, "user", "rex", "untracked:"+uw.DetectedStatus, summary)
+				}
 			}
 			return nil
 		},
@@ -170,6 +185,7 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&formatStr, "format", "f", "json", "Output format: json, brief, table")
 	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Filter by project name")
 	cmd.Flags().BoolVar(&syncLive, "sync", false, "Reconcile cache with live Rex sessions and windows")
+	cmd.Flags().BoolVar(&noSync, "no-sync", false, "Skip automatic TTL reconciliation")
 	cmd.Flags().StringVar(&flagEngine, "engine", "", "Execution engine (rex, t3, wezterm)")
 	cmd.Flags().BoolVar(&allEngines, "all-engines", false, "Show state across all engines")
 

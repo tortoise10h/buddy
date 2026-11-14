@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/config"
@@ -27,6 +28,7 @@ type BatchTaskResult struct {
 	WindowID     string `json:"window_id,omitempty"`
 	AgentBlockID string `json:"agent_block_id,omitempty"`
 	PickedUp     bool   `json:"picked_up,omitempty"`
+	PickupReason string `json:"pickup_reason,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
 
@@ -153,6 +155,7 @@ func newBatchCmd() *cobra.Command {
 					preview = preview[:60] + "..."
 				}
 
+				var updatedState *state.State
 				_ = state.MutateStateForEngine(engineName, func(s *state.State) error {
 					var initialPrompt *string
 					if spec.Prompt != "" {
@@ -167,11 +170,16 @@ func newBatchCmd() *cobra.Command {
 						Agent:         agentName,
 						Cwd:           projPath,
 						Status:        "running",
+						Origin:        "buddy",
 						InitialPrompt: initialPrompt,
 						LastSummary:   preview,
 					})
+					updatedState = s
 					return nil
 				})
+				if updatedState != nil {
+					stateByEngine[engineName] = updatedState
+				}
 
 				results = append(results, BatchTaskResult{
 					Status:       "dispatched",
@@ -180,15 +188,27 @@ func newBatchCmd() *cobra.Command {
 					WindowID:     res.WindowID,
 					AgentBlockID: res.BlockID,
 					PickedUp:     res.PickedUp,
+					PickupReason: res.PickupReason,
 				})
 				successCount++
 			}
 
+			var recWatch string
+			for _, st := range stateByEngine {
+				if rw := computeRecommendedWatch(st); rw != "" {
+					recWatch = rw
+					if strings.Contains(rw, "--all") {
+						break
+					}
+				}
+			}
+
 			resp := map[string]any{
-				"status":           "ok",
-				"dispatched_count": successCount,
-				"failed_count":     failCount,
-				"results":          results,
+				"status":            "ok",
+				"dispatched_count":  successCount,
+				"failed_count":      failCount,
+				"results":           results,
+				"recommended_watch": recWatch,
 			}
 
 			enc := json.NewEncoder(cmd.OutOrStdout())

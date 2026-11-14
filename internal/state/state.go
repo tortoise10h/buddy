@@ -10,21 +10,23 @@ import (
 )
 
 type TaskState struct {
-	TaskSlug      string  `json:"task_slug"`
-	Engine        string  `json:"engine,omitempty"`
-	WindowID      string  `json:"window_id"`
-	WindowLabel   string  `json:"window_label"`
-	AgentBlockID  string  `json:"agent_block_id"`
-	DevBlockID    *string `json:"dev_block_id,omitempty"`
-	Agent         string  `json:"agent,omitempty"`
-	Cwd           string  `json:"cwd,omitempty"`
-	WorktreePath  *string `json:"worktree_path,omitempty"`
-	Branch        *string `json:"branch,omitempty"`
-	Status        string  `json:"status"`
-	InitialPrompt *string `json:"initial_prompt,omitempty"`
-	LastSummary   string  `json:"last_summary,omitempty"`
-	CreatedAt     string  `json:"created_at,omitempty"`
-	UpdatedAt     string  `json:"updated_at,omitempty"`
+	TaskSlug       string  `json:"task_slug"`
+	Engine         string  `json:"engine,omitempty"`
+	WindowID       string  `json:"window_id"`
+	WindowLabel    string  `json:"window_label"`
+	AgentBlockID   string  `json:"agent_block_id"`
+	DevBlockID     *string `json:"dev_block_id,omitempty"`
+	Agent          string  `json:"agent,omitempty"`
+	Cwd            string  `json:"cwd,omitempty"`
+	WorktreePath   *string `json:"worktree_path,omitempty"`
+	Branch         *string `json:"branch,omitempty"`
+	Status         string  `json:"status"`
+	Origin         string  `json:"origin,omitempty"`
+	InitialPrompt  *string `json:"initial_prompt,omitempty"`
+	LastSummary    string  `json:"last_summary,omitempty"`
+	CreatedAt      string  `json:"created_at,omitempty"`
+	UpdatedAt      string  `json:"updated_at,omitempty"`
+	LastVerifiedAt string  `json:"last_verified_at,omitempty"`
 }
 
 func (t *TaskState) GetEngine() string {
@@ -34,18 +36,28 @@ func (t *TaskState) GetEngine() string {
 	return "rex"
 }
 
+type UntrackedWindow struct {
+	WindowID       string `json:"window_id"`
+	Label          string `json:"label"`
+	BlockID        string `json:"block_id,omitempty"`
+	DetectedStatus string `json:"detected_status,omitempty"`
+	Summary        string `json:"summary,omitempty"`
+}
+
 type ProjectState struct {
-	Name            string               `json:"name"`
-	ProjectPath     string               `json:"project_path"`
-	RexSessionID    string               `json:"rex_session_id"`
-	RexSessionLabel string               `json:"rex_session_label"`
-	Tasks           map[string]TaskState `json:"tasks"`
+	Name             string               `json:"name"`
+	ProjectPath      string               `json:"project_path"`
+	RexSessionID     string               `json:"rex_session_id"`
+	RexSessionLabel  string               `json:"rex_session_label"`
+	Tasks            map[string]TaskState `json:"tasks"`
+	UntrackedWindows []UntrackedWindow    `json:"untracked_windows,omitempty"`
 }
 
 type State struct {
 	Version        int                     `json:"version"`
 	BuddySessionID string                  `json:"buddy_session_id"`
 	UpdatedAt      string                  `json:"updated_at"`
+	LastSyncedAt   string                  `json:"last_synced_at,omitempty"`
 	Projects       map[string]ProjectState `json:"projects"`
 }
 
