@@ -139,12 +139,12 @@ func formatThreadShowOutput(out *t3.ThreadShowOutput, lines int) string {
 	return strings.Join(allLines[len(allLines)-lines:], "\n")
 }
 
+// Close detaches the thread from Buddy tracking without modifying T3.
+// T3 has no server-side close; Buddy marks the task closed and stops tracking the thread.
+// Returning nil keeps close idempotent and offline-friendly so local state cleanup
+// succeeds even when the t3 daemon is unavailable or the thread ID is empty/unknown.
 func (e *T3Engine) Close(ctx context.Context, sessionID, windowID string) error {
-	return &ErrNotImplemented{
-		Engine:    "t3",
-		Operation: "close",
-		Message:   "t3 engine close is not yet implemented.",
-	}
+	return nil
 }
 
 func (e *T3Engine) Focus(ctx context.Context, sessionID, windowID string) error {

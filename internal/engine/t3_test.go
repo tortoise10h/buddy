@@ -247,3 +247,42 @@ func TestT3Engine_Capture(t *testing.T) {
 		t.Error("expected error for empty blockID")
 	}
 }
+
+func TestT3Engine_Close(t *testing.T) {
+	mock := &mockT3Runner{
+		threadShowErr: errors.New("t3 daemon unavailable"),
+	}
+	eng := NewT3EngineWithRunner(mock)
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		sessionID string
+		windowID  string
+	}{
+		{name: "with session and thread id", sessionID: "proj-1", windowID: "mcp:thread-1"},
+		{name: "without session id", sessionID: "", windowID: "mcp:thread-1"},
+		{name: "empty thread id", sessionID: "", windowID: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := eng.Close(ctx, tc.sessionID, tc.windowID)
+			if err != nil {
+				t.Fatalf("expected nil error from Close, got: %v", err)
+			}
+			var notImpl *ErrNotImplemented
+			if errors.As(err, &notImpl) {
+				t.Fatalf("Close must not return ErrNotImplemented")
+			}
+		})
+	}
+
+	// Idempotent: calling Close twice on the same thread succeeds both times.
+	if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+	if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+}

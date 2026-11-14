@@ -463,11 +463,19 @@ func newTaskCloseCmd() *cobra.Command {
 		Use:   "close",
 		Short: "Close task tab in Rex and update state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessID, winID, _, projName, taskSlug, engName, err := resolveTargetWithEngine(project, task, session, window, "", engineName)
-			if err != nil {
-				return err
+			resolvedEngine := resolveActiveEngine(engineName)
+			var sessID, winID, projName, taskSlug, engName string
+			var err error
+			if project == "" && session == "" && window != "" && resolvedEngine == "t3" {
+				winID = window
+				engName = "t3"
+			} else {
+				sessID, winID, _, projName, taskSlug, engName, err = resolveTargetWithEngine(project, task, session, window, "", engineName)
+				if err != nil {
+					return err
+				}
 			}
-			if sessID == "" || winID == "" {
+			if winID == "" || (engName != "t3" && sessID == "") {
 				return fmt.Errorf("missing session_id or window_id for task '%s'", task)
 			}
 
@@ -480,7 +488,17 @@ func newTaskCloseCmd() *cobra.Command {
 			}
 
 			_ = state.MutateStateForEngine(engName, func(s *state.State) error {
-				return s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+				if projName != "" && taskSlug != "" {
+					return s.UpdateTask(projName, taskSlug, "closed", "Task closed via CLI")
+				}
+				for pName, pData := range s.Projects {
+					for tSlug, tData := range pData.Tasks {
+						if tData.WindowID == winID {
+							return s.UpdateTask(pName, tSlug, "closed", "Task closed via CLI")
+						}
+					}
+				}
+				return nil
 			})
 
 			resp := map[string]any{
