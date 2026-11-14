@@ -121,9 +121,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Ensure ~/.buddy exists
+# Ensure ~/.buddy exists and warm live session state in the background (0ms startup latency)
 if [ -n "$BUDDY_CTL_CMD" ]; then
     "$BUDDY_CTL_CMD" init >/dev/null 2>&1 || true
+    "$BUDDY_CTL_CMD" status --sync </dev/null >/dev/null 2>&1 &
 fi
 
 # Environment variable fallback if not specified on CLI
@@ -155,21 +156,28 @@ RESOLVED_CMD=()
 if [ -n "$BUDDY_CTL_CMD" ]; then
     CMD_JSON="$("$BUDDY_CTL_CMD" config get "agents.$RESOLVED_AGENT.command" 2>/dev/null || true)"
     if [ -n "$CMD_JSON" ]; then
-        while IFS= read -r -d '' item; do
-            [ -n "$item" ] && RESOLVED_CMD+=("$item")
-        done < <(python3 -c "
-import json, sys
-try:
-    data = json.loads(sys.argv[1])
-    val = data.get('value')
-    if isinstance(val, list):
-        for part in val:
-            sys.stdout.write(str(part) + '\0')
-    elif isinstance(val, str) and val.strip() and val.strip().lower() != 'null':
-        sys.stdout.write(val.strip() + '\0')
-except Exception:
-    pass
-" "$CMD_JSON" 2>/dev/null || true)
+        PARSED_LINES=""
+        if command -v jq >/dev/null 2>&1; then
+            PARSED_LINES="$(printf '%s\n' "$CMD_JSON" | jq -r 'if (.value | type) == "array" then .value[] elif (.value | type) == "string" and .value != "null" then .value else empty end' 2>/dev/null || true)"
+        fi
+        if [ -z "$PARSED_LINES" ]; then
+            RAW_VAL="$(printf '%s\n' "$CMD_JSON" | tr -d '\n\r' | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*//p')"
+            case "$RAW_VAL" in
+                \[*)
+                    PARSED_LINES="$(printf '%s\n' "$RAW_VAL" | sed 's/^\[//; s/\][[:space:]]*}[[:space:]]*$//' | tr ',' '\n' | sed -n 's/^[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p')"
+                    ;;
+                \"*)
+                    PARSED_LINES="$(printf '%s\n' "$RAW_VAL" | sed -n 's/^"\([^"]*\)".*/\1/p')"
+                    ;;
+            esac
+        fi
+        if [ -n "$PARSED_LINES" ]; then
+            while IFS= read -r item; do
+                [ -n "$item" ] && RESOLVED_CMD+=("$item")
+            done <<EOF
+$PARSED_LINES
+EOF
+        fi
     fi
 fi
 
