@@ -72,6 +72,7 @@ func TestMain(m *testing.M) {
 type mockWatchBackend struct {
 	captures         []string
 	captureIdx       int
+	capturesByBlock  map[string]string
 	captureErr       error
 	sessions         []backend.SessionInfo
 	windowsBySession map[string][]backend.WindowInfo
@@ -104,6 +105,11 @@ func (m *mockWatchBackend) Focus(ctx context.Context, sessionID, windowID string
 func (m *mockWatchBackend) Capture(ctx context.Context, sessionID, blockID string, lines int) (string, error) {
 	if m.captureErr != nil {
 		return "", m.captureErr
+	}
+	if m.capturesByBlock != nil {
+		if out, ok := m.capturesByBlock[blockID]; ok {
+			return out, nil
+		}
 	}
 	if len(m.captures) == 0 {
 		return "", nil
@@ -1250,5 +1256,224 @@ func TestWatch_ProgramStatus_TableDriven(t *testing.T) {
 				t.Errorf("summary = %q, want containing %q", summary, tc.wantSummaryContains)
 			}
 		})
+	}
+}
+
+// TestWatch_OnboardingSplashIgnored_NoFalsePositiveDemo verifies Defect A:
+// when a worker pane only shows agent onboarding splash / banner lines
+// ("esc to dismiss" / "Auto mode: edits & safe commands auto-approved")
+// and an idle prompt, watch must NOT treat those lines as worker output
+// or report ready_for_demo.
+func TestWatch_OnboardingSplashIgnored_NoFalsePositiveDemo(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+	onboardingPane := strings.Join([]string{
+		"Welcome to Antigravity v2.1.0",
+		"Auto mode: edits & safe commands auto-approved",
+		"esc to dismiss",
+		"────────────────────────────────────────",
+		"> Type a message",
+		"? for shortcuts   auto · 100%",
+	}, "\n")
+
+	// Unit-check paneState directly first
+	filtered, isWorking, isIdle := paneState(onboardingPane)
+	if len(filtered) > 0 {
+		t.Fatalf("expected onboarding splash lines to be filtered as chrome, but got filtered=%v", filtered)
+	}
+	if ev, summary := detectEventWithIdle(filtered, isWorking, isIdle, nil); ev != "" {
+		t.Fatalf("expected no event on onboarding splash, got event=%q summary=%q", ev, summary)
+	}
+
+	// End-to-end watch check: should time out rather than falsely reporting ready_for_demo
+	mockBackend := &mockWatchBackend{
+		captures: []string{onboardingPane},
+	}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-onboard", filepath.Join(tmpDir, "proj-onboard"), "sess_ob", "proj-onboard", state.TaskState{
+			TaskSlug:     "task-onboard",
+			AgentBlockID: "blk_ob",
+			Status:       "running",
+		})
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"watch",
+		"--project", "proj-onboard",
+		"--task", "task-onboard",
+		"--debounce", "1",
+		"--interval", "1",
+		"--timeout", "1",
+		"--notify=true",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("watch execute failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+	}
+
+	if resp["event"] != "timeout" {
+		t.Errorf("expected event='timeout' when pane only shows onboarding splash, got %v (summary: %v)", resp["event"], resp["summary"])
+	}
+	if len(recorder.All()) != 0 {
+		t.Errorf("expected 0 desktop notifications on onboarding splash, got %d", len(recorder.All()))
+	}
+}
+
+// TestWatch_ProjectScope_MonitorsOnlyTargetProject verifies project-scoped watch
+// (`buddy-ctl watch --project <P>` without --task or --all) monitors active tasks
+// in that project and ignores tasks in other projects.
+func TestWatch_ProjectScope_MonitorsOnlyTargetProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+	defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+	mockBackend := &mockWatchBackend{
+		capturesByBlock: map[string]string{
+			"blk_a1": "⠋ Running tests... (esc to cancel)",
+			"blk_a2": "Finished billing migration.\n> \n? for shortcuts",
+			"blk_b1": "panic: unreached project b error",
+		},
+	}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-a", filepath.Join(tmpDir, "proj-a"), "sess_a", "proj-a", state.TaskState{
+			TaskSlug:     "task-a1",
+			AgentBlockID: "blk_a1",
+			Status:       "running",
+		})
+		s.RecordTask("proj-a", filepath.Join(tmpDir, "proj-a"), "sess_a", "proj-a", state.TaskState{
+			TaskSlug:     "task-a2",
+			AgentBlockID: "blk_a2",
+			Status:       "running",
+		})
+		s.RecordTask("proj-b", filepath.Join(tmpDir, "proj-b"), "sess_b", "proj-b", state.TaskState{
+			TaskSlug:     "task-b1",
+			AgentBlockID: "blk_b1",
+			Status:       "running",
+		})
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"watch",
+		"--project", "proj-a",
+		"--debounce", "1",
+		"--interval", "0",
+		"--timeout", "5",
+		"--notify=false",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("project-scoped watch failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+	}
+
+	if resp["project"] != "proj-a" || resp["task"] != "task-a2" || resp["event"] != "ready_for_demo" {
+		t.Errorf("expected proj-a/task-a2 ready_for_demo, got: %+v", resp)
+	}
+}
+
+// TestWatch_DeepReconcile_UpdatesStaleStatusAndDiscoversUntrackedWindows verifies
+// deep reconcile samples live panes to correct stale cached statuses (e.g. out-of-band
+// user work in a tab that was cached as waiting_for_input) and discovers untracked
+// agent windows while ignoring plain idle shell windows.
+func TestWatch_DeepReconcile_UpdatesStaleStatusAndDiscoversUntrackedWindows(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	mockBackend := &mockWatchBackend{
+		sessions: []backend.SessionInfo{
+			{SessionID: "sess_deep", Name: "proj-deep", Path: filepath.Join(tmpDir, "proj-deep")},
+		},
+		windowsBySession: map[string][]backend.WindowInfo{
+			"sess_deep": {
+				{WindowID: "win_tracked", Label: "auth-flow", SessionID: "sess_deep", BlockIDs: []string{"blk_tracked"}},
+				{WindowID: "win_manual", Label: "user-hotfix", SessionID: "sess_deep", BlockIDs: []string{"blk_manual"}},
+				{WindowID: "win_shell", Label: "zsh", SessionID: "sess_deep", BlockIDs: []string{"blk_shell"}},
+			},
+		},
+		capturesByBlock: map[string]string{
+			"blk_tracked": "User answered in tab directly and all 42 tests passed.\n> \n? for shortcuts",
+			"blk_manual":  "Should we use Redis or Memcached?\n> \n? for shortcuts",
+			"blk_shell":   "sunday@macbook proj-deep % ",
+		},
+	}
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-deep", filepath.Join(tmpDir, "proj-deep"), "sess_deep", "proj-deep", state.TaskState{
+			TaskSlug:     "auth-flow",
+			WindowID:     "win_tracked",
+			WindowLabel:  "auth-flow",
+			AgentBlockID: "blk_tracked",
+			Status:       "waiting_for_input",
+			LastSummary:  "Stale question from 20 minutes ago?",
+		})
+		return nil
+	})
+
+	if err := reconcileRexWithBackend(context.Background(), mockBackend); err != nil {
+		t.Fatalf("reconcileRexWithBackend failed: %v", err)
+	}
+
+	st, err := state.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+	if st.LastSyncedAt == "" {
+		t.Errorf("expected State.LastSyncedAt to be populated after reconcile")
+	}
+
+	p, err := st.FindProject("proj-deep")
+	if err != nil {
+		t.Fatalf("FindProject failed: %v", err)
+	}
+	tracked, err := p.FindTask("auth-flow")
+	if err != nil {
+		t.Fatalf("FindTask failed: %v", err)
+	}
+	if tracked.Status != "ready_for_demo" {
+		t.Errorf("expected stale waiting_for_input task to be reconciled to ready_for_demo, got %q", tracked.Status)
+	}
+	if !strings.Contains(tracked.LastSummary, "all 42 tests passed") {
+		t.Errorf("expected LastSummary to be updated from live pane, got %q", tracked.LastSummary)
+	}
+	if tracked.LastVerifiedAt == "" {
+		t.Errorf("expected LastVerifiedAt to be updated")
+	}
+
+	// Verify untracked discovery found 'user-hotfix' (waiting_for_input) and ignored 'zsh'
+	if len(p.UntrackedWindows) != 1 {
+		t.Fatalf("expected 1 untracked agent window ('user-hotfix'), got %d: %+v", len(p.UntrackedWindows), p.UntrackedWindows)
+	}
+	uw := p.UntrackedWindows[0]
+	if uw.Label != "user-hotfix" || uw.DetectedStatus != "waiting_for_input" {
+		t.Errorf("unexpected untracked window: %+v", uw)
 	}
 }

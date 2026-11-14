@@ -3,9 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/tortoise10h/buddy/internal/backend"
 	"github.com/tortoise10h/buddy/internal/backend/t3"
@@ -15,7 +19,11 @@ import (
 )
 
 type mockTerminalBackend struct {
-	dispatched bool
+	dispatched    bool
+	lastSentText  string
+	staticCapture string
+	windows       []backend.WindowInfo
+	capturesByBlk map[string]string
 }
 
 func (m *mockTerminalBackend) Name() string { return "rex" }
@@ -27,7 +35,7 @@ func (m *mockTerminalBackend) ListSessions(ctx context.Context) ([]backend.Sessi
 	return []backend.SessionInfo{{SessionID: "sess_mock_1", Name: "test-proj"}}, nil
 }
 func (m *mockTerminalBackend) ListWindows(ctx context.Context, sessionID string) ([]backend.WindowInfo, error) {
-	return nil, nil
+	return m.windows, nil
 }
 func (m *mockTerminalBackend) InspectWindow(ctx context.Context, sessionID, windowID string) (backend.WindowInfo, error) {
 	return backend.WindowInfo{}, nil
@@ -39,9 +47,23 @@ func (m *mockTerminalBackend) CreateTaskWindow(ctx context.Context, sessionID, t
 func (m *mockTerminalBackend) Close(ctx context.Context, sessionID, windowID string) error { return nil }
 func (m *mockTerminalBackend) Focus(ctx context.Context, sessionID, windowID string) error { return nil }
 func (m *mockTerminalBackend) Capture(ctx context.Context, sessionID, blockID string, lines int) (string, error) {
+	if m.capturesByBlk != nil {
+		if out, ok := m.capturesByBlk[blockID]; ok {
+			return out, nil
+		}
+	}
+	if m.staticCapture != "" {
+		return m.staticCapture, nil
+	}
+	if m.lastSentText != "" {
+		return "> " + m.lastSentText + "\n⠋ Working... ? for shortcuts", nil
+	}
 	return "agent ready ? for shortcuts", nil
 }
 func (m *mockTerminalBackend) Send(ctx context.Context, sessionID, blockID string, input backend.Input) error {
+	if input.Text != "" {
+		m.lastSentText = input.Text
+	}
 	return nil
 }
 func (m *mockTerminalBackend) OpenDevSplit(ctx context.Context, sessionID, blockID, cwd, cmd string) (string, error) {
@@ -291,5 +313,277 @@ func TestDispatch_T3_MissingModelFailsFast(t *testing.T) {
 	}
 	if len(mockT3.started) != 0 {
 		t.Errorf("expected fail-fast before ThreadStart, got %d calls", len(mockT3.started))
+	}
+}
+
+func TestDispatch_CandidateDuplicateGuard_AndForceOverride(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	projDir := filepath.Join(tmpDir, "test-proj")
+	_ = os.MkdirAll(projDir, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to save test config: %v", err)
+	}
+
+	mockBackend := &mockTerminalBackend{}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend, engine.WithReadinessTimeout(300*time.Millisecond)))
+
+	// Seed an existing active task in test-proj
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("test-proj", projDir, "sess_mock_1", "test-proj", state.TaskState{
+			TaskSlug:     "auth-flow",
+			WindowID:     "win_existing",
+			AgentBlockID: "blk_existing",
+			Status:       "waiting_for_input",
+			LastSummary:  "Which OAuth provider should we use?",
+		})
+		return nil
+	})
+
+	// 1. Exact slug match without --force must fail fast and surface candidate status + summary
+	cmd1 := newDispatchCmd()
+	cmd1.SetArgs([]string{
+		"-p", "test-proj",
+		"-t", "auth-flow",
+		"-m", "implement Google OAuth",
+	})
+	err := cmd1.Execute()
+	if err == nil {
+		t.Fatalf("expected dispatch to fail when candidate task with same slug is already active")
+	}
+	if !strings.Contains(err.Error(), "auth-flow") || !strings.Contains(err.Error(), "waiting_for_input") || !strings.Contains(err.Error(), "Which OAuth provider") {
+		t.Errorf("expected error to include candidate slug, status, and summary, got: %v", err)
+	}
+
+	// 2. Domain-token overlap ("auth-login") without --force must also surface candidate and block
+	cmd2 := newDispatchCmd()
+	cmd2.SetArgs([]string{
+		"-p", "test-proj",
+		"-t", "auth-login",
+		"-m", "add login button",
+	})
+	err2 := cmd2.Execute()
+	if err2 == nil {
+		t.Fatalf("expected dispatch to fail when candidate task shares domain topic token 'auth'")
+	}
+	if !strings.Contains(err2.Error(), "--force") {
+		t.Errorf("expected error to mention --force or buddy-ctl send, got: %v", err2)
+	}
+
+	// 3. Passing --force overrides the candidate guard and dispatches cleanly
+	cmd3 := newDispatchCmd()
+	cmd3.SetArgs([]string{
+		"-p", "test-proj",
+		"-t", "auth-login",
+		"-m", "add login button",
+		"--force",
+	})
+	if err := cmd3.Execute(); err != nil {
+		t.Fatalf("expected dispatch with --force to succeed, got: %v", err)
+	}
+}
+
+func TestDispatch_PickupFalse_WhenOnboardingSwallowsPrompt(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	projDir := filepath.Join(tmpDir, "test-proj")
+	_ = os.MkdirAll(projDir, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to save test config: %v", err)
+	}
+
+	mockBackend := &mockTerminalBackend{
+		staticCapture: "Auto mode: edits & safe commands auto-approved\nesc to dismiss\n? for shortcuts",
+	}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend, engine.WithReadinessTimeout(300*time.Millisecond)))
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"dispatch",
+		"--project", "test-proj",
+		"--task", "swallowed-task",
+		"--prompt", "build new payment module",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("dispatch command failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json output: %v\nraw: %s", err, buf.String())
+	}
+
+	if resp["picked_up"] != false {
+		t.Errorf("expected picked_up=false when onboarding splash swallowed prompt, got %v", resp["picked_up"])
+	}
+	reason, _ := resp["pickup_reason"].(string)
+	if !strings.Contains(strings.ToLower(reason), "onboarding") {
+		t.Errorf("expected pickup_reason to mention onboarding splash, got %q", reason)
+	}
+}
+
+func TestDispatchAndSend_SituationalRecommendedWatch(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	projA := filepath.Join(tmpDir, "proj-a")
+	projB := filepath.Join(tmpDir, "proj-b")
+	_ = os.MkdirAll(projA, 0755)
+	_ = os.MkdirAll(projB, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	_ = config.SaveConfig(cfg)
+
+	mockBackend := &mockTerminalBackend{}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend, engine.WithReadinessTimeout(200*time.Millisecond)))
+
+	// 1st task in proj-a -> recommended_watch should be single-task scope
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"dispatch", "-p", "proj-a", "-t", "task-one", "-m", "work one"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("dispatch 1 failed: %v", err)
+	}
+	var resp1 map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &resp1)
+	if !strings.HasPrefix(fmt.Sprint(resp1["recommended_watch"]), "buddy-ctl watch --project proj-a --task task-one") {
+		t.Errorf("got recommended_watch = %q, want single-task scope", resp1["recommended_watch"])
+	}
+
+	// 2nd distinct task in proj-a -> recommended_watch should be project scope
+	buf.Reset()
+	rootCmd.SetArgs([]string{"dispatch", "-p", "proj-a", "-t", "billing-ui", "-m", "work two"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("dispatch 2 failed: %v", err)
+	}
+	var resp2 map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &resp2)
+	if !strings.HasPrefix(fmt.Sprint(resp2["recommended_watch"]), "buddy-ctl watch --project proj-a --interval") {
+		t.Errorf("got recommended_watch = %q, want project scope 'buddy-ctl watch --project proj-a ...'", resp2["recommended_watch"])
+	}
+
+	// 3rd task in proj-b -> recommended_watch should be --all
+	buf.Reset()
+	rootCmd.SetArgs([]string{"dispatch", "-p", "proj-b", "-t", "api-v2", "-m", "work three"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("dispatch 3 failed: %v", err)
+	}
+	var resp3 map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &resp3)
+	if !strings.HasPrefix(fmt.Sprint(resp3["recommended_watch"]), "buddy-ctl watch --all") {
+		t.Errorf("got recommended_watch = %q, want 'buddy-ctl watch --all ...'", resp3["recommended_watch"])
+	}
+
+	// Test buddy-ctl send transitions waiting_for_input -> running and returns recommended_watch
+	_ = state.MutateState(func(s *state.State) error {
+		return s.UpdateTask("proj-a", "task-one", "waiting_for_input", "Need confirmation")
+	})
+	buf.Reset()
+	rootCmd.SetArgs([]string{"send", "-p", "proj-a", "-t", "task-one", "--text", "yes proceed"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	var sendResp map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &sendResp)
+	if !strings.HasPrefix(fmt.Sprint(sendResp["recommended_watch"]), "buddy-ctl watch --all") {
+		t.Errorf("send recommended_watch = %q, want 'buddy-ctl watch --all ...'", sendResp["recommended_watch"])
+	}
+	st, _ := state.LoadState()
+	pa, _ := st.FindProject("proj-a")
+	tOne, _ := pa.FindTask("task-one")
+	if tOne.Status != "running" {
+		t.Errorf("expected task status to transition back to running after send, got %q", tOne.Status)
+	}
+}
+
+func TestTaskAdopt_RegistersUntrackedWindow(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	projDir := filepath.Join(tmpDir, "test-proj")
+	_ = os.MkdirAll(projDir, 0755)
+
+	mockBackend := &mockTerminalBackend{
+		windows: []backend.WindowInfo{
+			{
+				WindowID:  "win_manual_42",
+				Label:     "manual-refactor",
+				SessionID: "sess_mock_1",
+				BlockIDs:  []string{"blk_manual_42"},
+			},
+		},
+		capturesByBlk: map[string]string{
+			"blk_manual_42": "Completed manual refactor of router.\n> \n? for shortcuts",
+		},
+	}
+	origRex := defaultRexBackend
+	defaultRexBackend = func() backend.TerminalBackend { return mockBackend }
+	defer func() { defaultRexBackend = origRex }()
+
+	// Seed project with an untracked window
+	_ = state.MutateState(func(s *state.State) error {
+		s.Projects["test-proj"] = state.ProjectState{
+			Name:             "test-proj",
+			ProjectPath:      projDir,
+			RexSessionID:     "sess_mock_1",
+			RexSessionLabel:  "test-proj",
+			Tasks:            map[string]state.TaskState{},
+			UntrackedWindows: []state.UntrackedWindow{{WindowID: "win_manual_42", Label: "manual-refactor", BlockID: "blk_manual_42"}},
+		}
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"task", "adopt",
+		"--project", "test-proj",
+		"--window", "manual-refactor",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("task adopt failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json from task adopt: %v\nraw: %s", err, buf.String())
+	}
+	if resp["origin"] != "user" {
+		t.Errorf("expected adopted task origin='user', got %v", resp["origin"])
+	}
+	if resp["status"] != "adopted" || resp["task_status"] != "ready_for_demo" {
+		t.Errorf("expected status='adopted' and task_status='ready_for_demo', got %+v", resp)
+	}
+
+	st, _ := state.LoadState()
+	p, _ := st.FindProject("test-proj")
+	adopted, err := p.FindTask("manual-refactor")
+	if err != nil {
+		t.Fatalf("expected adopted task in state: %v", err)
+	}
+	if adopted.Origin != "user" || adopted.WindowID != "win_manual_42" || adopted.AgentBlockID != "blk_manual_42" {
+		t.Errorf("unexpected adopted task fields: %+v", adopted)
+	}
+	if len(p.UntrackedWindows) != 0 {
+		t.Errorf("expected adopted window to be removed from UntrackedWindows, got %+v", p.UntrackedWindows)
 	}
 }

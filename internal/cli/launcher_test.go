@@ -17,6 +17,31 @@ func TestBuddyLauncher_RunsInCurrentTabRegardlessOfSessionName(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpBuddyDir := filepath.Join(tmpHome, ".buddy")
 	tmpBin := t.TempDir()
+	if err := os.MkdirAll(tmpBuddyDir, 0755); err != nil {
+		t.Fatalf("failed to create tmpBuddyDir: %v", err)
+	}
+
+	// Write a self-contained config.json in tmpBuddyDir so the test never depends on developer machine config
+	testConfigJSON := `{
+  "version": 2,
+  "default_engine": "rex",
+  "engines": {
+    "rex": {
+      "orchestrator_agent": "opencode",
+      "worker_agent": "agy"
+    }
+  },
+  "agents": {
+    "opencode": {
+      "command": ["opencode", "--flag"],
+      "submit_delay_ms": 1500,
+      "submit_key": "enter"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(tmpBuddyDir, "config.json"), []byte(testConfigJSON), 0644); err != nil {
+		t.Fatalf("failed to write temp config.json: %v", err)
+	}
 
 	// Mock buddy-ctl to handle init and config get without needing a built binary
 	mockBuddyCtl := filepath.Join(tmpBin, "buddy-ctl")
