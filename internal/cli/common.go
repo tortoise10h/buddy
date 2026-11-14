@@ -103,7 +103,7 @@ func resolveTargetWithEngine(project, task, flagSession, flagWindow, flagBlock, 
 	taskSlug = task
 	engineName = resolveActiveEngine(flagEngine)
 
-	if sessionID != "" && (blockID != "" || windowID != "") {
+	if (sessionID != "" || engineName == "t3") && (blockID != "" || windowID != "") {
 		return sessionID, windowID, blockID, projName, taskSlug, engineName, nil
 	}
 

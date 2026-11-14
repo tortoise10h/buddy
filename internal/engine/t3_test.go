@@ -286,3 +286,163 @@ func TestT3Engine_Close(t *testing.T) {
 		t.Fatalf("second Close failed: %v", err)
 	}
 }
+
+var _ TaskStatusProvider = (*T3Engine)(nil)
+
+func TestT3Engine_ProbeStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		blockID     string
+		showOut     *t3.ThreadShowOutput
+		showErr     error
+		wantErr     bool
+		wantStatus  string
+		wantWorking bool
+		wantEvent   string
+		wantSummary string
+	}{
+		{
+			name:    "running",
+			blockID: "th-run",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{ThreadID: "th-run", Status: "running"},
+				Messages: []t3.MessageInfo{
+					{Role: "user", Text: "Build feature X"},
+					{Role: "assistant", Text: "Working on\nstep 2"},
+				},
+			},
+			wantStatus:  "running",
+			wantWorking: true,
+			wantSummary: "Working on step 2",
+		},
+		{
+			name:    "planning",
+			blockID: "th-plan",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{ThreadID: "th-plan", Status: "planning"},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Drafting implementation plan"},
+				},
+			},
+			wantStatus:  "planning",
+			wantWorking: true,
+			wantSummary: "Drafting implementation plan",
+		},
+		{
+			name:    "idle with assistant reply",
+			blockID: "th-idle",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{ThreadID: "th-idle", Status: "idle"},
+				Messages: []t3.MessageInfo{
+					{Role: "user", Text: "Add auth"},
+					{Role: "assistant", Text: "Added JWT auth.\nAll tests pass."},
+				},
+			},
+			wantStatus:  "ready_for_demo",
+			wantWorking: false,
+			wantEvent:   "ready_for_demo",
+			wantSummary: "Added JWT auth. All tests pass.",
+		},
+		{
+			name:    "pending request overrides running",
+			blockID: "th-wait",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:            "th-wait",
+					Status:              "running",
+					PendingRequestCount: 1,
+				},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Should I overwrite config.json?"},
+				},
+			},
+			wantStatus:  "waiting_for_input",
+			wantWorking: false,
+			wantEvent:   "waiting_for_input",
+			wantSummary: "Should I overwrite config.json?",
+		},
+		{
+			name:    "failed status maps to error",
+			blockID: "th-err",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{ThreadID: "th-err", Status: "failed"},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Compilation failed in main.go"},
+				},
+			},
+			wantStatus:  "error",
+			wantWorking: false,
+			wantEvent:   "error",
+			wantSummary: "Compilation failed in main.go",
+		},
+		{
+			name:    "idle without assistant reply stays unknown",
+			blockID: "th-empty",
+			showOut: &t3.ThreadShowOutput{
+				Thread:   t3.ThreadInfo{ThreadID: "th-empty", Status: "idle"},
+				Messages: []t3.MessageInfo{{Role: "user", Text: "Hello"}},
+			},
+			wantStatus:  "unknown",
+			wantWorking: false,
+			wantSummary: "Hello",
+		},
+		{
+			name:    "unknown thread status",
+			blockID: "th-unk",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{ThreadID: "th-unk", Status: ""},
+			},
+			wantStatus:  "unknown",
+			wantWorking: false,
+		},
+		{
+			name:        "runner error returns error and unknown status",
+			blockID:     "th-down",
+			showErr:     errors.New("daemon unreachable"),
+			wantErr:     true,
+			wantStatus:  "unknown",
+			wantWorking: false,
+		},
+		{
+			name:        "empty thread id returns error and unknown status",
+			blockID:     "",
+			wantErr:     true,
+			wantStatus:  "unknown",
+			wantWorking: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockT3Runner{
+				threadShowOut: tc.showOut,
+				threadShowErr: tc.showErr,
+			}
+			eng := NewT3EngineWithRunner(mock)
+			probe, err := eng.ProbeStatus(context.Background(), "proj-1", tc.blockID)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (probe=%+v)", probe)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if probe.Status != tc.wantStatus {
+				t.Errorf("Status = %q, want %q", probe.Status, tc.wantStatus)
+			}
+			if probe.Working != tc.wantWorking {
+				t.Errorf("Working = %v, want %v", probe.Working, tc.wantWorking)
+			}
+			if probe.Event != tc.wantEvent {
+				t.Errorf("Event = %q, want %q", probe.Event, tc.wantEvent)
+			}
+			if tc.wantSummary != "" && probe.Summary != tc.wantSummary {
+				t.Errorf("Summary = %q, want %q", probe.Summary, tc.wantSummary)
+			}
+			if !tc.wantErr && probe.Snapshot == "" {
+				t.Errorf("expected non-empty Snapshot on successful probe")
+			}
+		})
+	}
+}

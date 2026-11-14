@@ -109,6 +109,153 @@ func (e *T3Engine) Capture(ctx context.Context, sessionID, blockID string, lines
 	return formatThreadShowOutput(out, lines), nil
 }
 
+// ProbeStatus queries `t3 thread show --json` and maps T3 thread state into
+// Buddy's structured task status vocabulary without terminal text scraping.
+func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (TaskStatusProbe, error) {
+	if blockID == "" {
+		return TaskStatusProbe{Status: "unknown"}, fmt.Errorf("t3 probe status: thread ID (blockID) is required")
+	}
+	out, err := e.runner.ThreadShow(ctx, blockID)
+	if err != nil {
+		return TaskStatusProbe{Status: "unknown"}, fmt.Errorf("t3 thread show: %w", err)
+	}
+	if out == nil {
+		return TaskStatusProbe{Status: "unknown"}, fmt.Errorf("t3 thread show: empty response")
+	}
+
+	snapshot := formatThreadShowOutput(out, 0)
+
+	if out.Thread.PendingRequestCount > 0 {
+		summary := summarizeThreadMessages(out.Messages, true)
+		if summary == "" {
+			summary = "Waiting for input (pending request)"
+		}
+		return TaskStatusProbe{
+			Status:   "waiting_for_input",
+			Working:  false,
+			Event:    "waiting_for_input",
+			Summary:  summary,
+			Snapshot: snapshot,
+		}, nil
+	}
+
+	rawStatus := strings.ToLower(strings.TrimSpace(out.Thread.Status))
+	switch rawStatus {
+	case "error", "failed", "errored", "crashed", "cancelled", "canceled":
+		summary := summarizeThreadMessages(out.Messages, true)
+		if summary == "" {
+			summary = "Thread failed with status: " + rawStatus
+		}
+		return TaskStatusProbe{
+			Status:   "error",
+			Working:  false,
+			Event:    "error",
+			Summary:  summary,
+			Snapshot: snapshot,
+		}, nil
+
+	case "planning":
+		summary := summarizeThreadMessages(out.Messages, false)
+		if summary == "" {
+			summary = "Thread is planning"
+		}
+		return TaskStatusProbe{
+			Status:   "planning",
+			Working:  true,
+			Summary:  summary,
+			Snapshot: snapshot,
+		}, nil
+
+	case "running", "in_progress", "active", "queued", "starting", "pending":
+		summary := summarizeThreadMessages(out.Messages, false)
+		if summary == "" {
+			summary = "Thread is running"
+		}
+		return TaskStatusProbe{
+			Status:   "running",
+			Working:  true,
+			Summary:  summary,
+			Snapshot: snapshot,
+		}, nil
+
+	case "waiting", "waiting_for_input", "blocked", "paused", "needs_input":
+		summary := summarizeThreadMessages(out.Messages, true)
+		if summary == "" {
+			summary = "Waiting for input"
+		}
+		return TaskStatusProbe{
+			Status:   "waiting_for_input",
+			Working:  false,
+			Event:    "waiting_for_input",
+			Summary:  summary,
+			Snapshot: snapshot,
+		}, nil
+
+	case "idle", "completed", "done", "finished", "settled", "ready":
+		if summary := summarizeThreadMessages(out.Messages, true); summary != "" && hasAssistantMessage(out.Messages) {
+			return TaskStatusProbe{
+				Status:   "ready_for_demo",
+				Working:  false,
+				Event:    "ready_for_demo",
+				Summary:  summary,
+				Snapshot: snapshot,
+			}, nil
+		}
+		return TaskStatusProbe{
+			Status:   "unknown",
+			Working:  false,
+			Summary:  summarizeThreadMessages(out.Messages, false),
+			Snapshot: snapshot,
+		}, nil
+
+	default:
+		return TaskStatusProbe{
+			Status:   "unknown",
+			Working:  false,
+			Summary:  summarizeThreadMessages(out.Messages, false),
+			Snapshot: snapshot,
+		}, nil
+	}
+}
+
+func hasAssistantMessage(messages []t3.MessageInfo) bool {
+	for _, m := range messages {
+		if strings.EqualFold(strings.TrimSpace(m.Role), "assistant") && oneLineSummary(m.Text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeThreadMessages(messages []t3.MessageInfo, preferAssistant bool) string {
+	if preferAssistant {
+		for i := len(messages) - 1; i >= 0; i-- {
+			if strings.EqualFold(strings.TrimSpace(messages[i].Role), "assistant") {
+				if s := oneLineSummary(messages[i].Text); s != "" {
+					return s
+				}
+			}
+		}
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if s := oneLineSummary(messages[i].Text); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func oneLineSummary(text string) string {
+	collapsed := strings.Join(strings.Fields(text), " ")
+	if collapsed == "" {
+		return ""
+	}
+	if len(collapsed) > 240 {
+		return collapsed[:237] + "..."
+	}
+	return collapsed
+}
+
 func formatThreadShowOutput(out *t3.ThreadShowOutput, lines int) string {
 	var b strings.Builder
 	header := fmt.Sprintf("[thread: %s | status: %s", out.Thread.ThreadID, out.Thread.Status)

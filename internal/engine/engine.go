@@ -37,3 +37,26 @@ type Engine interface {
 	Focus(ctx context.Context, sessionID, windowID string) error
 	OpenDevSplit(ctx context.Context, sessionID, blockID, cwd, cmd string) (string, error)
 }
+
+// TaskStatusProbe represents a structured live status verdict for a tracked task.
+// Status uses Buddy's task vocabulary: "running", "planning", "waiting_for_input",
+// "ready_for_demo", "error", or "unknown".
+type TaskStatusProbe struct {
+	Status   string `json:"status"`
+	Working  bool   `json:"working"`
+	Event    string `json:"event,omitempty"`
+	Summary  string `json:"summary,omitempty"`
+	Snapshot string `json:"snapshot,omitempty"`
+}
+
+// TaskStatusProvider is an optional capability interface implemented by engines
+// that can query structured live task status directly (e.g. T3 thread API)
+// instead of relying on terminal pane scraping.
+//
+// Implementations must never fail destructively: if live status cannot be
+// determined (e.g. daemon unreachable or unknown thread), ProbeStatus should
+// return an error so callers can treat the state as "unknown" rather than
+// fabricating a completion such as "ready_for_demo".
+type TaskStatusProvider interface {
+	ProbeStatus(ctx context.Context, sessionID, blockID string) (TaskStatusProbe, error)
+}

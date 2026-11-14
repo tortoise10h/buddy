@@ -29,7 +29,7 @@ func newDiagnoseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if sessID == "" || blkID == "" {
+			if blkID == "" || (engName != "t3" && sessID == "") {
 				return fmt.Errorf("missing session_id or block_id for task '%s'", task)
 			}
 

@@ -28,7 +28,7 @@ func newCaptureCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if sessID == "" || blkID == "" {
+			if blkID == "" || (engName != "t3" && sessID == "") {
 				return fmt.Errorf("missing session_id or agent_block_id (specify --project/--task or -s/-b)")
 			}
 
