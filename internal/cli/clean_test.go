@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -11,6 +12,16 @@ import (
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
 )
+
+type spyRexCloseBackend struct {
+	mockTerminalBackend
+	closeCalls []string
+}
+
+func (s *spyRexCloseBackend) Close(ctx context.Context, sessionID, windowID string) error {
+	s.closeCalls = append(s.closeCalls, sessionID+":"+windowID)
+	return nil
+}
 
 func seedCleanTestState(t *testing.T, engName, projName, slug, status, winID string) {
 	t.Helper()
@@ -195,6 +206,61 @@ func TestTaskClean_ForceAndCloseFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("force does not call eng.Close on rex", func(t *testing.T) {
+		clearAllHostSignals(t)
+		t.Setenv("BUDDY_DIR", t.TempDir())
+		t.Setenv("BUDDY_ENGINE", "rex")
+		_ = config.SaveConfig(config.DefaultConfig())
+
+		spy := &spyRexCloseBackend{}
+		oldReg := defaultRegistry
+		t.Cleanup(func() { defaultRegistry = oldReg })
+		reg := engine.NewRegistry("rex")
+		reg.Register("rex", engine.NewTerminalEngine(spy))
+		defaultRegistry = reg
+
+		seedCleanTestState(t, "rex", "buddy", "feat-rex-force", "running", "win-force")
+
+		cmd := newTaskCleanCmd()
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		cmd.SetArgs([]string{"-p", "buddy", "-t", "feat-rex-force", "--force", "--reason", "user agreed", "--engine", "rex"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("force clean failed: %v", err)
+		}
+		if len(spy.closeCalls) != 0 {
+			t.Errorf("expected eng.Close NOT to be called on --force, got calls: %v", spy.closeCalls)
+		}
+	})
+
+	t.Run("close flag chains engine.Close then cleans on rex", func(t *testing.T) {
+		clearAllHostSignals(t)
+		t.Setenv("BUDDY_DIR", t.TempDir())
+		t.Setenv("BUDDY_ENGINE", "rex")
+		_ = config.SaveConfig(config.DefaultConfig())
+
+		spy := &spyRexCloseBackend{}
+		oldReg := defaultRegistry
+		t.Cleanup(func() { defaultRegistry = oldReg })
+		reg := engine.NewRegistry("rex")
+		reg.Register("rex", engine.NewTerminalEngine(spy))
+		defaultRegistry = reg
+
+		seedCleanTestState(t, "rex", "buddy", "feat-rex-close", "running", "win-close")
+
+		cmd := newTaskCleanCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"-p", "buddy", "-t", "feat-rex-close", "--close", "--reason", "verified", "--engine", "rex"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("--close clean failed: %v", err)
+		}
+		if len(spy.closeCalls) != 1 || spy.closeCalls[0] != "sess-buddy:win-close" {
+			t.Errorf("expected 1 eng.Close call for sess-buddy:win-close, got: %v", spy.closeCalls)
+		}
+	})
+
 	t.Run("close flag chains engine.Close then cleans", func(t *testing.T) {
 		clearAllHostSignals(t)
 		t.Setenv("BUDDY_DIR", t.TempDir())
@@ -311,7 +377,7 @@ func TestTaskClean_DryRunAndHelpText(t *testing.T) {
 	helpCmd.SetOut(&helpOut)
 	helpCmd.SetArgs([]string{"--help"})
 	_ = helpCmd.Execute()
-	if !strings.Contains(helpOut.String(), "requires explicit user consent") {
-		t.Errorf("--help text missing 'requires explicit user consent': %s", helpOut.String())
+	if !strings.Contains(helpOut.String(), "requires explicit user consent from the user in the current conversation") {
+		t.Errorf("--help text missing explicit user consent wording: %s", helpOut.String())
 	}
 }

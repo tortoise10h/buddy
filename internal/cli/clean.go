@@ -56,13 +56,13 @@ func newTaskCleanCmd() *cobra.Command {
 
 By default, refuses to clean tasks whose status is not 'closed' or 'done'. Use --close to
 close the task first, or --force to remove tracking state without closing the live window/thread.
+Note: --force requires explicit user consent from the user in the current conversation.
 
 Cleaning state only updates Buddy's local tracking (~/.buddy/state/<engine>.json) and history
 log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branches.`,
 		Example: `  buddy-ctl task clean -p buddy -t feat-auth --reason "merged PR #42"
   buddy-ctl task clean -p buddy -t feat-auth --close --reason "done and verified"
-  buddy-ctl task clean --all-closed --reason "end-of-day cleanup"
-  buddy-ctl task clean -p buddy --all-closed --dry-run`,
+  buddy-ctl task clean -p buddy -t feat-auth --dry-run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if projectName == "" || taskSlug == "" {
 				return fmt.Errorf("both --project (-p) and --task (-t) are required")
