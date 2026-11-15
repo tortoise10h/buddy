@@ -176,6 +176,7 @@ func reconcileRexWithBackend(ctx context.Context, tb backend.TerminalBackend) er
 	}
 
 	windowsBySession := make(map[string][]backend.WindowInfo)
+	cleanedRexWindows, _ := state.CleanedWindowIDs("rex")
 
 	return state.MutateStateForEngine("rex", func(s *state.State) error {
 		now := state.NowISO()
@@ -296,6 +297,9 @@ func reconcileRexWithBackend(ctx context.Context, tb backend.TerminalBackend) er
 			var untracked []state.UntrackedWindow
 			for _, w := range windows {
 				if matchedWindowIDs[w.WindowID] {
+					continue
+				}
+				if _, wasCleaned := cleanedRexWindows[w.WindowID]; wasCleaned {
 					continue
 				}
 				blockID := ""
@@ -419,6 +423,8 @@ func reconcileT3WithEngine(ctx context.Context, eng *engine.T3Engine) error {
 		}
 	}
 
+	cleanedT3Threads, _ := state.CleanedWindowIDs("t3")
+
 	return state.MutateStateForEngine("t3", func(s *state.State) error {
 		now := state.NowISO()
 		s.LastSyncedAt = now
@@ -475,6 +481,9 @@ func reconcileT3WithEngine(ctx context.Context, eng *engine.T3Engine) error {
 				var untracked []state.UntrackedWindow
 				for _, th := range threads {
 					if th.ThreadID == "" || trackedIDs[th.ThreadID] {
+						continue
+					}
+					if _, wasCleaned := cleanedT3Threads[th.ThreadID]; wasCleaned {
 						continue
 					}
 					if th.Settled {
