@@ -33,11 +33,6 @@ var (
 
 	idlePromptLineRe = regexp.MustCompile(`(?i)^(?:[>❯›]\s*(?:type a message|ask anything)?|type a message|ask anything)\s*$`)
 
-	// Legacy aliases kept for compatibility
-	watchDemoRe  = watchDemoLineRe
-	watchErrorRe = watchErrorLineRe
-	watchInputRe = inputQuestionRe
-
 	// notifyFn is injectable for testing to intercept desktop notifications.
 	notifyFn = notify.SendDesktopNotification
 
