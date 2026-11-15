@@ -41,9 +41,7 @@ func newContextInjectCmd() *cobra.Command {
 			}
 
 			resEngine := engine.ResolveEngine("", os.Getenv, cfg)
-			if resEngine.EngineName == "rex" {
-				reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
-			}
+			reconcileActiveIfStale(cmd.Context(), resEngine.EngineName, defaultSyncTTL)
 
 			st, err := state.LoadStateForEngine(resEngine.EngineName)
 			if err != nil {

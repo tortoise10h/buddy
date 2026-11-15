@@ -63,10 +63,11 @@ func (nr *notificationRecorder) All() []recordedNotification {
 var globalNotificationRecorder = &notificationRecorder{}
 
 func TestMain(m *testing.M) {
-	// Guard: Ensure notifyFn and syncRexFn are pointed to test-safe stubs by default
-	// so real macOS desktop notifications and live Rex daemons are never touched.
+	// Guard: Ensure notifyFn, syncRexFn, and syncT3Fn are pointed to test-safe stubs by default
+	// so real macOS desktop notifications and live Rex/T3 daemons are never touched.
 	notifyFn = globalNotificationRecorder.Record
 	syncRexFn = func(context.Context) error { return nil }
+	syncT3Fn = func(context.Context) error { return nil }
 	os.Exit(m.Run())
 }
 

@@ -8,14 +8,30 @@ import (
 
 	"github.com/tortoise10h/buddy/internal/backend"
 	"github.com/tortoise10h/buddy/internal/backend/rex"
+	"github.com/tortoise10h/buddy/internal/backend/t3"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
 )
 
 const defaultSyncTTL = 45 * time.Second
+const defaultT3SyncTimeout = 5 * time.Second
 
 // defaultRexBackend returns the injectable Rex backend used by status --sync and TTL auto-sync.
 var defaultRexBackend = func() backend.TerminalBackend {
 	return rex.NewRexBackend()
+}
+
+// syncT3Fn is injectable for testing to reconcile state with live T3 threads.
+var syncT3Fn = func(ctx context.Context) error {
+	eng, err := getEngine("t3")
+	if err != nil {
+		return err
+	}
+	t3Eng, ok := eng.(*engine.T3Engine)
+	if !ok {
+		return nil
+	}
+	return reconcileT3WithEngine(ctx, t3Eng)
 }
 
 var defaultShellWindowLabels = map[string]bool{
@@ -311,4 +327,237 @@ func reconcileRexWithBackend(ctx context.Context, tb backend.TerminalBackend) er
 		}
 		return nil
 	})
+}
+
+// reconcileActiveIfStale runs bounded TTL-gated state reconciliation for the active engine.
+func reconcileActiveIfStale(ctx context.Context, engineName string, ttl time.Duration) {
+	switch engineName {
+	case "rex":
+		reconcileRexIfStale(ctx, ttl)
+	case "t3":
+		reconcileT3IfStale(ctx, ttl)
+	}
+}
+
+// reconcileActiveNow runs an immediate live state reconciliation for the given engine.
+func reconcileActiveNow(ctx context.Context, engineName string) {
+	switch engineName {
+	case "rex":
+		_ = reconcileRexWithBackend(ctx, defaultRexBackend())
+	case "t3":
+		_ = syncT3Fn(ctx)
+	}
+}
+
+// reconcileT3IfStale runs a bounded deep reconcile when the T3 state cache is older than ttl.
+func reconcileT3IfStale(ctx context.Context, ttl time.Duration) {
+	st, err := state.LoadStateForEngine("t3")
+	if err != nil {
+		return
+	}
+	if state.IsFreshWithin(st.LastSyncedAt, ttl) {
+		return
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, defaultT3SyncTimeout)
+	defer cancel()
+	_ = syncT3Fn(syncCtx)
+}
+
+// reconcileT3WithEngine reconciles cached T3 tasks and discovers untracked project threads.
+// It is bounded to one ThreadShow (via ProbeStatus) per tracked active task and one
+// ThreadList per tracked project that has a filesystem path.
+func reconcileT3WithEngine(ctx context.Context, eng *engine.T3Engine) error {
+	if eng == nil {
+		return nil
+	}
+
+	st, err := state.LoadStateForEngine("t3")
+	if err != nil {
+		return err
+	}
+
+	type taskProbeResult struct {
+		probe   engine.TaskStatusProbe
+		missing bool
+		ok      bool
+	}
+	probeResults := make(map[string]taskProbeResult)
+	projectThreads := make(map[string][]t3.ThreadSummary)
+	projectListed := make(map[string]bool)
+
+	for pName, pData := range st.Projects {
+		for tSlug, tData := range pData.Tasks {
+			if tData.GetEngine() != "t3" {
+				continue
+			}
+			if tData.Status == "closed" || tData.Status == "done" {
+				continue
+			}
+			threadID := tData.AgentBlockID
+			if threadID == "" {
+				threadID = tData.WindowID
+			}
+			if threadID == "" {
+				continue
+			}
+			probe, probeErr := eng.ProbeStatus(ctx, pData.RexSessionID, threadID)
+			key := pName + "\x00" + tSlug
+			if probeErr != nil {
+				if isT3ThreadNotFoundError(probeErr) {
+					probeResults[key] = taskProbeResult{missing: true}
+				}
+				continue
+			}
+			probeResults[key] = taskProbeResult{probe: probe, ok: true}
+		}
+
+		if pData.ProjectPath != "" {
+			if threads, listErr := eng.ListProjectThreads(ctx, pData.ProjectPath); listErr == nil {
+				projectThreads[pName] = threads
+				projectListed[pName] = true
+			}
+		}
+	}
+
+	return state.MutateStateForEngine("t3", func(s *state.State) error {
+		now := state.NowISO()
+		s.LastSyncedAt = now
+
+		for pName, pData := range s.Projects {
+			trackedIDs := make(map[string]bool, len(pData.Tasks)*2)
+
+			for tSlug, tData := range pData.Tasks {
+				if tData.WindowID != "" {
+					trackedIDs[tData.WindowID] = true
+				}
+				if tData.AgentBlockID != "" {
+					trackedIDs[tData.AgentBlockID] = true
+				}
+				if tData.GetEngine() != "t3" {
+					continue
+				}
+				if tData.Status == "closed" || tData.Status == "done" {
+					continue
+				}
+
+				res, hasRes := probeResults[pName+"\x00"+tSlug]
+				if !hasRes {
+					continue
+				}
+				if res.missing {
+					if tData.Status != "missing" {
+						tData.Status = "missing"
+						tData.UpdatedAt = now
+					}
+					tData.LastSummary = "Thread not found in T3"
+					tData.LastVerifiedAt = now
+					pData.Tasks[tSlug] = tData
+					continue
+				}
+				if !res.ok {
+					continue
+				}
+
+				if res.probe.Status != "" && res.probe.Status != "unknown" && res.probe.Status != tData.Status {
+					tData.Status = res.probe.Status
+					tData.UpdatedAt = now
+				}
+				if res.probe.Summary != "" && res.probe.Summary != tData.LastSummary {
+					tData.LastSummary = res.probe.Summary
+					tData.UpdatedAt = now
+				}
+				tData.LastVerifiedAt = now
+				pData.Tasks[tSlug] = tData
+			}
+
+			if projectListed[pName] {
+				threads := projectThreads[pName]
+				var untracked []state.UntrackedWindow
+				for _, th := range threads {
+					if th.ThreadID == "" || trackedIDs[th.ThreadID] {
+						continue
+					}
+					if th.Settled {
+						continue
+					}
+					label := truncateT3Label(th.Title, 40)
+					if label == "" {
+						label = th.ThreadID
+					}
+					summary := strings.Join(strings.Fields(th.Title), " ")
+					if summary == "" {
+						summary = "Untracked thread in T3"
+					} else if len(summary) > 240 {
+						summary = summary[:237] + "..."
+					}
+					untracked = append(untracked, state.UntrackedWindow{
+						WindowID:       th.ThreadID,
+						Label:          label,
+						BlockID:        th.ThreadID,
+						DetectedStatus: mapT3ThreadSummaryStatus(th),
+						Summary:        summary,
+					})
+				}
+				pData.UntrackedWindows = untracked
+			}
+
+			s.Projects[pName] = pData
+		}
+		return nil
+	})
+}
+
+func isT3ThreadNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "unknown thread") ||
+		strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "no such thread")
+}
+
+func truncateT3Label(title string, maxLen int) string {
+	collapsed := strings.Join(strings.Fields(title), " ")
+	if collapsed == "" || maxLen <= 0 {
+		return collapsed
+	}
+	if len(collapsed) <= maxLen {
+		return collapsed
+	}
+	if maxLen <= 3 {
+		return collapsed[:maxLen]
+	}
+	return collapsed[:maxLen-3] + "..."
+}
+
+func mapT3ThreadSummaryStatus(th t3.ThreadSummary) string {
+	raw := strings.ToLower(strings.TrimSpace(th.Status))
+	isPlan := strings.EqualFold(strings.TrimSpace(th.InteractionMode), "plan")
+	switch raw {
+	case "error", "failed", "errored", "crashed", "interrupted", "cancelled", "canceled", "rolled_back":
+		return "error"
+	case "planning":
+		return "planning"
+	case "preparing", "queued", "starting", "running", "in_progress", "active", "pending":
+		if isPlan {
+			return "planning"
+		}
+		return "running"
+	case "waiting_for_input", "blocked", "paused", "needs_input":
+		return "waiting_for_input"
+	case "waiting":
+		if th.BlockedOnThreadWait || len(th.PendingBackgroundTasks) > 0 {
+			return "running"
+		}
+		return "waiting_for_input"
+	case "idle", "completed", "done", "finished", "settled", "ready":
+		if th.BlockedOnThreadWait || len(th.PendingBackgroundTasks) > 0 {
+			return "running"
+		}
+		return "ready_for_demo"
+	default:
+		return "unknown"
+	}
 }

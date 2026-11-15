@@ -47,9 +47,7 @@ func newDispatchCmd() *cobra.Command {
 				return err
 			}
 
-			if engineName == "rex" {
-				reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
-			}
+			reconcileActiveIfStale(cmd.Context(), engineName, defaultSyncTTL)
 
 			st, err := state.LoadStateForEngine(engineName)
 			if err != nil {

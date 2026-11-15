@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/tortoise10h/buddy/internal/backend/t3"
 	"github.com/tortoise10h/buddy/internal/config"
+	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/state"
 )
 
@@ -139,5 +143,149 @@ func TestStatusCmd_EngineStateIsolation(t *testing.T) {
 	}
 	if !strings.Contains(outAll, "rex-proj") || !strings.Contains(outAll, "t3-proj") {
 		t.Errorf("expected both rex-proj and t3-proj with --all-engines, got: %s", outAll)
+	}
+}
+
+type syncTestT3Runner struct {
+	showByID    map[string]*t3.ThreadShowOutput
+	showErrByID map[string]error
+	listByPath  map[string]*t3.ThreadListOutput
+}
+
+func (r *syncTestT3Runner) ProjectAdd(_ context.Context, _, _ string) error { return nil }
+func (r *syncTestT3Runner) ThreadStart(_ context.Context, _ t3.ThreadStartOptions) (*t3.ThreadStartOutput, error) {
+	return &t3.ThreadStartOutput{}, nil
+}
+func (r *syncTestT3Runner) ThreadSend(_ context.Context, _, _ string) error { return nil }
+func (r *syncTestT3Runner) ThreadShow(_ context.Context, threadID string) (*t3.ThreadShowOutput, error) {
+	if err, ok := r.showErrByID[threadID]; ok {
+		return nil, err
+	}
+	if out, ok := r.showByID[threadID]; ok {
+		return out, nil
+	}
+	return nil, fmt.Errorf("thread not found: %s", threadID)
+}
+func (r *syncTestT3Runner) ThreadList(_ context.Context, projectPath string) (*t3.ThreadListOutput, error) {
+	if out, ok := r.listByPath[projectPath]; ok {
+		return out, nil
+	}
+	return &t3.ThreadListOutput{}, nil
+}
+
+func TestStatusCmd_Sync_T3_ReconcilesTasksAndDiscoversUntracked(t *testing.T) {
+	clearAllHostSignals(t)
+	t.Setenv("BUDDY_DIR", t.TempDir())
+	t.Setenv("BUDDY_ENGINE", "t3")
+
+	cfg := config.DefaultConfig()
+	_ = config.SaveConfig(cfg)
+
+	runner := &syncTestT3Runner{
+		showByID: map[string]*t3.ThreadShowOutput{
+			"th_live": {
+				Thread: t3.ThreadInfo{
+					ThreadID: "th_live",
+					Status:   "completed",
+					Model:    "gemini-4-hydrogen-medium",
+				},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Implemented auth"},
+				},
+			},
+		},
+		showErrByID: map[string]error{
+			"th_gone": fmt.Errorf("t3 command failed (exit 1): thread not found: th_gone"),
+		},
+		listByPath: map[string]*t3.ThreadListOutput{
+			"/tmp/buddy": {
+				Threads: []t3.ThreadSummary{
+					{ThreadID: "th_live", ProjectID: "proj-t3-1", Title: "Tracked live", Status: "completed", Settled: false},
+					{ThreadID: "th_settled", ProjectID: "proj-t3-1", Title: "Old settled", Status: "completed", Settled: true},
+					{ThreadID: "th_untracked", ProjectID: "proj-t3-1", Title: "Fix login race condition", Status: "waiting_for_input", Settled: false},
+				},
+			},
+		},
+	}
+
+	reg := getRegistry()
+	origT3, getErr := reg.Get("t3")
+	t3Eng := engine.NewT3EngineWithRunner(runner)
+	reg.Register("t3", t3Eng)
+	origSyncT3 := syncT3Fn
+	syncT3Fn = func(ctx context.Context) error {
+		return reconcileT3WithEngine(ctx, t3Eng)
+	}
+	t.Cleanup(func() {
+		syncT3Fn = origSyncT3
+		if getErr == nil && origT3 != nil {
+			reg.Register("t3", origT3)
+		}
+	})
+
+	if err := state.MutateStateForEngine("t3", func(s *state.State) error {
+		s.RecordTask("buddy", "/tmp/buddy", "proj-t3-1", "buddy", state.TaskState{
+			TaskSlug:     "feat-live",
+			Engine:       "t3",
+			WindowID:     "th_live",
+			AgentBlockID: "th_live",
+			Status:       "running",
+			LastSummary:  "Working...",
+		})
+		s.RecordTask("buddy", "/tmp/buddy", "proj-t3-1", "buddy", state.TaskState{
+			TaskSlug:     "feat-gone",
+			Engine:       "t3",
+			WindowID:     "th_gone",
+			AgentBlockID: "th_gone",
+			Status:       "running",
+			LastSummary:  "Still running",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed state failed: %v", err)
+	}
+
+	cmd := newStatusCmd()
+	cmd.SetArgs([]string{"--sync", "--engine", "t3", "--format", "json"})
+	outJSON, _, err := captureOutput(t, func() error { return cmd.Execute() })
+	if err != nil {
+		t.Fatalf("status --sync --engine t3 failed: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(outJSON), &payload); err != nil {
+		t.Fatalf("failed to parse status JSON: %v (output: %q)", err, outJSON)
+	}
+
+	st, err := state.LoadStateForEngine("t3")
+	if err != nil {
+		t.Fatalf("LoadStateForEngine(t3) failed: %v", err)
+	}
+	proj := st.Projects["buddy"]
+	liveTask := proj.Tasks["feat-live"]
+	if liveTask.Status != "ready_for_demo" || liveTask.LastSummary != "Implemented auth" || liveTask.LastVerifiedAt == "" {
+		t.Errorf("expected feat-live reconciled to ready_for_demo/'Implemented auth', got %+v", liveTask)
+	}
+	goneTask := proj.Tasks["feat-gone"]
+	if goneTask.Status != "missing" || !strings.Contains(goneTask.LastSummary, "not found") {
+		t.Errorf("expected feat-gone marked missing, got %+v", goneTask)
+	}
+	if len(proj.UntrackedWindows) != 1 {
+		t.Fatalf("expected 1 untracked window (settled & tracked skipped), got %+v", proj.UntrackedWindows)
+	}
+	uw := proj.UntrackedWindows[0]
+	if uw.WindowID != "th_untracked" || uw.DetectedStatus != "waiting_for_input" || uw.Label != "Fix login race condition" {
+		t.Errorf("unexpected untracked window: %+v", uw)
+	}
+
+	// Verify table format prints "t3" (not hard-coded "rex") for untracked windows.
+	cmdTable := newStatusCmd()
+	cmdTable.SetArgs([]string{"--no-sync", "--engine", "t3", "--format", "table"})
+	outTable, _, err := captureOutput(t, func() error { return cmdTable.Execute() })
+	if err != nil {
+		t.Fatalf("status --format table failed: %v", err)
+	}
+	if !strings.Contains(outTable, "t3") || strings.Contains(outTable, " rex ") {
+		t.Errorf("expected table output to print 't3' engine for untracked thread, got:\n%s", outTable)
 	}
 }

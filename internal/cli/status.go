@@ -29,16 +29,23 @@ func newStatusCmd() *cobra.Command {
 			cfg, _ := config.LoadConfig()
 			res := engine.ResolveEngine(flagEngine, os.Getenv, cfg)
 
-			if !noSync && (allEngines || res.EngineName == "rex") {
-				if syncLive {
-					_ = reconcileRexWithBackend(cmd.Context(), defaultRexBackend())
-				} else {
-					reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
+			if !noSync {
+				enginesToSync := []string{res.EngineName}
+				if allEngines {
+					enginesToSync = []string{"rex", "t3"}
+				}
+				for _, engName := range enginesToSync {
+					if syncLive {
+						reconcileActiveNow(cmd.Context(), engName)
+					} else {
+						reconcileActiveIfStale(cmd.Context(), engName, defaultSyncTTL)
+					}
 				}
 			}
 
 			var st *state.State
 			var err error
+			untrackedEngine := make(map[string]string)
 			if allEngines {
 				st = &state.State{
 					Version:  1,
@@ -60,6 +67,9 @@ func newStatusCmd() *cobra.Command {
 						st.BuddySessionID = engState.BuddySessionID
 					}
 					for pName, pData := range engState.Projects {
+						for _, uw := range pData.UntrackedWindows {
+							untrackedEngine[pName+"\x00"+uw.WindowID] = engName
+						}
 						existing, exists := st.Projects[pName]
 						if !exists {
 							pCopy := pData
@@ -175,7 +185,13 @@ func newStatusCmd() *cobra.Command {
 					if len(summary) > 40 {
 						summary = summary[:40] + "..."
 					}
-					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, uw.Label, "user", "rex", "untracked:"+uw.DetectedStatus, summary)
+					uwEng := res.EngineName
+					if allEngines {
+						if mapped, ok := untrackedEngine[pName+"\x00"+uw.WindowID]; ok && mapped != "" {
+							uwEng = mapped
+						}
+					}
+					fmt.Printf("%-16s %-20s %-8s %-8s %-16s %s\n", pName, uw.Label, "user", uwEng, "untracked:"+uw.DetectedStatus, summary)
 				}
 			}
 			return nil

@@ -471,14 +471,22 @@ func newWatchRunner(cmd *cobra.Command, projectName, taskSlug string, watchAll b
 	}
 }
 
+// syncEngine runs live state reconciliation for the given engine.
+func syncEngine(ctx context.Context, engineName string) {
+	switch engineName {
+	case "rex":
+		_ = syncRexFn(ctx)
+	case "t3":
+		_ = syncT3Fn(ctx)
+	}
+}
+
 func (w *watchRunner) run() error {
 	if w.engineName == "" {
 		w.engineName = resolveActiveEngine("")
 	}
 	w.snapshotInitiallyActive()
-	if w.engineName == "rex" {
-		_ = syncRexFn(w.cmd.Context())
-	}
+	syncEngine(w.cmd.Context(), w.engineName)
 
 	if !w.watchAll && w.taskSlug != "" {
 		handled, err := w.preflightSingleTarget()
@@ -499,8 +507,8 @@ func (w *watchRunner) run() error {
 			return err
 		}
 
-		if !firstPoll && w.engineName == "rex" {
-			_ = syncRexFn(w.cmd.Context())
+		if !firstPoll {
+			syncEngine(w.cmd.Context(), w.engineName)
 		}
 		firstPoll = false
 
