@@ -270,6 +270,8 @@ buddy-ctl batch --json '[{"project":"docnotate","task":"feat-a","prompt":"..."},
 
 # Clean up task tab when finished
 buddy-ctl task close --project docnotate --task inline-comments
+buddy-ctl task clean --project docnotate --task inline-comments --reason "merged and verified"
+buddy-ctl task history --project docnotate --limit 20
 ```
 
 ---

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -44,6 +45,7 @@ func newTaskCleanCmd() *cobra.Command {
 		reason            string
 		force             bool
 		closeFirst        bool
+		allClosed         bool
 		dryRun            bool
 		pruneEmptyProject bool
 		engineName        string
@@ -64,13 +66,20 @@ log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branch
   buddy-ctl task clean -p buddy -t feat-auth --close --reason "done and verified"
   buddy-ctl task clean -p buddy -t feat-auth --dry-run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if projectName == "" || taskSlug == "" {
-				return fmt.Errorf("both --project (-p) and --task (-t) are required")
-			}
-
 			engName := resolveActiveEngine(engineName)
 			if strings.TrimSpace(reason) == "" {
 				reason = "cleaned via CLI"
+			}
+
+			if allClosed {
+				if taskSlug != "" {
+					return fmt.Errorf("--task (-t) cannot be combined with --all-closed")
+				}
+				return runCleanAllClosed(cmd, engName, projectName, reason, dryRun, pruneEmptyProject)
+			}
+
+			if projectName == "" || taskSlug == "" {
+				return fmt.Errorf("both --project (-p) and --task (-t) are required (or pass --all-closed)")
 			}
 
 			if dryRun {
@@ -199,6 +208,7 @@ log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branch
 	cmd.Flags().StringVarP(&reason, "reason", "r", "cleaned via CLI", "Brief reason for cleanup recorded in history")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Allow cleaning non-closed tasks without closing live surface (requires explicit user consent)")
 	cmd.Flags().BoolVar(&closeFirst, "close", false, "Close the task via the engine before cleaning if not already closed")
+	cmd.Flags().BoolVar(&allClosed, "all-closed", false, "Clean all tasks with status 'closed' or 'done' (all projects, or scoped by -p)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be cleaned without modifying state or history")
 	cmd.Flags().BoolVar(&pruneEmptyProject, "prune-empty-project", false, "Remove the project entry from state when no tasks or untracked windows remain")
 	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
@@ -263,6 +273,147 @@ func runCleanDryRun(cmd *cobra.Command, engName, projectName, taskSlug, reason s
 		"engine":              engName,
 		"would_prune_project": wouldPrune,
 		"record":              rec,
+	})
+}
+
+func runCleanAllClosed(cmd *cobra.Command, engName, projectName, reason string, dryRun, pruneEmptyProject bool) error {
+	type cleanedSummary struct {
+		Project   string `json:"project"`
+		Task      string `json:"task"`
+		CleanupID string `json:"cleanup_id"`
+	}
+
+	var (
+		records        []state.HistoryRecord
+		cleanedList    []cleanedSummary
+		prunedProjects []string
+	)
+
+	collect := func(s *state.State) ([]string, map[string][]string, error) {
+		var projNames []string
+		if projectName != "" {
+			p, err := s.FindProject(projectName)
+			if err != nil {
+				return nil, nil, err
+			}
+			projNames = []string{p.Name}
+		} else {
+			for pName := range s.Projects {
+				projNames = append(projNames, pName)
+			}
+			sort.Strings(projNames)
+		}
+
+		tasksByProj := make(map[string][]string, len(projNames))
+		for _, pName := range projNames {
+			p := s.Projects[pName]
+			var slugs []string
+			for tSlug, tData := range p.Tasks {
+				if isCleanableStatus(tData.Status) {
+					slugs = append(slugs, tSlug)
+				}
+			}
+			sort.Strings(slugs)
+			if len(slugs) > 0 {
+				tasksByProj[pName] = slugs
+			}
+		}
+		return projNames, tasksByProj, nil
+	}
+
+	if dryRun {
+		st, err := state.LoadStateForEngine(engName)
+		if err != nil {
+			return err
+		}
+		projNames, tasksByProj, err := collect(st)
+		if err != nil {
+			return err
+		}
+		for _, pName := range projNames {
+			p := st.Projects[pName]
+			slugs := tasksByProj[pName]
+			for _, slug := range slugs {
+				rec := state.NewHistoryRecord(p, p.Tasks[slug], reason, false)
+				records = append(records, rec)
+				cleanedList = append(cleanedList, cleanedSummary{Project: pName, Task: slug, CleanupID: rec.CleanupID})
+			}
+			if pruneEmptyProject && len(p.Tasks)-len(slugs) == 0 && len(p.UntrackedWindows) == 0 {
+				prunedProjects = append(prunedProjects, pName)
+			}
+		}
+		if cleanedList == nil {
+			cleanedList = []cleanedSummary{}
+		}
+		if prunedProjects == nil {
+			prunedProjects = []string{}
+		}
+		return encodeJSON(cmd, map[string]any{
+			"status":               "dry_run",
+			"dry_run":              true,
+			"all_closed":           true,
+			"engine":               engName,
+			"count":                len(cleanedList),
+			"cleaned":              cleanedList,
+			"would_prune_projects": prunedProjects,
+		})
+	}
+
+	err := state.MutateStateForEngine(engName, func(s *state.State) error {
+		projNames, tasksByProj, err := collect(s)
+		if err != nil {
+			return err
+		}
+		for _, pName := range projNames {
+			p := s.Projects[pName]
+			for _, slug := range tasksByProj[pName] {
+				rec := state.NewHistoryRecord(p, p.Tasks[slug], reason, false)
+				records = append(records, rec)
+				cleanedList = append(cleanedList, cleanedSummary{Project: pName, Task: slug, CleanupID: rec.CleanupID})
+			}
+		}
+		if len(records) == 0 {
+			return nil
+		}
+
+		if err := state.AppendHistoryRecords(records); err != nil {
+			return err
+		}
+
+		for _, pName := range projNames {
+			p := s.Projects[pName]
+			for _, slug := range tasksByProj[pName] {
+				delete(p.Tasks, slug)
+				removeSeenEntry(engName, pName+"/"+slug)
+			}
+			if pruneEmptyProject && len(p.Tasks) == 0 && len(p.UntrackedWindows) == 0 {
+				delete(s.Projects, pName)
+				prunedProjects = append(prunedProjects, pName)
+			} else {
+				s.Projects[pName] = p
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if cleanedList == nil {
+		cleanedList = []cleanedSummary{}
+	}
+	if prunedProjects == nil {
+		prunedProjects = []string{}
+	}
+
+	return encodeJSON(cmd, map[string]any{
+		"status":          "cleaned",
+		"all_closed":      true,
+		"engine":          engName,
+		"count":           len(cleanedList),
+		"cleaned":         cleanedList,
+		"pruned_projects": prunedProjects,
+		"history_path":    state.GetHistoryPath(),
 	})
 }
 

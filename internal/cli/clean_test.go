@@ -381,3 +381,62 @@ func TestTaskClean_DryRunAndHelpText(t *testing.T) {
 		t.Errorf("--help text missing explicit user consent wording: %s", helpOut.String())
 	}
 }
+
+func TestTaskClean_AllClosed(t *testing.T) {
+	clearAllHostSignals(t)
+	t.Setenv("BUDDY_DIR", t.TempDir())
+	t.Setenv("BUDDY_ENGINE", "t3")
+	_ = config.SaveConfig(config.DefaultConfig())
+
+	seedCleanTestState(t, "t3", "alpha", "closed-a", "closed", "th-a")
+	seedCleanTestState(t, "t3", "alpha", "running-a", "running", "th-r")
+	seedCleanTestState(t, "t3", "beta", "done-b", "done", "th-b")
+
+	// Dry-run scoped to alpha should preview only closed-a.
+	dryCmd := newTaskCleanCmd()
+	var dryOut bytes.Buffer
+	dryCmd.SetOut(&dryOut)
+	dryCmd.SetArgs([]string{"-p", "alpha", "--all-closed", "--dry-run", "--engine", "t3"})
+	if err := dryCmd.Execute(); err != nil {
+		t.Fatalf("all-closed dry-run failed: %v", err)
+	}
+	var dryResp map[string]any
+	_ = json.Unmarshal(dryOut.Bytes(), &dryResp)
+	if dryResp["count"] != float64(1) {
+		t.Fatalf("dry-run count = %v, want 1", dryResp["count"])
+	}
+
+	// Execute --all-closed across all projects in t3 engine.
+	cmd := newTaskCleanCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--all-closed", "--reason", "eod cleanup", "--engine", "t3"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("all-closed failed: %v", err)
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(out.Bytes(), &resp)
+	if resp["status"] != "cleaned" || resp["count"] != float64(2) {
+		t.Fatalf("unexpected all-closed response: %+v", resp)
+	}
+
+	st, _ := state.LoadStateForEngine("t3")
+	if _, ok := st.Projects["alpha"].Tasks["closed-a"]; ok {
+		t.Errorf("closed-a should be removed")
+	}
+	if _, ok := st.Projects["alpha"].Tasks["running-a"]; !ok {
+		t.Errorf("running-a should remain")
+	}
+	if _, ok := st.Projects["beta"]; !ok {
+		t.Errorf("empty project beta should be kept by default")
+	}
+	if len(st.Projects["beta"].Tasks) != 0 {
+		t.Errorf("done-b should be removed from beta")
+	}
+
+	hist, err := state.QueryHistory(state.HistoryFilter{Engine: "t3", Limit: 10})
+	if err != nil || len(hist) != 2 {
+		t.Fatalf("expected 2 history records, got %d (err=%v)", len(hist), err)
+	}
+}

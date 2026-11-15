@@ -135,14 +135,22 @@ invoke_subagent(
 )
 ```
 
-### 4. Presenting a Demo (`demo`) & Cleanup (`task close`)
+### 4. Presenting a Demo (`demo`) & Cleanup (`task close` -> `task clean`)
 - **Focus tab & open dev server split**:
   ```sh
   buddy-ctl demo --project <proj> --task <slug> [--cmd "npm run dev"] [--focus-only]
   ```
-- **Close completed tab**:
+- **Close and clean completed task** (never hand-edit `~/.buddy/state/<engine>.json`):
   ```sh
   buddy-ctl task close --project <proj> --task <slug>
+  buddy-ctl task clean --project <proj> --task <slug> --reason "merged and verified"
+  # Or in one step:
+  buddy-ctl task clean --project <proj> --task <slug> --close --reason "merged and verified"
+  ```
+- **`--force` Consent Rule**: **NEVER** pass `--force` on your own initiative. `--force` is reserved for orphaned/stale entries (e.g., unreachable backend or already-gone tab/thread) and **requires explicit user agreement in the current conversation**. Always ask the user before passing `--force`.
+- **Inspect past cleaned tasks**:
+  ```sh
+  buddy-ctl task history [--project <proj>] [--task <slug>] [--since 7d] [--limit 20] [--json]
   ```
 
 ---
@@ -156,6 +164,8 @@ invoke_subagent(
 | `buddy-ctl task start` | `-p <proj> -t <slug> [-m "<prompt>"] [-a <agent>] [--engine <eng>] [--force]` — Start a task tab with explicit slug. |
 | `buddy-ctl task update` | `-p <proj> -t <slug> --status <status> [--summary "<text>"]` — Manually update cached status/summary. |
 | `buddy-ctl task close` | `-p <proj> -t <slug>` — Close task window in multiplexer and mark closed. |
+| `buddy-ctl task clean` | `-p <proj> -t <slug> [--reason "..."] [--close] [--force] [--all-closed] [--prune-empty-project] [--dry-run]` — Remove closed task from active state and append audit record to `~/.buddy/history/tasks.jsonl` (`--force` requires explicit user consent). |
+| `buddy-ctl task history` | `[-p <proj>] [-t <slug>] [--engine <eng>] [--since 7d] [--limit 20] [--json]` — Query append-only task cleanup history, newest first. |
 | `buddy-ctl status` | `[--sync] [--no-sync] [--format json\|table\|brief] [--engine <eng>]` — View tracked projects, tasks, and `untracked_windows` (auto-syncs if Rex cache >45s old unless `--no-sync`). |
 | `buddy-ctl watch` | `[--project <P> --task <T>] \| [--project <P>] \| [--all] [--interval 5] [--timeout 600] [--debounce 2] [--notify]` — Block until a watched task hits `waiting_for_input`, `ready_for_demo`, or `error`. |
 | `buddy-ctl send` | `-p <proj> -t <slug> (--text "<msg>" \| --key <key>)` — Send text (+ Enter) or special key (`enter`, `esc`, `ctrl+c`), transitioning task back to `running`. |

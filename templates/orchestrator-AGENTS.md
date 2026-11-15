@@ -46,6 +46,7 @@ The user frequently works directly inside project tabs outside Buddy.
 
 ### 5. O(1) State & Skill Reference
 - Never run raw multiplexer scans (`rex ls`) on every turn; use `buddy-ctl` commands backed by `~/.buddy/state/<engine>.json`.
+- Never hand-edit `~/.buddy/state/<engine>.json` when cleaning up tasks: run `buddy-ctl task close` then `buddy-ctl task clean -p <proj> -t <slug> --reason "..."` (or `--close`). Never pass `--force` to `task clean` without explicit user consent in the current conversation.
 - Whenever you need exact `buddy-ctl` flags, JSON schemas, pickup-failure recovery (`picked_up: false`), deep reconcile, or diagnosis playbooks, **read the `buddy` skill (`SKILL.md`)**.
 
 ---
