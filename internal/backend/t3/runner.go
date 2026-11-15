@@ -17,13 +17,31 @@ type ThreadStartOutput struct {
 	RunID     string `json:"runId"`
 }
 
+// PendingRuntimeRequest represents structured pending request metadata when exposed
+// by T3's thread payload (e.g. blocking approvals vs non-blocking async questions).
+type PendingRuntimeRequest struct {
+	Kind     string `json:"kind,omitempty"`
+	Blocking *bool  `json:"blocking,omitempty"`
+	UserOnly *bool  `json:"userOnly,omitempty"`
+}
+
 // ThreadInfo contains metadata about a thread from `t3 thread show --json`.
 type ThreadInfo struct {
-	ThreadID            string `json:"threadId"`
-	Title               string `json:"title,omitempty"`
-	Status              string `json:"status"`
-	Model               string `json:"model"`
-	PendingRequestCount int    `json:"pendingRequestCount,omitempty"`
+	ThreadID                  string                 `json:"threadId"`
+	Title                     string                 `json:"title,omitempty"`
+	Status                    string                 `json:"status"`
+	Model                     string                 `json:"model"`
+	InteractionMode           string                 `json:"interactionMode,omitempty"`
+	Settled                   bool                   `json:"settled,omitempty"`
+	PendingRequestCount       int                    `json:"pendingRequestCount,omitempty"`
+	PendingRuntimeRequest     *PendingRuntimeRequest `json:"pendingRuntimeRequest,omitempty"`
+	HasActionableProposedPlan bool                   `json:"hasActionableProposedPlan,omitempty"`
+	BlockedOnThreadWait       bool                   `json:"blockedOnThreadWait,omitempty"`
+	PendingBackgroundTasks    []json.RawMessage      `json:"pendingBackgroundTasks,omitempty"`
+	LastError                 string                 `json:"lastError,omitempty"`
+	LastErrorClass            string                 `json:"lastErrorClass,omitempty"`
+	LastErrorCode             string                 `json:"lastErrorCode,omitempty"`
+	UsageLimitResetAt         string                 `json:"usageLimitResetAt,omitempty"`
 }
 
 // MessageInfo represents an individual message from `t3 thread show --json`.

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -289,6 +290,8 @@ func TestT3Engine_Close(t *testing.T) {
 
 var _ TaskStatusProvider = (*T3Engine)(nil)
 
+func boolPtr(v bool) *bool { return &v }
+
 func TestT3Engine_ProbeStatus(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -305,7 +308,7 @@ func TestT3Engine_ProbeStatus(t *testing.T) {
 			name:    "running",
 			blockID: "th-run",
 			showOut: &t3.ThreadShowOutput{
-				Thread: t3.ThreadInfo{ThreadID: "th-run", Status: "running"},
+				Thread: t3.ThreadInfo{ThreadID: "th-run", Status: "running", InteractionMode: "default"},
 				Messages: []t3.MessageInfo{
 					{Role: "user", Text: "Build feature X"},
 					{Role: "assistant", Text: "Working on\nstep 2"},
@@ -316,10 +319,10 @@ func TestT3Engine_ProbeStatus(t *testing.T) {
 			wantSummary: "Working on step 2",
 		},
 		{
-			name:    "planning",
-			blockID: "th-plan",
+			name:    "planning via interactionMode plan on active run",
+			blockID: "th-plan-mode",
 			showOut: &t3.ThreadShowOutput{
-				Thread: t3.ThreadInfo{ThreadID: "th-plan", Status: "planning"},
+				Thread: t3.ThreadInfo{ThreadID: "th-plan-mode", Status: "running", InteractionMode: "plan"},
 				Messages: []t3.MessageInfo{
 					{Role: "assistant", Text: "Drafting implementation plan"},
 				},
@@ -329,22 +332,50 @@ func TestT3Engine_ProbeStatus(t *testing.T) {
 			wantSummary: "Drafting implementation plan",
 		},
 		{
-			name:    "idle with assistant reply",
-			blockID: "th-idle",
+			name:    "non-blocking pending request keeps working",
+			blockID: "th-nonblock",
 			showOut: &t3.ThreadShowOutput{
-				Thread: t3.ThreadInfo{ThreadID: "th-idle", Status: "idle"},
+				Thread: t3.ThreadInfo{
+					ThreadID:            "th-nonblock",
+					Status:              "running",
+					PendingRequestCount: 1,
+					PendingRuntimeRequest: &t3.PendingRuntimeRequest{
+						Kind:     "user_input",
+						Blocking: boolPtr(false),
+					},
+				},
 				Messages: []t3.MessageInfo{
-					{Role: "user", Text: "Add auth"},
-					{Role: "assistant", Text: "Added JWT auth.\nAll tests pass."},
+					{Role: "assistant", Text: "Continuing background work"},
 				},
 			},
-			wantStatus:  "ready_for_demo",
-			wantWorking: false,
-			wantEvent:   "ready_for_demo",
-			wantSummary: "Added JWT auth. All tests pass.",
+			wantStatus:  "running",
+			wantWorking: true,
+			wantSummary: "Continuing background work",
 		},
 		{
-			name:    "pending request overrides running",
+			name:    "blocking pending request maps to waiting_for_input",
+			blockID: "th-block",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:            "th-block",
+					Status:              "running",
+					PendingRequestCount: 1,
+					PendingRuntimeRequest: &t3.PendingRuntimeRequest{
+						Kind:     "approval",
+						Blocking: boolPtr(true),
+					},
+				},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Approve shell command?"},
+				},
+			},
+			wantStatus:  "waiting_for_input",
+			wantWorking: false,
+			wantEvent:   "waiting_for_input",
+			wantSummary: "Approve shell command?",
+		},
+		{
+			name:    "pendingRequestCount fallback without metadata maps to waiting_for_input",
 			blockID: "th-wait",
 			showOut: &t3.ThreadShowOutput{
 				Thread: t3.ThreadInfo{
@@ -362,18 +393,102 @@ func TestT3Engine_ProbeStatus(t *testing.T) {
 			wantSummary: "Should I overwrite config.json?",
 		},
 		{
-			name:    "failed status maps to error",
-			blockID: "th-err",
+			name:    "idle with assistant reply",
+			blockID: "th-idle",
 			showOut: &t3.ThreadShowOutput{
-				Thread: t3.ThreadInfo{ThreadID: "th-err", Status: "failed"},
+				Thread: t3.ThreadInfo{ThreadID: "th-idle", Status: "idle"},
 				Messages: []t3.MessageInfo{
-					{Role: "assistant", Text: "Compilation failed in main.go"},
+					{Role: "user", Text: "Add auth"},
+					{Role: "assistant", Text: "Added JWT auth.\nAll tests pass."},
+				},
+			},
+			wantStatus:  "ready_for_demo",
+			wantWorking: false,
+			wantEvent:   "ready_for_demo",
+			wantSummary: "Added JWT auth. All tests pass.",
+		},
+		{
+			name:    "plan ready on settled plan-mode thread",
+			blockID: "th-plan-ready",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:                  "th-plan-ready",
+					Status:                    "idle",
+					InteractionMode:           "plan",
+					HasActionableProposedPlan: true,
+				},
+			},
+			wantStatus:  "ready_for_demo",
+			wantWorking: false,
+			wantEvent:   "ready_for_demo",
+			wantSummary: "Plan ready for review",
+		},
+		{
+			name:    "blocked on child thread wait is not ready_for_demo",
+			blockID: "th-child-wait",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:            "th-child-wait",
+					Status:              "idle",
+					BlockedOnThreadWait: true,
+				},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Spawned child thread"},
+				},
+			},
+			wantStatus:  "running",
+			wantWorking: true,
+			wantSummary: "Spawned child thread",
+		},
+		{
+			name:    "pending background tasks is not ready_for_demo",
+			blockID: "th-bg-tasks",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:               "th-bg-tasks",
+					Status:                 "waiting",
+					PendingBackgroundTasks: []json.RawMessage{json.RawMessage(`{"id":"bg-1"}`)},
+				},
+			},
+			wantStatus:  "running",
+			wantWorking: true,
+			wantSummary: "Waiting on background/child work",
+		},
+		{
+			name:    "structured error prefers lastError over message text",
+			blockID: "th-err-struct",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:       "th-err-struct",
+					Status:         "failed",
+					LastError:      "Provider returned 502 Bad Gateway",
+					LastErrorClass: "provider_error",
+				},
+				Messages: []t3.MessageInfo{
+					{Role: "assistant", Text: "Earlier unrelated assistant message"},
 				},
 			},
 			wantStatus:  "error",
 			wantWorking: false,
 			wantEvent:   "error",
-			wantSummary: "Compilation failed in main.go",
+			wantSummary: "Provider returned 502 Bad Gateway",
+		},
+		{
+			name:    "rate limit error surfaces reset time distinctly",
+			blockID: "th-rate-limit",
+			showOut: &t3.ThreadShowOutput{
+				Thread: t3.ThreadInfo{
+					ThreadID:          "th-rate-limit",
+					Status:            "failed",
+					LastError:         "Too many requests",
+					LastErrorClass:    "rate_limit",
+					UsageLimitResetAt: "2026-11-15T10:00:00Z",
+				},
+			},
+			wantStatus:  "error",
+			wantWorking: false,
+			wantEvent:   "error",
+			wantSummary: "Rate limit reached (resets at 2026-11-15T10:00:00Z): Too many requests",
 		},
 		{
 			name:    "idle without assistant reply stays unknown",

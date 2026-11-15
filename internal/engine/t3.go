@@ -125,7 +125,28 @@ func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (
 
 	snapshot := formatThreadShowOutput(out, 0)
 
-	if out.Thread.PendingRequestCount > 0 {
+	// Blocking vs non-blocking pending requests:
+	// When pendingRuntimeRequest metadata is present, only a blocking request
+	// (blocking == nil || *blocking) pauses for user input; blocking: false is
+	// an async question where the run keeps working.
+	// Limitation: `t3 thread show --json` currently only exposes pendingRequestCount
+	// without pendingRuntimeRequest, so when only the count is present we
+	// conservatively treat pendingRequestCount > 0 as waiting_for_input.
+	if out.Thread.PendingRuntimeRequest != nil {
+		if out.Thread.PendingRuntimeRequest.Blocking == nil || *out.Thread.PendingRuntimeRequest.Blocking {
+			summary := summarizeThreadMessages(out.Messages, true)
+			if summary == "" {
+				summary = "Waiting for input (pending request)"
+			}
+			return TaskStatusProbe{
+				Status:   "waiting_for_input",
+				Working:  false,
+				Event:    "waiting_for_input",
+				Summary:  summary,
+				Snapshot: snapshot,
+			}, nil
+		}
+	} else if out.Thread.PendingRequestCount > 0 {
 		summary := summarizeThreadMessages(out.Messages, true)
 		if summary == "" {
 			summary = "Waiting for input (pending request)"
@@ -140,17 +161,15 @@ func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (
 	}
 
 	rawStatus := strings.ToLower(strings.TrimSpace(out.Thread.Status))
+	isPlanMode := strings.EqualFold(strings.TrimSpace(out.Thread.InteractionMode), "plan")
+
 	switch rawStatus {
-	case "error", "failed", "errored", "crashed", "cancelled", "canceled":
-		summary := summarizeThreadMessages(out.Messages, true)
-		if summary == "" {
-			summary = "Thread failed with status: " + rawStatus
-		}
+	case "error", "failed", "errored", "crashed", "interrupted", "cancelled", "canceled", "rolled_back":
 		return TaskStatusProbe{
 			Status:   "error",
 			Working:  false,
 			Event:    "error",
-			Summary:  summary,
+			Summary:  formatT3ErrorSummary(out.Thread, rawStatus, out.Messages),
 			Snapshot: snapshot,
 		}, nil
 
@@ -166,7 +185,19 @@ func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (
 			Snapshot: snapshot,
 		}, nil
 
-	case "running", "in_progress", "active", "queued", "starting", "pending":
+	case "preparing", "queued", "starting", "running", "in_progress", "active", "pending":
+		if isPlanMode {
+			summary := summarizeThreadMessages(out.Messages, false)
+			if summary == "" {
+				summary = "Thread is planning"
+			}
+			return TaskStatusProbe{
+				Status:   "planning",
+				Working:  true,
+				Summary:  summary,
+				Snapshot: snapshot,
+			}, nil
+		}
 		summary := summarizeThreadMessages(out.Messages, false)
 		if summary == "" {
 			summary = "Thread is running"
@@ -178,7 +209,34 @@ func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (
 			Snapshot: snapshot,
 		}, nil
 
-	case "waiting", "waiting_for_input", "blocked", "paused", "needs_input":
+	case "waiting_for_input", "blocked", "paused", "needs_input":
+		summary := summarizeThreadMessages(out.Messages, true)
+		if summary == "" {
+			summary = "Waiting for input"
+		}
+		return TaskStatusProbe{
+			Status:   "waiting_for_input",
+			Working:  false,
+			Event:    "waiting_for_input",
+			Summary:  summary,
+			Snapshot: snapshot,
+		}, nil
+
+	case "waiting":
+		// A thread waiting on child threads or background tasks is still working,
+		// not awaiting user input or ready_for_demo.
+		if out.Thread.BlockedOnThreadWait || len(out.Thread.PendingBackgroundTasks) > 0 {
+			summary := summarizeThreadMessages(out.Messages, false)
+			if summary == "" {
+				summary = "Waiting on background/child work"
+			}
+			return TaskStatusProbe{
+				Status:   "running",
+				Working:  true,
+				Summary:  summary,
+				Snapshot: snapshot,
+			}, nil
+		}
 		summary := summarizeThreadMessages(out.Messages, true)
 		if summary == "" {
 			summary = "Waiting for input"
@@ -192,6 +250,31 @@ func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (
 		}, nil
 
 	case "idle", "completed", "done", "finished", "settled", "ready":
+		if out.Thread.BlockedOnThreadWait || len(out.Thread.PendingBackgroundTasks) > 0 {
+			summary := summarizeThreadMessages(out.Messages, false)
+			if summary == "" {
+				summary = "Waiting on background/child work"
+			}
+			return TaskStatusProbe{
+				Status:   "running",
+				Working:  true,
+				Summary:  summary,
+				Snapshot: snapshot,
+			}, nil
+		}
+		if isPlanMode && out.Thread.HasActionableProposedPlan {
+			summary := summarizeThreadMessages(out.Messages, true)
+			if summary == "" {
+				summary = "Plan ready for review"
+			}
+			return TaskStatusProbe{
+				Status:   "ready_for_demo",
+				Working:  false,
+				Event:    "ready_for_demo",
+				Summary:  summary,
+				Snapshot: snapshot,
+			}, nil
+		}
 		if summary := summarizeThreadMessages(out.Messages, true); summary != "" && hasAssistantMessage(out.Messages) {
 			return TaskStatusProbe{
 				Status:   "ready_for_demo",
@@ -216,6 +299,44 @@ func (e *T3Engine) ProbeStatus(ctx context.Context, sessionID, blockID string) (
 			Snapshot: snapshot,
 		}, nil
 	}
+}
+
+func formatT3ErrorSummary(thread t3.ThreadInfo, rawStatus string, messages []t3.MessageInfo) string {
+	lowerClass := strings.ToLower(strings.TrimSpace(thread.LastErrorClass))
+	lowerCode := strings.ToLower(strings.TrimSpace(thread.LastErrorCode))
+	isRateLimit := thread.UsageLimitResetAt != "" ||
+		strings.Contains(lowerClass, "rate") ||
+		strings.Contains(lowerCode, "rate") ||
+		strings.Contains(lowerClass, "usage_limit") ||
+		strings.Contains(lowerCode, "usage_limit")
+
+	errText := oneLineSummary(thread.LastError)
+	if isRateLimit {
+		msg := "Rate limit reached"
+		if thread.UsageLimitResetAt != "" {
+			msg += fmt.Sprintf(" (resets at %s)", thread.UsageLimitResetAt)
+		}
+		if errText != "" {
+			msg += ": " + errText
+		}
+		return msg
+	}
+	if errText != "" {
+		return errText
+	}
+	if thread.LastErrorClass != "" && thread.LastErrorCode != "" {
+		return fmt.Sprintf("Thread error (%s/%s)", thread.LastErrorClass, thread.LastErrorCode)
+	}
+	if thread.LastErrorClass != "" {
+		return fmt.Sprintf("Thread error (%s)", thread.LastErrorClass)
+	}
+	if thread.LastErrorCode != "" {
+		return fmt.Sprintf("Thread error (%s)", thread.LastErrorCode)
+	}
+	if summary := summarizeThreadMessages(messages, true); summary != "" {
+		return summary
+	}
+	return "Thread failed with status: " + rawStatus
 }
 
 func hasAssistantMessage(messages []t3.MessageInfo) bool {
