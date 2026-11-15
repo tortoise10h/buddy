@@ -268,7 +268,7 @@ buddy-ctl diagnose --project docnotate --task inline-comments --lines 300
 # Batch dispatch tasks across multiple projects
 buddy-ctl batch --json '[{"project":"docnotate","task":"feat-a","prompt":"..."},{"project":"daily-catch","task":"feat-b","prompt":"..."}]'
 
-# Clean up task tab when finished
+# Close task tab (or settle T3 thread) and clean up when finished
 buddy-ctl task close --project docnotate --task inline-comments
 buddy-ctl task clean --project docnotate --task inline-comments --reason "merged and verified"
 buddy-ctl task history --project docnotate --limit 20
