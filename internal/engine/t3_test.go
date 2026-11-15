@@ -16,6 +16,7 @@ type mockT3Runner struct {
 	threadStartCalls []t3.ThreadStartOptions
 	threadShowCalls  []string
 	threadSendCalls  []struct{ threadID, message string }
+	threadListCalls  []string
 
 	projectAddErr  error
 	threadStartOut *t3.ThreadStartOutput
@@ -23,6 +24,8 @@ type mockT3Runner struct {
 	threadShowOut  *t3.ThreadShowOutput
 	threadShowErr  error
 	threadSendErr  error
+	threadListOut  *t3.ThreadListOutput
+	threadListErr  error
 }
 
 func (m *mockT3Runner) ProjectAdd(_ context.Context, projectPath, title string) error {
@@ -49,6 +52,14 @@ func (m *mockT3Runner) ThreadShow(_ context.Context, threadID string) (*t3.Threa
 func (m *mockT3Runner) ThreadSend(_ context.Context, threadID, message string) error {
 	m.threadSendCalls = append(m.threadSendCalls, struct{ threadID, message string }{threadID, message})
 	return m.threadSendErr
+}
+
+func (m *mockT3Runner) ThreadList(_ context.Context, projectPath string) (*t3.ThreadListOutput, error) {
+	m.threadListCalls = append(m.threadListCalls, projectPath)
+	if m.threadListErr != nil {
+		return nil, m.threadListErr
+	}
+	return m.threadListOut, nil
 }
 
 func TestT3Engine_Dispatch_AddsProjectAndStartsThread(t *testing.T) {

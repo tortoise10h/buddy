@@ -16,6 +16,7 @@ type T3Runner interface {
 	ThreadStart(ctx context.Context, opts t3.ThreadStartOptions) (*t3.ThreadStartOutput, error)
 	ThreadShow(ctx context.Context, threadID string) (*t3.ThreadShowOutput, error)
 	ThreadSend(ctx context.Context, threadID string, message string) error
+	ThreadList(ctx context.Context, projectPath string) (*t3.ThreadListOutput, error)
 }
 
 // T3Engine implements engine.Engine using the local t3 CLI.
@@ -107,6 +108,21 @@ func (e *T3Engine) Capture(ctx context.Context, sessionID, blockID string, lines
 		return "", fmt.Errorf("t3 thread show: %w", err)
 	}
 	return formatThreadShowOutput(out, lines), nil
+}
+
+// ListProjectThreads lists threads for a project workspace via `t3 thread list --json`.
+func (e *T3Engine) ListProjectThreads(ctx context.Context, projectPath string) ([]t3.ThreadSummary, error) {
+	if projectPath == "" {
+		return nil, fmt.Errorf("t3 list project threads: project path is required")
+	}
+	out, err := e.runner.ThreadList(ctx, projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("t3 thread list: %w", err)
+	}
+	if out == nil {
+		return nil, nil
+	}
+	return out.Threads, nil
 }
 
 // ProbeStatus queries `t3 thread show --json` and maps T3 thread state into

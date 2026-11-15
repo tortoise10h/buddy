@@ -178,6 +178,10 @@ func (m *mockCLIT3Runner) ThreadSend(_ context.Context, threadID, message string
 	return nil
 }
 
+func (m *mockCLIT3Runner) ThreadList(_ context.Context, _ string) (*t3.ThreadListOutput, error) {
+	return &t3.ThreadListOutput{}, nil
+}
+
 func TestDispatchAndSend_T3Routing_UsesT3Engine(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BUDDY_DIR", tmpDir)
