@@ -41,6 +41,8 @@ type HistoryRecord struct {
 	LastVerifiedAt string  `json:"last_verified_at"`
 	Reason         string  `json:"reason"`
 	Forced         bool    `json:"forced"`
+	ThreadSettled  *bool   `json:"thread_settled,omitempty"`
+	SettleError    string  `json:"settle_error,omitempty"`
 }
 
 // GetHistoryDir returns the directory for append-only task history (~/.buddy/history).

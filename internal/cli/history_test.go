@@ -33,6 +33,7 @@ func (r *historySyncT3Runner) ThreadSend(ctx context.Context, threadID, message 
 func (r *historySyncT3Runner) ThreadList(ctx context.Context, projectPath string) (*t3.ThreadListOutput, error) {
 	return &t3.ThreadListOutput{Threads: r.threads}, nil
 }
+func (r *historySyncT3Runner) ThreadSettle(_ context.Context, _ string) error { return nil }
 
 func TestTaskHistoryCmd_FiltersAndLimit(t *testing.T) {
 	clearAllHostSignals(t)

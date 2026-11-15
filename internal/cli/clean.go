@@ -88,7 +88,11 @@ log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branch
 
 			// If --close is requested and the task is not yet closed, close the live surface
 			// before acquiring the state flock.
-			closedViaFlag := false
+			var (
+				closedViaFlag bool
+				threadSettled *bool
+				settleError   string
+			)
 			if closeFirst {
 				st, err := state.LoadStateForEngine(engName)
 				if err != nil {
@@ -102,8 +106,20 @@ log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branch
 							if err != nil {
 								return err
 							}
-							if err := eng.Close(cmd.Context(), proj.RexSessionID, t.WindowID); err != nil {
-								return err
+							if targetEng == "t3" {
+								if closeErr := eng.Close(cmd.Context(), proj.RexSessionID, t.WindowID); closeErr != nil {
+									b := false
+									threadSettled = &b
+									settleError = closeErr.Error()
+									fmt.Fprintf(cmd.ErrOrStderr(), "WARN: failed to settle T3 thread %s: %v\n", t.WindowID, closeErr)
+								} else {
+									b := true
+									threadSettled = &b
+								}
+							} else {
+								if err := eng.Close(cmd.Context(), proj.RexSessionID, t.WindowID); err != nil {
+									return err
+								}
 							}
 						}
 						closedViaFlag = true
@@ -156,6 +172,8 @@ log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branch
 				}
 
 				rec := state.NewHistoryRecord(*proj, *t, reason, wasForced)
+				rec.ThreadSettled = threadSettled
+				rec.SettleError = settleError
 				if err := state.AppendHistoryRecord(rec); err != nil {
 					return err
 				}
@@ -198,6 +216,12 @@ log; it does NOT delete T3 threads from the T3 UI or remove git worktrees/branch
 				"pruned_project": prunedProject,
 				"cleanup_id":     cleanedRec.CleanupID,
 				"history_path":   state.GetHistoryPath(),
+			}
+			if cleanedRec.ThreadSettled != nil {
+				resp["thread_settled"] = *cleanedRec.ThreadSettled
+			}
+			if cleanedRec.SettleError != "" {
+				resp["settle_error"] = cleanedRec.SettleError
 			}
 			return encodeJSON(cmd, resp)
 		},

@@ -12,20 +12,22 @@ import (
 )
 
 type mockT3Runner struct {
-	projectAddCalls  []struct{ path, title string }
-	threadStartCalls []t3.ThreadStartOptions
-	threadShowCalls  []string
-	threadSendCalls  []struct{ threadID, message string }
-	threadListCalls  []string
+	projectAddCalls   []struct{ path, title string }
+	threadStartCalls  []t3.ThreadStartOptions
+	threadShowCalls   []string
+	threadSendCalls   []struct{ threadID, message string }
+	threadListCalls   []string
+	threadSettleCalls []string
 
-	projectAddErr  error
-	threadStartOut *t3.ThreadStartOutput
-	threadStartErr error
-	threadShowOut  *t3.ThreadShowOutput
-	threadShowErr  error
-	threadSendErr  error
-	threadListOut  *t3.ThreadListOutput
-	threadListErr  error
+	projectAddErr   error
+	threadStartOut  *t3.ThreadStartOutput
+	threadStartErr  error
+	threadShowOut   *t3.ThreadShowOutput
+	threadShowErr   error
+	threadSendErr   error
+	threadListOut   *t3.ThreadListOutput
+	threadListErr   error
+	threadSettleErr error
 }
 
 func (m *mockT3Runner) ProjectAdd(_ context.Context, projectPath, title string) error {
@@ -60,6 +62,11 @@ func (m *mockT3Runner) ThreadList(_ context.Context, projectPath string) (*t3.Th
 		return nil, m.threadListErr
 	}
 	return m.threadListOut, nil
+}
+
+func (m *mockT3Runner) ThreadSettle(_ context.Context, threadID string) error {
+	m.threadSettleCalls = append(m.threadSettleCalls, threadID)
+	return m.threadSettleErr
 }
 
 func TestT3Engine_Dispatch_AddsProjectAndStartsThread(t *testing.T) {
@@ -261,42 +268,74 @@ func TestT3Engine_Capture(t *testing.T) {
 }
 
 func TestT3Engine_Close(t *testing.T) {
-	mock := &mockT3Runner{
-		threadShowErr: errors.New("t3 daemon unavailable"),
-	}
-	eng := NewT3EngineWithRunner(mock)
 	ctx := context.Background()
 
-	cases := []struct {
-		name      string
-		sessionID string
-		windowID  string
-	}{
-		{name: "with session and thread id", sessionID: "proj-1", windowID: "mcp:thread-1"},
-		{name: "without session id", sessionID: "", windowID: "mcp:thread-1"},
-		{name: "empty thread id", sessionID: "", windowID: ""},
-	}
+	t.Run("settles by windowID even when sessionID is empty or unknown", func(t *testing.T) {
+		mock := &mockT3Runner{}
+		eng := NewT3EngineWithRunner(mock)
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := eng.Close(ctx, tc.sessionID, tc.windowID)
-			if err != nil {
-				t.Fatalf("expected nil error from Close, got: %v", err)
-			}
-			var notImpl *ErrNotImplemented
-			if errors.As(err, &notImpl) {
-				t.Fatalf("Close must not return ErrNotImplemented")
-			}
-		})
-	}
+		if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
+			t.Fatalf("Close with sessionID failed: %v", err)
+		}
+		if err := eng.Close(ctx, "", "mcp:thread-2"); err != nil {
+			t.Fatalf("Close without sessionID failed: %v", err)
+		}
+		if err := eng.Close(ctx, "unknown-proj", "mcp:thread-3"); err != nil {
+			t.Fatalf("Close with unknown sessionID failed: %v", err)
+		}
 
-	// Idempotent: calling Close twice on the same thread succeeds both times.
-	if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
-		t.Fatalf("first Close failed: %v", err)
-	}
-	if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
-		t.Fatalf("second Close failed: %v", err)
-	}
+		want := []string{"mcp:thread-1", "mcp:thread-2", "mcp:thread-3"}
+		if len(mock.threadSettleCalls) != len(want) {
+			t.Fatalf("got %v settle calls, want %v", mock.threadSettleCalls, want)
+		}
+		for i := range want {
+			if mock.threadSettleCalls[i] != want[i] {
+				t.Errorf("call %d = %q, want %q", i, mock.threadSettleCalls[i], want[i])
+			}
+		}
+	})
+
+	t.Run("idempotent on already-settled thread", func(t *testing.T) {
+		mock := &mockT3Runner{}
+		eng := NewT3EngineWithRunner(mock)
+
+		if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
+			t.Fatalf("first Close failed: %v", err)
+		}
+		if err := eng.Close(ctx, "proj-1", "mcp:thread-1"); err != nil {
+			t.Fatalf("second Close failed: %v", err)
+		}
+		if len(mock.threadSettleCalls) != 2 {
+			t.Fatalf("expected 2 settle calls, got %d", len(mock.threadSettleCalls))
+		}
+	})
+
+	t.Run("empty windowID returns error", func(t *testing.T) {
+		mock := &mockT3Runner{}
+		eng := NewT3EngineWithRunner(mock)
+
+		err := eng.Close(ctx, "proj-1", "")
+		if err == nil {
+			t.Fatal("expected error for empty windowID")
+		}
+		var notImpl *ErrNotImplemented
+		if errors.As(err, &notImpl) {
+			t.Fatalf("Close must not return ErrNotImplemented")
+		}
+		if len(mock.threadSettleCalls) != 0 {
+			t.Errorf("expected no settle calls for empty windowID, got %v", mock.threadSettleCalls)
+		}
+	})
+
+	t.Run("propagates ThreadSettle error", func(t *testing.T) {
+		mock := &mockT3Runner{threadSettleErr: t3.ErrThreadNotFound}
+		eng := NewT3EngineWithRunner(mock)
+
+		err := eng.Close(ctx, "proj-1", "mcp:missing")
+		if !errors.Is(err, t3.ErrThreadNotFound) {
+			t.Fatalf("expected ErrThreadNotFound, got %v", err)
+		}
+	})
 }
 
 var _ TaskStatusProvider = (*T3Engine)(nil)
