@@ -56,6 +56,48 @@ type ThreadShowOutput struct {
 	Messages []MessageInfo `json:"messages"`
 }
 
+// ThreadSummary represents an individual thread item in the JSON array returned by
+// `t3 thread list --project <path> --json`.
+//
+// Observed schema (t3 CLI): top-level JSON array of objects with fields:
+// threadId, projectId, title, link, createdBy, creationSource, status, latestRunId,
+// providerInstanceId, model, runtimeMode, interactionMode, linkedPullRequest,
+// pullRequests, pullRequestCount, settled, settledAt, snoozed, snoozedUntil,
+// blockedOnThreadWait, pendingBackgroundTasks, parentThreadId, relationshipToParent,
+// itemCount, createdAt, updatedAt.
+type ThreadSummary struct {
+	ThreadID               string            `json:"threadId"`
+	ProjectID              string            `json:"projectId,omitempty"`
+	Title                  string            `json:"title,omitempty"`
+	Link                   string            `json:"link,omitempty"`
+	CreatedBy              string            `json:"createdBy,omitempty"`
+	CreationSource         string            `json:"creationSource,omitempty"`
+	Status                 string            `json:"status"`
+	LatestRunID            string            `json:"latestRunId,omitempty"`
+	ProviderInstanceID     string            `json:"providerInstanceId,omitempty"`
+	Model                  string            `json:"model,omitempty"`
+	RuntimeMode            string            `json:"runtimeMode,omitempty"`
+	InteractionMode        string            `json:"interactionMode,omitempty"`
+	PullRequestCount       int               `json:"pullRequestCount,omitempty"`
+	Settled                bool              `json:"settled,omitempty"`
+	SettledAt              string            `json:"settledAt,omitempty"`
+	Snoozed                bool              `json:"snoozed,omitempty"`
+	SnoozedUntil           string            `json:"snoozedUntil,omitempty"`
+	BlockedOnThreadWait    bool              `json:"blockedOnThreadWait,omitempty"`
+	PendingBackgroundTasks []json.RawMessage `json:"pendingBackgroundTasks,omitempty"`
+	ParentThreadID         string            `json:"parentThreadId,omitempty"`
+	RelationshipToParent   string            `json:"relationshipToParent,omitempty"`
+	ItemCount              int               `json:"itemCount,omitempty"`
+	CreatedAt              string            `json:"createdAt,omitempty"`
+	UpdatedAt              string            `json:"updatedAt,omitempty"`
+}
+
+// ThreadListOutput represents the parsed output from `t3 thread list --json`.
+// The CLI emits a top-level JSON array of ThreadSummary items.
+type ThreadListOutput struct {
+	Threads []ThreadSummary
+}
+
 // ProjectAddOutput represents potential JSON / structured output from `t3 project add`.
 type ProjectAddOutput struct {
 	ProjectID string `json:"projectId,omitempty"`
@@ -195,6 +237,15 @@ func (r *DefaultCommandRunner) ThreadSend(ctx context.Context, threadID string, 
 	return RunThreadSend(ctx, r, bin, threadID, message)
 }
 
+// ThreadList lists threads for a project workspace via `t3 thread list --project <path> --json`.
+func (r *DefaultCommandRunner) ThreadList(ctx context.Context, projectPath string) (*ThreadListOutput, error) {
+	bin, err := r.getBin()
+	if err != nil {
+		return nil, err
+	}
+	return RunThreadList(ctx, r, bin, projectPath)
+}
+
 // BuildAppArgs builds argument list for `t3 app <project-path>`.
 func BuildAppArgs(projectPath string) []string {
 	return []string{"app", projectPath}
@@ -235,6 +286,16 @@ func BuildThreadSendArgs(threadID string, message string) []string {
 	return []string{"thread", "send", threadID, message, "--json"}
 }
 
+// BuildThreadListArgs builds argument list for `t3 thread list --project <path> --json`.
+func BuildThreadListArgs(projectPath string) []string {
+	args := []string{"thread", "list"}
+	if projectPath != "" {
+		args = append(args, "--project", projectPath)
+	}
+	args = append(args, "--json")
+	return args
+}
+
 // ParseThreadStartOutput unmarshals JSON from `t3 thread start --json`.
 func ParseThreadStartOutput(raw string) (*ThreadStartOutput, error) {
 	var out ThreadStartOutput
@@ -251,6 +312,15 @@ func ParseThreadShowOutput(raw string) (*ThreadShowOutput, error) {
 		return nil, fmt.Errorf("failed to parse t3 thread show JSON: %w", err)
 	}
 	return &out, nil
+}
+
+// ParseThreadListOutput unmarshals the JSON array from `t3 thread list --json`.
+func ParseThreadListOutput(raw string) (*ThreadListOutput, error) {
+	var threads []ThreadSummary
+	if err := json.Unmarshal([]byte(raw), &threads); err != nil {
+		return nil, fmt.Errorf("failed to parse t3 thread list JSON: %w", err)
+	}
+	return &ThreadListOutput{Threads: threads}, nil
 }
 
 // RunApp executes `t3 app <project-path>`.
@@ -313,4 +383,17 @@ func RunThreadSend(ctx context.Context, runner CommandRunner, bin string, thread
 	args := BuildThreadSendArgs(threadID, message)
 	_, err := runner.Run(ctx, bin, args...)
 	return err
+}
+
+// RunThreadList executes `t3 thread list --project <path> --json` and parses the JSON response.
+func RunThreadList(ctx context.Context, runner CommandRunner, bin string, projectPath string) (*ThreadListOutput, error) {
+	if projectPath == "" {
+		return nil, errors.New("project path is required for thread list")
+	}
+	args := BuildThreadListArgs(projectPath)
+	out, err := runner.Run(ctx, bin, args...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseThreadListOutput(out)
 }

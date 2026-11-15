@@ -373,3 +373,123 @@ func TestCommandRunnerFunc(t *testing.T) {
 		t.Errorf("unexpected result from CommandRunnerFunc: out=%s, err=%v", out, err)
 	}
 }
+
+func TestBuildThreadListArgs(t *testing.T) {
+	args := BuildThreadListArgs("/Users/dev/docnotate")
+	expected := []string{"thread", "list", "--project", "/Users/dev/docnotate", "--json"}
+	if len(args) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, args)
+	}
+	for i := range expected {
+		if args[i] != expected[i] {
+			t.Errorf("arg[%d]: expected %q, got %q", i, expected[i], args[i])
+		}
+	}
+
+	noProj := BuildThreadListArgs("")
+	expectedNoProj := []string{"thread", "list", "--json"}
+	if len(noProj) != len(expectedNoProj) {
+		t.Fatalf("expected %v, got %v", expectedNoProj, noProj)
+	}
+	for i := range expectedNoProj {
+		if noProj[i] != expectedNoProj[i] {
+			t.Errorf("arg[%d]: expected %q, got %q", i, expectedNoProj[i], noProj[i])
+		}
+	}
+}
+
+func TestParseThreadListOutput_RealPayloadFixture(t *testing.T) {
+	raw := `[
+  {
+    "threadId": "mcp:50154bbd-9f15-4007-a267-dab98e0b9cb6",
+    "projectId": "1f879b2e-b13a-49a9-9b75-ff725db90cb0",
+    "title": "Implement the DocNotate request to let users pin files and directories.",
+    "link": "https://app.t3.codes/threads/8f574001/mcp%3A50154bbd",
+    "createdBy": "agent",
+    "creationSource": "mcp",
+    "status": "interrupted",
+    "latestRunId": "run:thread:mcp%3A50154bbd:ordinal:1",
+    "providerInstanceId": "antigravity",
+    "model": "gemini-4-hydrogen-medium",
+    "runtimeMode": "full-access",
+    "interactionMode": "default",
+    "linkedPullRequest": null,
+    "pullRequests": [],
+    "pullRequestCount": 0,
+    "settled": true,
+    "settledAt": "2026-11-15T03:48:21.189Z",
+    "snoozed": false,
+    "snoozedUntil": null,
+    "blockedOnThreadWait": false,
+    "pendingBackgroundTasks": [],
+    "parentThreadId": null,
+    "relationshipToParent": null,
+    "itemCount": 63,
+    "createdAt": "2026-11-13T13:49:19.905Z",
+    "updatedAt": "2026-11-15T03:48:21.189Z"
+  },
+  {
+    "threadId": "3a7d4813-4e2a-421c-afb3-897715a77991",
+    "projectId": "1f879b2e-b13a-49a9-9b75-ff725db90cb0",
+    "title": "Add OAuth login flow",
+    "createdBy": "user",
+    "creationSource": "web",
+    "status": "running",
+    "providerInstanceId": "antigravity",
+    "model": "gemini-3.8-flash-medium",
+    "interactionMode": "plan",
+    "settled": false,
+    "snoozed": false,
+    "blockedOnThreadWait": false,
+    "pendingBackgroundTasks": [],
+    "itemCount": 4
+  }
+]`
+	out, err := ParseThreadListOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseThreadListOutput failed: %v", err)
+	}
+	if len(out.Threads) != 2 {
+		t.Fatalf("expected 2 threads, got %d", len(out.Threads))
+	}
+	first := out.Threads[0]
+	if first.ThreadID != "mcp:50154bbd-9f15-4007-a267-dab98e0b9cb6" || first.ProjectID != "1f879b2e-b13a-49a9-9b75-ff725db90cb0" {
+		t.Errorf("unexpected first thread IDs: %+v", first)
+	}
+	if !first.Settled || first.Status != "interrupted" || first.ItemCount != 63 {
+		t.Errorf("unexpected first thread fields: %+v", first)
+	}
+	second := out.Threads[1]
+	if second.Settled || second.Status != "running" || second.InteractionMode != "plan" {
+		t.Errorf("unexpected second thread fields: %+v", second)
+	}
+}
+
+func TestDefaultCommandRunner_WithMockRunner_ThreadList(t *testing.T) {
+	mock := &mockRunner{
+		output: `[{"threadId":"th-1","projectId":"proj-1","title":"Fix bug","status":"completed","settled":false}]`,
+	}
+	runner := NewDefaultCommandRunner(
+		WithBinPath("/usr/local/bin/t3"),
+		WithRunner(mock),
+	)
+
+	out, err := runner.ThreadList(context.Background(), "/Users/dev/proj")
+	if err != nil {
+		t.Fatalf("ThreadList failed: %v", err)
+	}
+	if len(out.Threads) != 1 || out.Threads[0].ThreadID != "th-1" || out.Threads[0].Title != "Fix bug" {
+		t.Fatalf("unexpected ThreadList output: %+v", out)
+	}
+	if mock.recordedName != "/usr/local/bin/t3" {
+		t.Errorf("expected bin /usr/local/bin/t3, got %q", mock.recordedName)
+	}
+	wantArgs := []string{"thread", "list", "--project", "/Users/dev/proj", "--json"}
+	if !reflect.DeepEqual(mock.recordedArgs, wantArgs) {
+		t.Errorf("expected args %v, got %v", wantArgs, mock.recordedArgs)
+	}
+
+	if _, err := runner.ThreadList(context.Background(), ""); err == nil {
+		t.Errorf("expected error for empty projectPath in ThreadList")
+	}
+}
