@@ -80,29 +80,22 @@ Every `dispatch`, `send`, and `batch` JSON response includes a computed `recomme
   buddy-ctl watch --all --interval 5 --timeout 600
   ```
 
-### 2. Watch Is Subagent-Only (Main Thread Only As Documented Fallback)
-A main-thread or shell-backgrounded watch blocks the turn or leaks an orphaned poll loop, and cannot relay a worker's question back to the user — which is the entire point of Invariant #3.
-
-- **Background Watchdog Subagent (Default & Only Normal Path)** — ALWAYS run `buddy-ctl watch` inside a background Watchdog Subagent right after `dispatch`, `batch`, or `send` (regardless of phrasing or user intent):
-  - **Do NOT** run `buddy-ctl watch` on the main thread.
-  - **Do NOT** background it with a shell (`&`, `nohup`, backgrounded command, detached pane) — that is not a watchdog; it cannot report an event, relay a question, or be reasoned about.
-  - Use the host harness's background-subagent primitive (`invoke_subagent(TypeName="self", ...)` on Antigravity, `delegate_task` on T3 Code), never a plain foreground run that blocks the turn.
-  - **Only permitted fallback**: if subagent/delegation tooling is unavailable or the spawn genuinely fails, run `buddy-ctl watch` on the main thread and state the reason explicitly in one line in your reply. Never fall back silently or for convenience.
+### 2. Watch Is Subagent-Only (Main Thread Only As Fallback)
+- **Background Watchdog Subagent (Required)**: ALWAYS run `buddy-ctl watch` in a background subagent after `dispatch`, `batch`, or `send` — never on the main thread, and never as a shell background job (`&`, `nohup`, detached pane).
+- **Only fallback**: if subagent tooling is unavailable or spawn fails, run `watch` on the main thread and state the reason in one line.
   ```python
-  # Antigravity example (on T3 Code, use delegate_task with the same prompt):
-  invoke_subagent(
-      TypeName="self",
-      Role="Buddy Watchdog: <P>/<T> (or <P> / all)",
-      Prompt=(
-          "Monitor active worker task(s). "
+  # T3 Code (delegate_task) — or Antigravity: invoke_subagent(TypeName="self", ...)
+  delegate_task(
+      role="research",
+      title="Buddy Watchdog: <P>/<T>",
+      task=(
           "Run '<recommended_watch_command>'. "
-          "When it returns with an event (waiting_for_input, ready_for_demo, or error), "
-          "message the parent Buddy agent via send_message with a concise summary of the event and what the worker needs."
-      )
+          "When it returns an event (waiting_for_input, ready_for_demo, or error), "
+          "summarize the event and what the worker needs."
+      ),
   )
   ```
-- **Quick Status / Capture / Diagnose (Main Thread — Non-Watch Only)** — use when the user asks *"how is X going right now?"*:
-  - Run `buddy-ctl status`, `buddy-ctl capture -p <P> -t <T> --lines 80`, or `buddy-ctl diagnose` directly on the main thread and reply immediately. **Never** use this path for `buddy-ctl watch`.
+- **Main-Thread Reads (Non-Watch Only)**: Run `buddy-ctl status`, `capture`, or `diagnose` directly on the main thread for immediate checks. **Never** use this path for `watch`.
 
 ---
 

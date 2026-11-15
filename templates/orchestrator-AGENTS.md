@@ -34,11 +34,10 @@ Whenever you dispatch a new task (`dispatch` / `batch`) or resume a task (`send`
   - **Multiple active tasks in 1 project**: `buddy-ctl watch --project <P> --interval 5 --timeout 600`
   - **Active tasks across multiple projects**: `buddy-ctl watch --all --interval 5 --timeout 600`
 - **`buddy-ctl watch` is subagent-only (HARD RULE)**:
-  - **ALWAYS** run the scoped `buddy-ctl watch` inside a background Watchdog Subagent. This is not optional and does not depend on user intent, phrasing, or how the request was worded.
-  - **NEVER** run `buddy-ctl watch` on the main thread, and never relaunch it as a bare background shell job (`&`, `nohup`, backgrounded shell command, detached terminal, tmux/wezterm pane) as a substitute for the subagent. A backgrounded shell watch is NOT a watchdog: it cannot report back, cannot relay a worker's question, and leaves an orphaned poll loop.
-  - Use whichever background-subagent primitive the host harness actually exposes — e.g. `invoke_subagent(TypeName='self', Role='Buddy Watchdog: <scope>', Prompt=...)` on Antigravity, or `delegate_task` on T3 Code. Never a plain foreground agent run that blocks the turn.
-  - **Only permitted fallback**: subagent/delegation tooling is unavailable or the spawn genuinely fails. Only then run the watch on the main thread, and state that fallback explicitly in the reply with one line naming the reason (e.g. `"Fallback: ran watch on main thread because no subagent tool is available in this harness."`). Never fall back silently, and never fall back for convenience.
-  - Non-watch reads stay on the main thread: `buddy-ctl status`, `buddy-ctl capture`, and `buddy-ctl diagnose` are fine to run directly for an immediate *"how is X going?"* answer. This rule governs `watch` only.
+  - **ALWAYS** run `buddy-ctl watch` in a background subagent (`invoke_subagent` / `delegate_task`), never intent-dependent.
+  - **NEVER** run `watch` on the main thread or fake it with a shell background job (`&`, `nohup`, detached pane).
+  - **Only fallback**: if subagent tooling is unavailable or spawn fails, run `watch` on the main thread and state the reason in one line.
+  - **Non-watch reads** (`status`, `capture`, `diagnose`) stay on the main thread for immediate checks.
 
 ### 4. Live Pane Truth Over Stale Cache (Out-of-Band User Work)
 The user frequently works directly inside project tabs outside Buddy.
@@ -59,11 +58,11 @@ flowchart TD
     S2 -- ">=90% Unambiguous Match" --> Reuse["Reuse Tab: buddy-ctl send<br/>(or task adopt if untracked)"]
     S2 -- "30%-89% Uncertain Candidate" --> Ask["STOP & Ask User:<br/>List candidate slug, status & summary"]
     S2 -- "<30% Distinct Topic" --> Disp["New Tab: buddy-ctl dispatch<br/>(Verify picked_up: true)"]
-    Reuse --> S4["4. Arm Situational Watchdog<br/>(Use recommended_watch scope in subagent; never main thread)"]
+    Reuse --> S4["4. Arm Watchdog<br/>(recommended_watch in subagent; never main thread)"]
     Disp --> S4
 ```
 
 1. **Inspect Live State**: Read `[Buddy Live State]` (and any `[🚨 BUDDY PROACTIVE NUDGE]`). If state is stale or user mentions manual tab work, run `buddy-ctl status --sync`.
 2. **Triage (Reuse vs. Ask vs. Dispatch)**: Apply Invariant #2 (`>=90%` reuse via `send`; `30%–89%` list candidates and ask user; `<30%` `dispatch`).
 3. **Verify Delivery**: Check `picked_up` in `dispatch` JSON. If `picked_up: false`, inspect `pickup_reason`, capture/dismiss any modal, and re-send before reporting success.
-4. **Arm Situational Watchdog**: If any task is `running` or `planning` and no watchdog covers that scope, spawn the Watchdog Subagent using `recommended_watch` — never run the watch on the main thread (see Invariant #3 for the single permitted fallback).
+4. **Arm Situational Watchdog**: If any task is `running` or `planning`, spawn a background Watchdog Subagent with `recommended_watch` — never on the main thread (see Invariant #3).
