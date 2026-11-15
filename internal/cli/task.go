@@ -69,9 +69,7 @@ func newTaskStartCmd() *cobra.Command {
 				return err
 			}
 
-			if engineName == "rex" {
-				reconcileRexIfStale(cmd.Context(), defaultSyncTTL)
-			}
+			reconcileActiveIfStale(cmd.Context(), engineName, defaultSyncTTL)
 
 			st, err := state.LoadStateForEngine(engineName)
 			if err != nil {
@@ -199,10 +197,12 @@ func newTaskAdoptCmd() *cobra.Command {
 			}
 
 			engName := resolveActiveEngine(engineName)
-			tb := defaultRexBackend()
-
+			var tb backend.TerminalBackend
 			if engName == "rex" {
+				tb = defaultRexBackend()
 				_ = reconcileRexWithBackend(cmd.Context(), tb)
+			} else if engName == "t3" {
+				_ = syncT3Fn(cmd.Context())
 			}
 
 			st, err := state.LoadStateForEngine(engName)
@@ -229,7 +229,7 @@ func newTaskAdoptCmd() *cobra.Command {
 			var found bool
 			var detectedStatus, detectedSummary string
 
-			// 1. Check untracked windows already discovered in state
+			// 1. Check untracked windows/threads already discovered in state
 			if p, findErr := st.FindProject(projName); findErr == nil {
 				for _, uw := range p.UntrackedWindows {
 					if uw.WindowID == windowSpec || strings.EqualFold(uw.Label, windowSpec) {
@@ -247,6 +247,133 @@ func newTaskAdoptCmd() *cobra.Command {
 						break
 					}
 				}
+			}
+
+			if engName == "t3" {
+				var t3Eng *engine.T3Engine
+				if eng, engErr := getEngine("t3"); engErr == nil {
+					if cast, ok := eng.(*engine.T3Engine); ok {
+						t3Eng = cast
+					}
+				}
+
+				if !found && t3Eng != nil {
+					if probe, probeErr := t3Eng.ProbeStatus(cmd.Context(), sessID, windowSpec); probeErr == nil {
+						matchedWin = backend.WindowInfo{
+							WindowID:  windowSpec,
+							Label:     windowSpec,
+							SessionID: sessID,
+							BlockIDs:  []string{windowSpec},
+						}
+						if probe.Status != "" && probe.Status != "unknown" {
+							detectedStatus = probe.Status
+						}
+						if probe.Summary != "" {
+							detectedSummary = probe.Summary
+						}
+						found = true
+					}
+				} else if found && t3Eng != nil {
+					if probe, probeErr := t3Eng.ProbeStatus(cmd.Context(), sessID, matchedWin.WindowID); probeErr == nil {
+						if probe.Status != "" && probe.Status != "unknown" {
+							detectedStatus = probe.Status
+						}
+						if probe.Summary != "" {
+							detectedSummary = probe.Summary
+						}
+					}
+				}
+
+				if found && sessID == "" && t3Eng != nil && projPath != "" {
+					if threads, listErr := t3Eng.ListProjectThreads(cmd.Context(), projPath); listErr == nil {
+						for _, th := range threads {
+							if th.ThreadID == matchedWin.WindowID && th.ProjectID != "" {
+								sessID = th.ProjectID
+								if matchedWin.Label == matchedWin.WindowID && th.Title != "" {
+									matchedWin.Label = truncateT3Label(th.Title, 40)
+								}
+								break
+							}
+						}
+					}
+				}
+
+				if !found {
+					return fmt.Errorf("window %q not found in project %q", windowSpec, projName)
+				}
+
+				blockID := matchedWin.WindowID
+				if len(matchedWin.BlockIDs) > 0 && matchedWin.BlockIDs[0] != "" {
+					blockID = matchedWin.BlockIDs[0]
+				}
+				if detectedStatus == "" {
+					detectedStatus = "running"
+				}
+				if detectedSummary == "" {
+					detectedSummary = "Adopted T3 thread"
+				}
+				rawSlug := taskSlug
+				if rawSlug == "" {
+					rawSlug = matchedWin.Label
+				}
+				if rawSlug == "" {
+					rawSlug = matchedWin.WindowID
+				}
+				slug := project.DeriveSlug(rawSlug, detectedSummary, projName)
+
+				if agentName == "" {
+					agentName = cfg.GetEffectiveWorkerAgent(engName)
+					if agentName == "" {
+						agentName = "agy"
+					}
+				}
+
+				var updatedState *state.State
+				err = state.MutateStateForEngine(engName, func(s *state.State) error {
+					s.RecordTask(projName, projPath, sessID, projName, state.TaskState{
+						TaskSlug:     slug,
+						Engine:       engName,
+						WindowID:     matchedWin.WindowID,
+						WindowLabel:  matchedWin.Label,
+						AgentBlockID: blockID,
+						Agent:        agentName,
+						Cwd:          projPath,
+						Status:       detectedStatus,
+						Origin:       "user",
+						LastSummary:  detectedSummary,
+					})
+					if p, ok := s.Projects[projName]; ok && len(p.UntrackedWindows) > 0 {
+						var remaining []state.UntrackedWindow
+						for _, uw := range p.UntrackedWindows {
+							if uw.WindowID != matchedWin.WindowID {
+								remaining = append(remaining, uw)
+							}
+						}
+						p.UntrackedWindows = remaining
+						s.Projects[projName] = p
+					}
+					updatedState = s
+					return nil
+				})
+				if err != nil {
+					return err
+				}
+
+				recWatch := computeRecommendedWatch(updatedState)
+				resp := map[string]any{
+					"status":            "adopted",
+					"project":           projName,
+					"task":              slug,
+					"origin":            "user",
+					"task_status":       detectedStatus,
+					"summary":           detectedSummary,
+					"window_id":         matchedWin.WindowID,
+					"agent_block_id":    blockID,
+					"recommended_watch": recWatch,
+				}
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(resp)
 			}
 
 			// 2. Query live backend sessions/windows if not already in UntrackedWindows
