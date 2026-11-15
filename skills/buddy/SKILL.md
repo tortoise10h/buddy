@@ -80,9 +80,16 @@ Every `dispatch`, `send`, and `batch` JSON response includes a computed `recomme
   buddy-ctl watch --all --interval 5 --timeout 600
   ```
 
-### 2. Blocking Watchdog Subagent vs. Quick Main-Thread Check
-- **Background Watchdog (Subagent)** — use right after `dispatch`, `batch`, or `send` when waiting asynchronously for workers to finish or ask a question:
+### 2. Watch Is Subagent-Only (Main Thread Only As Documented Fallback)
+A main-thread or shell-backgrounded watch blocks the turn or leaks an orphaned poll loop, and cannot relay a worker's question back to the user — which is the entire point of Invariant #3.
+
+- **Background Watchdog Subagent (Default & Only Normal Path)** — ALWAYS run `buddy-ctl watch` inside a background Watchdog Subagent right after `dispatch`, `batch`, or `send` (regardless of phrasing or user intent):
+  - **Do NOT** run `buddy-ctl watch` on the main thread.
+  - **Do NOT** background it with a shell (`&`, `nohup`, backgrounded command, detached pane) — that is not a watchdog; it cannot report an event, relay a question, or be reasoned about.
+  - Use the host harness's background-subagent primitive (`invoke_subagent(TypeName="self", ...)` on Antigravity, `delegate_task` on T3 Code), never a plain foreground run that blocks the turn.
+  - **Only permitted fallback**: if subagent/delegation tooling is unavailable or the spawn genuinely fails, run `buddy-ctl watch` on the main thread and state the reason explicitly in one line in your reply. Never fall back silently or for convenience.
   ```python
+  # Antigravity example (on T3 Code, use delegate_task with the same prompt):
   invoke_subagent(
       TypeName="self",
       Role="Buddy Watchdog: <P>/<T> (or <P> / all)",
@@ -94,8 +101,8 @@ Every `dispatch`, `send`, and `batch` JSON response includes a computed `recomme
       )
   )
   ```
-- **Quick Status / Capture (Main Thread)** — use when the user asks *"how is X going right now?"*:
-  - Run `buddy-ctl status` or `buddy-ctl capture -p <P> -t <T> --lines 80` directly on the main thread and reply immediately.
+- **Quick Status / Capture / Diagnose (Main Thread — Non-Watch Only)** — use when the user asks *"how is X going right now?"*:
+  - Run `buddy-ctl status`, `buddy-ctl capture -p <P> -t <T> --lines 80`, or `buddy-ctl diagnose` directly on the main thread and reply immediately. **Never** use this path for `buddy-ctl watch`.
 
 ---
 
