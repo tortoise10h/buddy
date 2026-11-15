@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/backend/t3"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/notify"
@@ -1476,4 +1477,292 @@ func TestWatch_DeepReconcile_UpdatesStaleStatusAndDiscoversUntrackedWindows(t *t
 	if uw.Label != "user-hotfix" || uw.DetectedStatus != "waiting_for_input" {
 		t.Errorf("unexpected untracked window: %+v", uw)
 	}
+}
+
+type scriptedT3Runner struct {
+	steps []struct {
+		out *t3.ThreadShowOutput
+		err error
+	}
+	idx int
+}
+
+func (s *scriptedT3Runner) ProjectAdd(_ context.Context, _, _ string) error { return nil }
+func (s *scriptedT3Runner) ThreadStart(_ context.Context, _ t3.ThreadStartOptions) (*t3.ThreadStartOutput, error) {
+	return &t3.ThreadStartOutput{}, nil
+}
+func (s *scriptedT3Runner) ThreadSend(_ context.Context, _, _ string) error { return nil }
+func (s *scriptedT3Runner) ThreadShow(_ context.Context, _ string) (*t3.ThreadShowOutput, error) {
+	if len(s.steps) == 0 {
+		return nil, fmt.Errorf("no scripted steps")
+	}
+	i := s.idx
+	if i >= len(s.steps) {
+		i = len(s.steps) - 1
+	} else {
+		s.idx++
+	}
+	return s.steps[i].out, s.steps[i].err
+}
+
+func setupT3WatchTest(t *testing.T, initialStatus string, runner engine.T3Runner) (*notificationRecorder, func()) {
+	t.Helper()
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	_ = config.SaveConfig(cfg)
+
+	recorder := &notificationRecorder{}
+	notifyFn = recorder.Record
+
+	reg := getRegistry()
+	origT3, getErr := reg.Get("t3")
+	reg.Register("t3", engine.NewT3EngineWithRunner(runner))
+
+	_ = state.MutateStateForEngine("t3", func(s *state.State) error {
+		s.RecordTask("proj-t3", filepath.Join(tmpDir, "proj-t3"), "t3-proj-1", "proj-t3", state.TaskState{
+			TaskSlug:     "task-t3",
+			Engine:       "t3",
+			WindowID:     "th_t3_1",
+			AgentBlockID: "th_t3_1",
+			Status:       initialStatus,
+			LastSummary:  "Initial summary",
+		})
+		return nil
+	})
+
+	cleanup := func() {
+		notifyFn = globalNotificationRecorder.Record
+		if getErr == nil {
+			reg.Register("t3", origT3)
+		}
+	}
+	return recorder, cleanup
+}
+
+func TestWatch_T3_TransitionsAndProbeErrors(t *testing.T) {
+	t.Run("running to ready_for_demo fires once with probe summary", func(t *testing.T) {
+		runner := &scriptedT3Runner{
+			steps: []struct {
+				out *t3.ThreadShowOutput
+				err error
+			}{
+				{out: &t3.ThreadShowOutput{
+					Thread:   t3.ThreadInfo{ThreadID: "th_t3_1", Status: "running"},
+					Messages: []t3.MessageInfo{{Role: "assistant", Text: "Building"}},
+				}},
+				{out: &t3.ThreadShowOutput{
+					Thread:   t3.ThreadInfo{ThreadID: "th_t3_1", Status: "idle"},
+					Messages: []t3.MessageInfo{{Role: "assistant", Text: "Implemented feature and verified tests."}},
+				}},
+			},
+		}
+		recorder, cleanup := setupT3WatchTest(t, "running", runner)
+		defer cleanup()
+
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"watch", "--engine", "t3", "-p", "proj-t3", "-t", "task-t3", "--debounce", "1", "--interval", "0", "--timeout", "2", "--notify=true"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+			t.Fatalf("invalid json: %v, raw: %s", err, buf.String())
+		}
+		if resp["event"] != "ready_for_demo" {
+			t.Errorf("event = %v, want ready_for_demo", resp["event"])
+		}
+		if resp["summary"] != "Implemented feature and verified tests." {
+			t.Errorf("summary = %v, want probe summary", resp["summary"])
+		}
+		if len(recorder.All()) != 1 {
+			t.Errorf("expected 1 notification, got %d", len(recorder.All()))
+		}
+	})
+
+	t.Run("running to waiting_for_input fires once", func(t *testing.T) {
+		runner := &scriptedT3Runner{
+			steps: []struct {
+				out *t3.ThreadShowOutput
+				err error
+			}{
+				{out: &t3.ThreadShowOutput{
+					Thread: t3.ThreadInfo{ThreadID: "th_t3_1", Status: "running"},
+				}},
+				{out: &t3.ThreadShowOutput{
+					Thread:   t3.ThreadInfo{ThreadID: "th_t3_1", Status: "running", PendingRequestCount: 1},
+					Messages: []t3.MessageInfo{{Role: "assistant", Text: "Approve migration?"}},
+				}},
+			},
+		}
+		recorder, cleanup := setupT3WatchTest(t, "running", runner)
+		defer cleanup()
+
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"watch", "--engine", "t3", "-p", "proj-t3", "-t", "task-t3", "--debounce", "1", "--interval", "0", "--timeout", "2", "--notify=true"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		_ = json.Unmarshal(buf.Bytes(), &resp)
+		if resp["event"] != "waiting_for_input" {
+			t.Errorf("event = %v, want waiting_for_input", resp["event"])
+		}
+		if len(recorder.All()) != 1 {
+			t.Errorf("expected 1 notification, got %d", len(recorder.All()))
+		}
+	})
+
+	t.Run("running to error fires once", func(t *testing.T) {
+		runner := &scriptedT3Runner{
+			steps: []struct {
+				out *t3.ThreadShowOutput
+				err error
+			}{
+				{out: &t3.ThreadShowOutput{
+					Thread: t3.ThreadInfo{ThreadID: "th_t3_1", Status: "running"},
+				}},
+				{out: &t3.ThreadShowOutput{
+					Thread: t3.ThreadInfo{ThreadID: "th_t3_1", Status: "failed", LastError: "Model request failed"},
+				}},
+			},
+		}
+		recorder, cleanup := setupT3WatchTest(t, "running", runner)
+		defer cleanup()
+
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"watch", "--engine", "t3", "-p", "proj-t3", "-t", "task-t3", "--debounce", "1", "--interval", "0", "--timeout", "2", "--notify=true"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		_ = json.Unmarshal(buf.Bytes(), &resp)
+		if resp["event"] != "error" {
+			t.Errorf("event = %v, want error", resp["event"])
+		}
+		if resp["summary"] != "Model request failed" {
+			t.Errorf("summary = %v, want 'Model request failed'", resp["summary"])
+		}
+		if len(recorder.All()) != 1 {
+			t.Errorf("expected 1 notification, got %d", len(recorder.All()))
+		}
+	})
+
+	t.Run("steady running times out without firing", func(t *testing.T) {
+		runner := &scriptedT3Runner{
+			steps: []struct {
+				out *t3.ThreadShowOutput
+				err error
+			}{
+				{out: &t3.ThreadShowOutput{
+					Thread: t3.ThreadInfo{ThreadID: "th_t3_1", Status: "running"},
+				}},
+			},
+		}
+		recorder, cleanup := setupT3WatchTest(t, "running", runner)
+		defer cleanup()
+
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"watch", "--engine", "t3", "-p", "proj-t3", "-t", "task-t3", "--debounce", "1", "--interval", "0", "--timeout", "1", "--notify=true"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		_ = json.Unmarshal(buf.Bytes(), &resp)
+		if resp["event"] != "timeout" {
+			t.Errorf("event = %v, want timeout", resp["event"])
+		}
+		if len(recorder.All()) != 0 {
+			t.Errorf("expected 0 notifications on steady running timeout, got %d", len(recorder.All()))
+		}
+	})
+
+	t.Run("probe error mid-loop keeps polling without spurious completion", func(t *testing.T) {
+		runner := &scriptedT3Runner{
+			steps: []struct {
+				out *t3.ThreadShowOutput
+				err error
+			}{
+				{out: &t3.ThreadShowOutput{Thread: t3.ThreadInfo{ThreadID: "th_t3_1", Status: "running"}}},
+				{err: fmt.Errorf("t3 daemon temporarily unavailable")},
+				{out: &t3.ThreadShowOutput{
+					Thread:   t3.ThreadInfo{ThreadID: "th_t3_1", Status: "idle"},
+					Messages: []t3.MessageInfo{{Role: "assistant", Text: "Recovered and finished."}},
+				}},
+			},
+		}
+		recorder, cleanup := setupT3WatchTest(t, "running", runner)
+		defer cleanup()
+
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"watch", "--engine", "t3", "-p", "proj-t3", "-t", "task-t3", "--debounce", "1", "--interval", "0", "--timeout", "2", "--notify=true"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		_ = json.Unmarshal(buf.Bytes(), &resp)
+		if resp["event"] != "ready_for_demo" {
+			t.Errorf("event = %v, want ready_for_demo after recovery", resp["event"])
+		}
+		if resp["summary"] != "Recovered and finished." {
+			t.Errorf("summary = %v, want 'Recovered and finished.'", resp["summary"])
+		}
+		if len(recorder.All()) != 1 {
+			t.Errorf("expected 1 notification, got %d", len(recorder.All()))
+		}
+	})
+
+	t.Run("already_reported does not re-fire", func(t *testing.T) {
+		runner := &scriptedT3Runner{
+			steps: []struct {
+				out *t3.ThreadShowOutput
+				err error
+			}{
+				{out: &t3.ThreadShowOutput{
+					Thread:   t3.ThreadInfo{ThreadID: "th_t3_1", Status: "idle"},
+					Messages: []t3.MessageInfo{{Role: "assistant", Text: "Done earlier"}},
+				}},
+			},
+		}
+		recorder, cleanup := setupT3WatchTest(t, "ready_for_demo", runner)
+		defer cleanup()
+
+		buf := new(bytes.Buffer)
+		rootCmd.SetOut(buf)
+		rootCmd.SetErr(buf)
+		rootCmd.SetArgs([]string{"watch", "--engine", "t3", "-p", "proj-t3", "-t", "task-t3", "--debounce", "1", "--interval", "0", "--timeout", "1", "--notify=true"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		_ = json.Unmarshal(buf.Bytes(), &resp)
+		if resp["event"] != "ready_for_demo" {
+			t.Errorf("event = %v, want ready_for_demo", resp["event"])
+		}
+		if resp["already_reported"] != true {
+			t.Errorf("already_reported = %v, want true", resp["already_reported"])
+		}
+		if len(recorder.All()) != 0 {
+			t.Errorf("expected 0 new notifications on already_reported, got %d", len(recorder.All()))
+		}
+	})
 }

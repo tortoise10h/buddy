@@ -723,7 +723,37 @@ func (w *watchRunner) probeTarget(eng engine.Engine, target watchTarget) (workin
 	targetKey := target.project + "/" + target.task
 	nativeHit := false
 
-	// 1. Primary: query native terminal program_status (e.g. Rex OSC 7501) if supported
+	// 1. Primary: query structured engine status (e.g. T3 TaskStatusProvider) if supported.
+	// A provider hit bypasses terminal pane scraping entirely.
+	if tsp, ok := eng.(engine.TaskStatusProvider); ok {
+		probe, probeErr := tsp.ProbeStatus(w.cmd.Context(), target.sessionID, target.blockID)
+		if probeErr != nil {
+			// Treat probe errors as "unknown" for this tick so polling continues
+			// without crashing or fabricating a completion event.
+			return false, "", "", "", nil
+		}
+		if probe.Working {
+			return true, "", probe.Summary, probe.Snapshot, nil
+		}
+		matched := ""
+		switch probe.Event {
+		case "waiting_for_input":
+			if w.untilSet["input"] || w.untilSet["any"] {
+				matched = "waiting_for_input"
+			}
+		case "ready_for_demo":
+			if w.untilSet["demo"] || w.untilSet["done"] || w.untilSet["any"] {
+				matched = "ready_for_demo"
+			}
+		case "error":
+			if w.untilSet["error"] || w.untilSet["any"] {
+				matched = "error"
+			}
+		}
+		return false, matched, probe.Summary, probe.Snapshot, nil
+	}
+
+	// 2. Query native terminal program_status (e.g. Rex OSC 7501) if supported
 	if psp, ok := eng.(backend.ProgramStatusProvider); ok {
 		if recs, statusErr := psp.GetProgramStatus(w.cmd.Context(), target.sessionID, target.blockID); statusErr == nil {
 			working, matchedEvent, summary, snapshot, nativeHit = evalProgramStatus(recs, w.sawWorking[targetKey], w.untilSet)
