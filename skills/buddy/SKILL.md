@@ -163,7 +163,7 @@ invoke_subagent(
 | `buddy-ctl task adopt` | `-p <proj> -w <window-id-or-label> [-t <slug>] [-a <agent>] [--engine <eng>]` — Adopt an untracked user-opened window into Buddy state (`origin: "user"`). |
 | `buddy-ctl task start` | `-p <proj> -t <slug> [-m "<prompt>"] [-a <agent>] [--engine <eng>] [--force]` — Start a task tab with explicit slug. |
 | `buddy-ctl task update` | `-p <proj> -t <slug> --status <status> [--summary "<text>"]` — Manually update cached status/summary. |
-| `buddy-ctl task close` | `-p <proj> -t <slug>` — Close task window in multiplexer and mark closed. |
+| `buddy-ctl task close` | `-p <proj> -t <slug>` — Close task window in multiplexer (or settle T3 thread) and mark closed. |
 | `buddy-ctl task clean` | `-p <proj> -t <slug> [--reason "..."] [--close] [--force] [--all-closed] [--prune-empty-project] [--dry-run]` — Remove closed task from active state and append audit record to `~/.buddy/history/tasks.jsonl` (`--force` requires explicit user consent). |
 | `buddy-ctl task history` | `[-p <proj>] [-t <slug>] [--engine <eng>] [--since 7d] [--limit 20] [--json]` — Query append-only task cleanup history, newest first. |
 | `buddy-ctl status` | `[--sync] [--no-sync] [--format json\|table\|brief] [--engine <eng>]` — View tracked projects, tasks, and `untracked_windows` (auto-syncs if Rex cache >45s old unless `--no-sync`). |

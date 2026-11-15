@@ -32,6 +32,7 @@ func (m *cliMockT3Runner) ThreadSend(_ context.Context, _, message string) error
 func (m *cliMockT3Runner) ThreadList(_ context.Context, _ string) (*t3.ThreadListOutput, error) {
 	return &t3.ThreadListOutput{}, nil
 }
+func (m *cliMockT3Runner) ThreadSettle(_ context.Context, _ string) error { return nil }
 
 func TestT3_IDOnlyCaptureSendDiagnose(t *testing.T) {
 	clearAllHostSignals(t)

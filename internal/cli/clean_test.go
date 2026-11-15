@@ -270,7 +270,7 @@ func TestTaskClean_ForceAndCloseFlags(t *testing.T) {
 		oldReg := defaultRegistry
 		t.Cleanup(func() { defaultRegistry = oldReg })
 		reg := engine.NewRegistry("t3")
-		reg.Register("t3", engine.NewT3Engine())
+		reg.Register("t3", engine.NewT3EngineWithRunner(&syncTestT3Runner{}))
 		defaultRegistry = reg
 
 		seedCleanTestState(t, "t3", "buddy", "feat-chain", "ready_for_demo", "mcp:th-chain")

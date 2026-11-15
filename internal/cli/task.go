@@ -590,7 +590,7 @@ func newTaskCloseCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "close",
-		Short: "Close task tab in Rex and update state",
+		Short: "Close task (close multiplexer tab or settle T3 thread) and update state",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolvedEngine := resolveActiveEngine(engineName)
 			var sessID, winID, projName, taskSlug, engName string
@@ -612,8 +612,23 @@ func newTaskCloseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := eng.Close(cmd.Context(), sessID, winID); err != nil {
-				return err
+
+			var (
+				threadSettled bool
+				settleError   string
+			)
+			if engName == "t3" {
+				if closeErr := eng.Close(cmd.Context(), sessID, winID); closeErr != nil {
+					threadSettled = false
+					settleError = closeErr.Error()
+					fmt.Fprintf(cmd.ErrOrStderr(), "WARN: failed to settle T3 thread %s: %v\n", winID, closeErr)
+				} else {
+					threadSettled = true
+				}
+			} else {
+				if err := eng.Close(cmd.Context(), sessID, winID); err != nil {
+					return err
+				}
 			}
 
 			_ = state.MutateStateForEngine(engName, func(s *state.State) error {
@@ -635,6 +650,12 @@ func newTaskCloseCmd() *cobra.Command {
 				"project":   projName,
 				"task":      taskSlug,
 				"window_id": winID,
+			}
+			if engName == "t3" {
+				resp["thread_settled"] = threadSettled
+				if settleError != "" {
+					resp["settle_error"] = settleError
+				}
 			}
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")

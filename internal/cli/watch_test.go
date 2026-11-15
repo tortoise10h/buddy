@@ -1496,6 +1496,7 @@ func (s *scriptedT3Runner) ThreadSend(_ context.Context, _, _ string) error { re
 func (s *scriptedT3Runner) ThreadList(_ context.Context, _ string) (*t3.ThreadListOutput, error) {
 	return &t3.ThreadListOutput{}, nil
 }
+func (s *scriptedT3Runner) ThreadSettle(_ context.Context, _ string) error { return nil }
 func (s *scriptedT3Runner) ThreadShow(_ context.Context, _ string) (*t3.ThreadShowOutput, error) {
 	if len(s.steps) == 0 {
 		return nil, fmt.Errorf("no scripted steps")

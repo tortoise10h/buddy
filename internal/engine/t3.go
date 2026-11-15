@@ -17,6 +17,7 @@ type T3Runner interface {
 	ThreadShow(ctx context.Context, threadID string) (*t3.ThreadShowOutput, error)
 	ThreadSend(ctx context.Context, threadID string, message string) error
 	ThreadList(ctx context.Context, projectPath string) (*t3.ThreadListOutput, error)
+	ThreadSettle(ctx context.Context, threadID string) error
 }
 
 // T3Engine implements engine.Engine using the local t3 CLI.
@@ -423,12 +424,13 @@ func formatThreadShowOutput(out *t3.ThreadShowOutput, lines int) string {
 	return strings.Join(allLines[len(allLines)-lines:], "\n")
 }
 
-// Close detaches the thread from Buddy tracking without modifying T3.
-// T3 has no server-side close; Buddy marks the task closed and stops tracking the thread.
-// Returning nil keeps close idempotent and offline-friendly so local state cleanup
-// succeeds even when the t3 daemon is unavailable or the thread ID is empty/unknown.
+// Close settles the T3 thread identified by windowID via T3's MCP t3_thread_organize tool.
+// sessionID is optional; settling always targets windowID directly.
 func (e *T3Engine) Close(ctx context.Context, sessionID, windowID string) error {
-	return nil
+	if strings.TrimSpace(windowID) == "" {
+		return fmt.Errorf("t3 close: thread ID (windowID) is required")
+	}
+	return e.runner.ThreadSettle(ctx, windowID)
 }
 
 func (e *T3Engine) Focus(ctx context.Context, sessionID, windowID string) error {

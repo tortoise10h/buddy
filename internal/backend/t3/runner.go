@@ -246,6 +246,15 @@ func (r *DefaultCommandRunner) ThreadList(ctx context.Context, projectPath strin
 	return RunThreadList(ctx, r, bin, projectPath)
 }
 
+// ThreadSettle settles a T3 thread via `t3 thread settle <threadId> --json`.
+func (r *DefaultCommandRunner) ThreadSettle(ctx context.Context, threadID string) error {
+	bin, err := r.getBin()
+	if err != nil {
+		return err
+	}
+	return RunThreadSettle(ctx, r, bin, threadID)
+}
+
 // BuildAppArgs builds argument list for `t3 app <project-path>`.
 func BuildAppArgs(projectPath string) []string {
 	return []string{"app", projectPath}

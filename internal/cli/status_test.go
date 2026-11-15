@@ -172,6 +172,7 @@ func (r *syncTestT3Runner) ThreadList(_ context.Context, projectPath string) (*t
 	}
 	return &t3.ThreadListOutput{}, nil
 }
+func (r *syncTestT3Runner) ThreadSettle(_ context.Context, _ string) error { return nil }
 
 func TestStatusCmd_Sync_T3_ReconcilesTasksAndDiscoversUntracked(t *testing.T) {
 	clearAllHostSignals(t)

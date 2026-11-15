@@ -181,6 +181,7 @@ func (m *mockCLIT3Runner) ThreadSend(_ context.Context, threadID, message string
 func (m *mockCLIT3Runner) ThreadList(_ context.Context, _ string) (*t3.ThreadListOutput, error) {
 	return &t3.ThreadListOutput{}, nil
 }
+func (m *mockCLIT3Runner) ThreadSettle(_ context.Context, _ string) error { return nil }
 
 func TestDispatchAndSend_T3Routing_UsesT3Engine(t *testing.T) {
 	tmpDir := t.TempDir()
