@@ -89,6 +89,7 @@ Buddy solves the 3 core multi-project orchestration challenges:
 | Workflow | Execution Mode | Tools Used | Why |
 | :--- | :--- | :--- | :--- |
 | **Status, Quick Capture, Q&A Relay, Demo** | **Main Thread** | `buddy-ctl status`, `capture`, `send`, `demo` | O(1) cache lookup (<50ms). Instant interactive replies. |
+| **Investigatory Dispatch (`Buddy Scout`)** | **Subagent** | `invoke_subagent` / `delegate_task` (`Role: 'Buddy Scout'`) + `buddy-ctl dispatch` | Writes brief to `~/.buddy/briefs/` and dispatches; keeps codebase reading out of the main transcript and the chat responsive. |
 | **Background Watchdog** | **Subagent** | `invoke_subagent` (`Role: 'Buddy Watchdog'`) + `buddy-ctl watch` | Waits asynchronously for questions/completion; alerts main Buddy without blocking user chat. |
 | **Deep Pane Diagnosis** | **Subagent** | `invoke_subagent` (`Role: 'Buddy Diagnostician'`) + `buddy-ctl diagnose` | Analyzes large scrollback/stack traces in isolation without cluttering main transcript. |
 | **Batch Multi-Repo Dispatch** | **Subagents / Batch CLI** | `buddy-ctl batch` or parallel `invoke_subagent` | Dispatches tasks across 3+ repos concurrently. |

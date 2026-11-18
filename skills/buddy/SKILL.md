@@ -18,7 +18,7 @@ Before calling `buddy-ctl dispatch`, compare the user's request against open tra
 
 | Confidence Tier | Criteria | Required Action |
 | :--- | :--- | :--- |
-| **Tier 1: High Confidence (`>= 90%`)** | Same project, same feature/bug, clearly the same intention (e.g. answering a worker's question, requesting a follow-up tweak on the exact feature). | **Reuse Tab**: Run `buddy-ctl send -p <proj> -t <slug> --text "<message>"` (if untracked, run `buddy-ctl task adopt -p <proj> -w <window>` first). |
+| **Tier 1: High Confidence (`>= 90%`)** | Same project, same feature/bug, clearly the same intention (e.g. answering a worker's question, requesting a follow-up tweak on the exact feature). | **Reuse Tab**: Run `buddy-ctl send -p <proj> -t <slug> --text "<message>"` (untracked tabs are Tier 2 unless the user explicitly named that tab, in which case run `buddy-ctl task adopt -p <proj> -w <window>` first). |
 | **Tier 2: Uncertain / Related (`30% – 89%`)** | Same project and overlapping domain tokens, or an open task is `waiting_for_input` / `ready_for_demo` on a related area, but you are not 100% certain whether the user wants to continue that tab or start fresh. | **STOP & Ask User**: List the candidate `slug`, `status`, and 1-line `summary`. Ask: *"Task `<proj>/<slug>` (`<status>`: `<summary>`) is already open. Should I continue in that tab or start a new tab?"* |
 | **Tier 3: Distinct (`< 30%`)** | Clearly a different feature, bug, or subsystem. | **Dispatch New Tab**: Run `buddy-ctl dispatch -p <proj> -t <slug> -m "<prompt>"`. |
 
@@ -152,6 +152,85 @@ invoke_subagent(
   ```sh
   buddy-ctl task history [--project <proj>] [--task <slug>] [--since 7d] [--limit 20] [--json]
   ```
+
+---
+
+## Playbook 5: Research & Dispatch Scout (`Buddy Scout`)
+
+Delegate investigatory dispatches (requiring repo reads, `git` checks, or multi-tab disambiguation) to a background **`Buddy Scout`** subagent so the main thread stays responsive and free of codebase read noise.
+
+> [!NOTE]
+> **Verified Phase 1 CLI Surface**: `--prompt-file`, `--text-file`, `--plan-first`, `--worktree`, and `buddy-ctl triage` do **not** exist yet. Always pass briefs via `-m "$(cat '<brief_path>')"` on `dispatch` and `--text "$(cat '<brief_path>')"` on `send`.
+
+### 1. Trigger, Concurrency & Invocation
+- **Trigger**: See the Execution Routing Rule in `templates/orchestrator-AGENTS.md` (anything needing repo reading, `git` inspection, or multi-tab disambiguation before a brief).
+- **Concurrency**: **Max 1 active Scout per project** (cross-project parallel allowed). If a second investigatory request arrives for the same project while a Scout is running, reply in 1 line (*"Already scouting `<project>`; I'll handle this right after it reports (or reply 'cancel' to redirect it)."*) and queue it. `buddy-ctl dispatch`/`task start` enforce `findCandidateCollisions` and `.state.lock` as a secondary net.
+- **Subagent Capability & Prompt Template**: Spawn a **write + shell-capable** subagent using your harness's subagent tool with role `"Buddy Scout: <project>"` (e.g., `TypeName="self"` or `define_subagent` with `EnableWriteTools=true`, `EnableSubagentTools=false` in Antigravity; T3 `delegate_task` write/shell role is `UNVERIFIED`—never use a read-only `research` role):
+  ```text
+  You are Buddy Scout for project '<project>' (proposed slug: '<slug>').
+  User request: <user_request>
+
+  Contract (return ONLY the YAML report: 11 required + up to 3 optional lines: pickup_reason, candidates, open_questions):
+  1. Run `buddy-ctl status --sync` (and `buddy-ctl projects` / `buddy-ctl projects roots` if project is unknown).
+  2. Inspect repo read-only (`git status --short`, `git branch --show-current`, relevant files, target AGENTS.md). NEVER run `git checkout`/`stash`/`reset` or edit/write/delete any repo file.
+  3. Apply 3-Tier triage (untracked_windows are always Tier 2 unless user explicitly named that tab). NEVER pass `--force` to `dispatch`, `task start`, or `task clean`.
+  4. Write brief to `~/.buddy/briefs/<YYYYMMDD-HHMMSS>-<project>-<slug>.md` (even on Tier 2 needs_decision).
+  5. Tier 1 (>=90% tracked): `buddy-ctl send -p "<project>" -t "<slug>" --text "$(cat '<brief_path>')"`.
+     Tier 2 (30-89%, untracked, dirty conflict, or collision): STOP and return `status: needs_decision`.
+     Tier 3 (<30%): `buddy-ctl dispatch -p "<project>" -t "<slug>" -m "$(cat '<brief_path>')"`; if `picked_up: false`, run modal recovery (max 2 attempts).
+  6. NEVER run `buddy-ctl watch` or spawn a Watchdog; copy `recommended_watch` verbatim from CLI JSON.
+  7. Return ONLY the structured YAML report (no file contents, diffs, or prose).
+  ```
+- Acknowledge in 1 line (`"Scouting <project>..."`) and **yield the turn** without pre-arming a Watchdog.
+
+### 2. Scout Execution Rules (Read-Only Repo, 3-Tier Triage & Briefs)
+- **Read-Only Repo**: Run `buddy-ctl status --sync`, `git status --short`, and `git branch --show-current`; read relevant files and target `AGENTS.md`/`CLAUDE.md`. Never mutate git state or repo files.
+- **3-Tier Triage (No `--force`)**:
+  - **Tier 1 (`>=90%`, unambiguous tracked task)**: Write brief, run `buddy-ctl send -p "<p>" -t "<slug>" --text "$(cat '<brief>')"`, return `status: reused` + verbatim `recommended_watch`.
+  - **Tier 2 (`30-89%`, any `untracked_windows` unless user named that tab, dirty conflict, or CLI collision)**: Still write the brief, **stop without `--force` or `send`**, and return `status: needs_decision` with `candidates` (`{slug, kind, window_id, status, summary, why_uncertain}`).
+  - **Tier 3 (`<30%`, distinct)**: Write brief and run `buddy-ctl dispatch -p "<p>" -t "<slug>" -m "$(cat '<brief>')"`.
+- **Brief Path, Retention & Quality**: Save to `~/.buddy/briefs/<YYYYMMDD-HHMMSS>-<project>-<slug>.md` (the **only** authorized write path; retained for audit/Tier 2 reuse, may be pruned by age/count later; never include secrets/tokens). Every brief must specify: **(1)** 1–2 sentence objective + non-goals, **(2)** verified file paths/patterns, **(3)** target `AGENTS.md` constraints, **(4)** explicit planning instructions if plan-first is wanted (no `--plan-first`), **(5)** exact verification commands + concise summary/question reporting.
+
+### 3. Pickup Verification & Modal Recovery
+If `buddy-ctl dispatch` returns `"picked_up": false`, the Scout runs up to **2 recovery attempts**:
+1. `buddy-ctl capture -p "<proj>" -t "<slug>" --lines 40` to inspect the blocker.
+2. Dismiss modal (`buddy-ctl send -p "<proj>" -t "<slug>" --key esc` or `--key enter`), wait ~1s, verify idle prompt (`capture --lines 20`).
+3. Re-send (`buddy-ctl send -p "<proj>" -t "<slug>" --text "$(cat '<brief_path>')"`) and verify echo/spinner (`capture --lines 30`).
+- **Truthfulness Gate**: Report `status: dispatched` + `picked_up: true` **only** if `dispatch` returned `picked_up: true` or post-recovery `capture` proves pickup. Otherwise leave the tab intact and return `status: pickup_failed`, `picked_up: false`, `window_id`, and `pickup_reason`.
+
+### 4. Compact Report Schema (11 Required + Up to 3 Optional Lines)
+Return **only** this YAML block (zero file contents, diffs, or prose):
+```yaml
+status: dispatched | reused | needs_decision | pickup_failed | failed
+project: <project-name>
+task: <task-slug>
+window_id: <window_id or none>
+picked_up: true | false | n/a
+pickup_reason: "<only on pickup_failed: exact CLI pickup_reason or capture summary>"
+tier: "<Tier 1 (>=90%) | Tier 2 (30-89%) | Tier 3 (<30%)>"
+tier_evidence: "<1-line summary of open/untracked tabs checked>"
+inspected: ["<path1>", "<path2>", "<path3>"]
+brief_path: "<~/.buddy/briefs/YYYYMMDD-HHMMSS-proj-slug.md>"
+recommended_watch: "<exact command from CLI JSON, or none>"
+candidates: "<only on needs_decision: slug [kind, status]: summary — why_uncertain>"
+open_questions: "<none, or 1-line blocker/dirty-state note>"
+next_action: "<1-line instruction for parent/user>"
+```
+
+### 5. Failure Matrix & Parent Wakeup
+
+| Failure Mode | Scout Action | Parent Buddy Action |
+| :--- | :--- | :--- |
+| **1. `dispatch` fails** | Never pass `--force`. Save `brief_path`; return `status: failed` + CLI error. | Report error in 1–2 lines, keep `brief_path` for retry; arm nothing. |
+| **2. `picked_up: false` after recovery** | Leave tab open; return `status: pickup_failed`, `picked_up: false`, `window_id`, `pickup_reason`. | Report honestly (no pickup, not running); arm nothing; ask to retry `send`, `focus`, or `task close`. |
+| **3. Immediate `waiting_for_input`** | Note question in `open_questions` if captured. | Surface question immediately, or newly armed Watchdog catches it within 5s. |
+| **4. Dirty repo / wrong branch** | Read-only `git` check only. Warn worker if disjoint, else `needs_decision`. | Surface `git` state from `open_questions`; ask to proceed, switch branch, or isolate. |
+| **5. Unknown project** | Check `buddy-ctl projects` and `projects roots`; never guess. Return `failed`. | Report missing project + close matches; ask for path or `projects add-root <path>`. |
+| **6. User cancels mid-Scout** | N/A (runs in background). | Cancel Scout via harness subagent manager (e.g. `manage_subagents` kill in `agy`, if available), or `send`/`task close` if already dispatched. |
+
+- **On `dispatched` / `reused`**: Reply in 1–3 lines (no raw YAML) and **arm `Buddy Watchdog` in the same turn** using verbatim `recommended_watch` (Playbook 3).
+- **On `needs_decision`**: Ask the user with the candidate list and execute their choice inline using `brief_path` (`send` — after `task adopt -p "<proj>" -w "<win>"` if untracked — or `dispatch ... --force`).
+- **Lost-Report Recovery**: Per `templates/orchestrator-AGENTS.md`, if interrupted before the Scout reports, run `buddy-ctl status` at the start of the next turn and arm a Watchdog for any active task that appeared.
 
 ---
 
