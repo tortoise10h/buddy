@@ -41,8 +41,12 @@ You can use `--engine opencode` on any command with zero configuration, or set i
 # Make OpenCode Desktop the default engine
 buddy-ctl init --default-engine opencode
 
-# Optional: configure default OpenCode agent mode (e.g. build, plan) or model
-buddy-ctl init --opencode-agent build --opencode-model opencode-go/deepseek-v4.1-flash
+# Optional: configure default OpenCode agent mode (e.g. build, plan) or provider/model
+buddy-ctl init --opencode-agent build --opencode-model opencode-go/mimo-v2.6-flash
+
+# Or configure provider and model explicitly via config set
+buddy-ctl config set engines.opencode.provider opencode-go
+buddy-ctl config set engines.opencode.model mimo-v2.6-flash
 ```
 
 This updates `~/.buddy/config.json` under `engines.opencode`:
@@ -54,13 +58,14 @@ This updates `~/.buddy/config.json` under `engines.opencode`:
       "server_url": "",
       "auto_start_service": true,
       "default_agent": "",
-      "provider": "",
-      "model": "",
+      "provider": "opencode-go",
+      "model": "mimo-v2.6-flash",
       "focus_desktop": true
     }
   }
 }
 ```
+When `engines.opencode.provider` and `engines.opencode.model` are configured, Buddy propagates `model: { providerID, id }` on both initial `dispatch` prompts and follow-up `send` prompts.
 
 ### Environment Overrides
 - `BUDDY_ENGINE=opencode`: Force the `opencode` engine for the current shell.

@@ -126,6 +126,7 @@ type CreateSessionRequest struct {
 // PromptRequest is the JSON payload for POST /api/session/{sessionID}/prompt.
 type PromptRequest struct {
 	Text     string         `json:"text"`
+	Model    *ModelRef      `json:"model,omitempty"`
 	Delivery string         `json:"delivery,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }

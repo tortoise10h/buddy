@@ -125,17 +125,25 @@ func TestOpenCodeEngine_Dispatch(t *testing.T) {
 	if mock.promptID != "ses_abc123" || mock.promptReq.Text != "implement oauth" {
 		t.Fatalf("unexpected prompt call: id=%q req=%+v", mock.promptID, mock.promptReq)
 	}
+	if mock.promptReq.Model == nil || mock.promptReq.Model.ProviderID != "opencode-go" || mock.promptReq.Model.ID != "deepseek-v4.1-flash" || mock.promptReq.Model.Variant != "high" {
+		t.Fatalf("expected PromptRequest.Model to be propagated on Dispatch, got %+v", mock.promptReq.Model)
+	}
 }
 
 func TestOpenCodeEngine_SendTextAndInterrupt(t *testing.T) {
 	mock := &mockOpenCodeClient{}
-	eng := NewOpenCodeEngineWithClient(mock, OpenCodeEngineOptions{})
+	eng := NewOpenCodeEngineWithClient(mock, OpenCodeEngineOptions{
+		DefaultModel: "opencode-go/mimo-v2.6-flash",
+	})
 
 	if err := eng.Send(context.Background(), "", "ses_1", backend.Input{Text: "continue"}); err != nil {
 		t.Fatalf("Send text failed: %v", err)
 	}
 	if mock.promptID != "ses_1" || mock.promptReq.Text != "continue" {
 		t.Fatalf("unexpected prompt: %+v", mock.promptReq)
+	}
+	if mock.promptReq.Model == nil || mock.promptReq.Model.ProviderID != "opencode-go" || mock.promptReq.Model.ID != "mimo-v2.6-flash" {
+		t.Fatalf("expected PromptRequest.Model to be propagated on Send, got %+v", mock.promptReq.Model)
 	}
 
 	if err := eng.Send(context.Background(), "", "ses_1", backend.Input{Key: "ctrl-c"}); err != nil {

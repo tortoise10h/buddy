@@ -83,7 +83,7 @@ func (e *OpenCodeEngine) Dispatch(ctx context.Context, req DispatchRequest) (*Di
 	}
 
 	if strings.TrimSpace(req.Prompt) != "" {
-		if err := e.client.Prompt(ctx, sess.ID, opencode.PromptRequest{Text: req.Prompt}); err != nil {
+		if err := e.client.Prompt(ctx, sess.ID, opencode.PromptRequest{Text: req.Prompt, Model: modelRef}); err != nil {
 			return nil, fmt.Errorf("opencode prompt session %s: %w", sess.ID, err)
 		}
 	}
@@ -105,7 +105,8 @@ func (e *OpenCodeEngine) Send(ctx context.Context, sessionID, blockID string, in
 		return fmt.Errorf("opencode send: session ID (blockID) is required")
 	}
 	if input.Text != "" {
-		return e.client.Prompt(ctx, blockID, opencode.PromptRequest{Text: input.Text})
+		_, modelRef := e.resolveAgentAndModel(nil)
+		return e.client.Prompt(ctx, blockID, opencode.PromptRequest{Text: input.Text, Model: modelRef})
 	}
 	key := strings.ToLower(strings.TrimSpace(input.Key))
 	switch key {
