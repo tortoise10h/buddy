@@ -85,7 +85,13 @@ buddy-ctl task close -p myapp -t feat-auth --engine opencode
 buddy-ctl task clean -p myapp -t feat-auth --reason "merged PR" --engine opencode
 ```
 
-### Environment Overrides & Troubleshooting
-- **Overrides**: `BUDDY_ENGINE=opencode`, `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL`, `BUDDY_OPENCODE_PASSWORD` / `OPENCODE_SERVER_PASSWORD`, `BUDDY_OPENCODE_BIN`.
-- **Service not running**: Open OpenCode Desktop or run `opencode service start`, then check `opencode service status`.
-- **HTTP 401 Unauthorized**: Buddy automatically re-reads `~/.local/state/opencode/service.json` once if OpenCode Desktop restarts on a new port/token; for custom URLs, ensure `BUDDY_OPENCODE_PASSWORD` is set.
+**Environment overrides**: `BUDDY_ENGINE=opencode`, `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL`, `BUDDY_OPENCODE_PASSWORD` / `OPENCODE_SERVER_PASSWORD`, `BUDDY_OPENCODE_BIN`.
+
+---
+
+## 4. Troubleshooting
+
+- **`opencode background service is not running`**: Open **OpenCode Desktop** or run `opencode service start`, then verify with `opencode service status`.
+- **`HTTP 401 Unauthorized`**: If OpenCode Desktop restarted on a new port/token, Buddy automatically re-reads `~/.local/state/opencode/service.json` once on auth failure. When using a custom server via `BUDDY_OPENCODE_URL`, make sure `BUDDY_OPENCODE_PASSWORD` (or `OPENCODE_SERVER_PASSWORD`) is set.
+- **Dispatched session doesn't appear in the sidebar**: OpenCode Desktop shows newly created API sessions in **All sessions** until clicked (its Electron UI does not currently expose an API/deep-link to auto-open a tab). Adding the project folder to your **Projects** sidebar once lets new sessions refresh under that project automatically.
+- **Buddy is picking the wrong engine**: Run `buddy-ctl engine` to see the detected host, signals, and resolution source (override with `--engine opencode` or `BUDDY_ENGINE=opencode` if needed).
