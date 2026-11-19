@@ -88,6 +88,12 @@ func ResolveEngine(flagEngine string, getEnv func(string) string, cfg *config.Co
 			Source:     SourceHostDetection,
 			HostInfo:   hostInfo,
 		}
+	case host.HostOpenCode:
+		return EngineResolution{
+			EngineName: "opencode",
+			Source:     SourceHostDetection,
+			HostInfo:   hostInfo,
+		}
 	}
 
 	// Tier 4: User configuration

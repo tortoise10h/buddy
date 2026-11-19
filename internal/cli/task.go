@@ -169,7 +169,7 @@ func newTaskStartCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
 	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch")
 	cmd.Flags().StringVar(&prompt, "prompt", "", "Initial prompt for worker agent")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 	cmd.Flags().BoolVar(&force, "force", false, "Bypass candidate duplicate guard and start a new task tab")
 
 	return cmd
@@ -378,6 +378,141 @@ func newTaskAdoptCmd() *cobra.Command {
 				return enc.Encode(resp)
 			}
 
+			if engName == "opencode" {
+				var ocEng *engine.OpenCodeEngine
+				if eng, engErr := getEngine("opencode"); engErr == nil {
+					if cast, ok := eng.(*engine.OpenCodeEngine); ok {
+						ocEng = cast
+					}
+				}
+
+				if !found && ocEng != nil {
+					if probe, probeErr := ocEng.ProbeStatus(cmd.Context(), sessID, windowSpec); probeErr == nil {
+						matchedWin = backend.WindowInfo{
+							WindowID:  windowSpec,
+							Label:     windowSpec,
+							SessionID: sessID,
+							BlockIDs:  []string{windowSpec},
+						}
+						if probe.Status != "" && probe.Status != "unknown" {
+							detectedStatus = probe.Status
+						}
+						if probe.Summary != "" {
+							detectedSummary = probe.Summary
+						}
+						found = true
+					}
+				} else if found && ocEng != nil {
+					if probe, probeErr := ocEng.ProbeStatus(cmd.Context(), sessID, matchedWin.WindowID); probeErr == nil {
+						if probe.Status != "" && probe.Status != "unknown" {
+							detectedStatus = probe.Status
+						}
+						if probe.Summary != "" {
+							detectedSummary = probe.Summary
+						}
+					}
+				}
+
+				if (!found || sessID == "" || matchedWin.Label == matchedWin.WindowID) && ocEng != nil && projPath != "" {
+					if sessions, listErr := ocEng.ListProjectSessions(cmd.Context(), projPath, 50); listErr == nil {
+						for _, s := range sessions {
+							if s.ID == windowSpec || (!found && strings.EqualFold(s.Title, windowSpec)) {
+								if !found {
+									matchedWin = backend.WindowInfo{
+										WindowID:  s.ID,
+										Label:     truncateT3Label(s.Title, 40),
+										SessionID: s.ProjectID,
+										BlockIDs:  []string{s.ID},
+									}
+									found = true
+								}
+								if sessID == "" && s.ProjectID != "" {
+									sessID = s.ProjectID
+								}
+								if (matchedWin.Label == "" || matchedWin.Label == matchedWin.WindowID) && s.Title != "" {
+									matchedWin.Label = truncateT3Label(s.Title, 40)
+								}
+								break
+							}
+						}
+					}
+				}
+
+				if !found {
+					return fmt.Errorf("session %q not found in project %q", windowSpec, projName)
+				}
+
+				blockID := matchedWin.WindowID
+				if len(matchedWin.BlockIDs) > 0 && matchedWin.BlockIDs[0] != "" {
+					blockID = matchedWin.BlockIDs[0]
+				}
+				if detectedStatus == "" {
+					detectedStatus = "running"
+				}
+				if detectedSummary == "" {
+					detectedSummary = "Adopted OpenCode session"
+				}
+				rawSlug := taskSlug
+				if rawSlug == "" {
+					rawSlug = matchedWin.Label
+				}
+				if rawSlug == "" {
+					rawSlug = matchedWin.WindowID
+				}
+				slug := project.DeriveSlug(rawSlug, detectedSummary, projName)
+
+				if agentName == "" {
+					agentName = "opencode"
+				}
+
+				var updatedState *state.State
+				err = state.MutateStateForEngine(engName, func(s *state.State) error {
+					s.RecordTask(projName, projPath, sessID, projName, state.TaskState{
+						TaskSlug:     slug,
+						Engine:       engName,
+						WindowID:     matchedWin.WindowID,
+						WindowLabel:  matchedWin.Label,
+						AgentBlockID: blockID,
+						Agent:        agentName,
+						Cwd:          projPath,
+						Status:       detectedStatus,
+						Origin:       "user",
+						LastSummary:  detectedSummary,
+					})
+					if p, ok := s.Projects[projName]; ok && len(p.UntrackedWindows) > 0 {
+						var remaining []state.UntrackedWindow
+						for _, uw := range p.UntrackedWindows {
+							if uw.WindowID != matchedWin.WindowID {
+								remaining = append(remaining, uw)
+							}
+						}
+						p.UntrackedWindows = remaining
+						s.Projects[projName] = p
+					}
+					updatedState = s
+					return nil
+				})
+				if err != nil {
+					return err
+				}
+
+				recWatch := computeRecommendedWatch(updatedState)
+				resp := map[string]any{
+					"status":            "adopted",
+					"project":           projName,
+					"task":              slug,
+					"origin":            "user",
+					"task_status":       detectedStatus,
+					"summary":           detectedSummary,
+					"window_id":         matchedWin.WindowID,
+					"agent_block_id":    blockID,
+					"recommended_watch": recWatch,
+				}
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(resp)
+			}
+
 			// 2. Query live backend sessions/windows if not already in UntrackedWindows
 			if !found && tb != nil && tb.IsAvailable(cmd.Context()) {
 				if sessID == "" {
@@ -500,7 +635,7 @@ func newTaskAdoptCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&windowSpec, "window", "w", "", "Window ID or label to adopt")
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug to assign (defaults to window label)")
 	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Worker agent running in the tab")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }
@@ -574,7 +709,7 @@ func newTaskUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVar(&status, "status", "", "New task status")
 	cmd.Flags().StringVar(&summary, "summary", "", "New task summary")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }
@@ -595,16 +730,16 @@ func newTaskCloseCmd() *cobra.Command {
 			resolvedEngine := resolveActiveEngine(engineName)
 			var sessID, winID, projName, taskSlug, engName string
 			var err error
-			if project == "" && session == "" && window != "" && resolvedEngine == "t3" {
+			if project == "" && session == "" && window != "" && config.IsNonTerminalEngine(resolvedEngine) {
 				winID = window
-				engName = "t3"
+				engName = resolvedEngine
 			} else {
 				sessID, winID, _, projName, taskSlug, engName, err = resolveTargetWithEngine(project, task, session, window, "", engineName)
 				if err != nil {
 					return err
 				}
 			}
-			if winID == "" || (engName != "t3" && sessID == "") {
+			if winID == "" || (!config.IsNonTerminalEngine(engName) && sessID == "") {
 				return fmt.Errorf("missing session_id or window_id for task '%s'", task)
 			}
 
@@ -646,7 +781,7 @@ func newTaskCloseCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVarP(&window, "window", "w", "", "Direct window ID")
 	cmd.Flags().StringVarP(&session, "session", "s", "", "Direct session ID")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }

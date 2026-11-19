@@ -18,6 +18,9 @@ func newInitCmd() *cobra.Command {
 		workerAgent       string
 		t3Provider        string
 		t3Model           string
+		opencodeURL       string
+		opencodeAgent     string
+		opencodeModel     string
 		projectsRoots     []string
 	)
 
@@ -52,6 +55,22 @@ func newInitCmd() *cobra.Command {
 					}
 					cfg.Engines["t3"] = t3Cfg
 				}
+				if opencodeURL != "" || opencodeAgent != "" || opencodeModel != "" {
+					if cfg.Engines == nil {
+						cfg.Engines = make(map[string]config.EngineConfig)
+					}
+					ocCfg := cfg.Engines["opencode"]
+					if opencodeURL != "" {
+						ocCfg.ServerURL = opencodeURL
+					}
+					if opencodeAgent != "" {
+						ocCfg.DefaultAgent = opencodeAgent
+					}
+					if opencodeModel != "" {
+						ocCfg.Model = opencodeModel
+					}
+					cfg.Engines["opencode"] = ocCfg
+				}
 			}
 
 			// 1. config.json
@@ -67,7 +86,7 @@ func newInitCmd() *cobra.Command {
 					return err
 				}
 				created = append(created, "config.json")
-			} else if err == nil && (len(projectsRoots) > 0 || defaultEngine != "" || orchestratorAgent != "" || workerAgent != "" || t3Provider != "" || t3Model != "") {
+			} else if err == nil && (len(projectsRoots) > 0 || defaultEngine != "" || orchestratorAgent != "" || workerAgent != "" || t3Provider != "" || t3Model != "" || opencodeURL != "" || opencodeAgent != "" || opencodeModel != "") {
 				cfg, loadErr := config.LoadConfig()
 				if loadErr != nil {
 					return loadErr
@@ -117,11 +136,14 @@ func newInitCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&force, "force", false, "Force overwrite existing config and state")
-	cmd.Flags().StringVar(&defaultEngine, "default-engine", "", "Default execution engine (rex, wezterm, t3)")
+	cmd.Flags().StringVar(&defaultEngine, "default-engine", "", "Default execution engine (rex, wezterm, t3, opencode)")
 	cmd.Flags().StringVar(&orchestratorAgent, "orchestrator-agent", "", "Default terminal orchestrator agent (e.g. agy, opencode)")
 	cmd.Flags().StringVar(&workerAgent, "worker-agent", "", "Default terminal worker agent (e.g. agy, pi)")
 	cmd.Flags().StringVar(&t3Provider, "t3-provider", "", "Default T3 provider (e.g. antigravity, anthropic)")
 	cmd.Flags().StringVar(&t3Model, "t3-model", "", "Default T3 model (e.g. gemini-3.8-flash-medium)")
+	cmd.Flags().StringVar(&opencodeURL, "opencode-url", "", "Optional OpenCode server URL override (empty = auto-discover shared service)")
+	cmd.Flags().StringVar(&opencodeAgent, "opencode-agent", "", "Default OpenCode agent mode (e.g. build, plan)")
+	cmd.Flags().StringVar(&opencodeModel, "opencode-model", "", "Optional default OpenCode model (<provider>/<model>)")
 	cmd.Flags().StringArrayVar(&projectsRoots, "projects-root", nil, "Default project root directory (can be specified multiple times)")
 
 	return cmd

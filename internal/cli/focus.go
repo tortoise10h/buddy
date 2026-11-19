@@ -47,7 +47,7 @@ func newFocusCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVarP(&window, "window", "w", "", "Direct window ID")
 	cmd.Flags().StringVarP(&session, "session", "s", "", "Direct session ID")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }

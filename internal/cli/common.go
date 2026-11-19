@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tortoise10h/buddy/internal/backend/opencode"
 	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
@@ -30,6 +31,22 @@ func getRegistry() *engine.Registry {
 
 		// Register T3 engine
 		defaultRegistry.Register("t3", engine.NewT3Engine())
+
+		// Register OpenCode Desktop / shared local server engine
+		serverURL, autoStart, defaultAgent, defaultModel, focusDesktop := cfg.GetOpenCodeConfig()
+		defaultRegistry.Register("opencode", engine.NewOpenCodeEngine(
+			[]opencode.ClientOption{
+				opencode.WithDiscoverOptions(opencode.DiscoverOptions{
+					ServerURL:        serverURL,
+					AutoStartService: autoStart,
+				}),
+			},
+			engine.OpenCodeEngineOptions{
+				DefaultAgent: defaultAgent,
+				DefaultModel: defaultModel,
+				FocusDesktop: focusDesktop,
+			},
+		))
 	}
 	return defaultRegistry
 }
@@ -69,6 +86,34 @@ func resolveWorkerForEngine(engineName, flagAgent string, cfg *config.Config) (s
 		return "", nil, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --agent <provider>/<model>, or set BUDDY_T3_MODEL=<provider>/<model>")
 	}
 
+	if engineName == "opencode" {
+		if spec := strings.TrimSpace(flagAgent); spec != "" {
+			return spec, []string{spec}, nil
+		}
+		if env := strings.TrimSpace(os.Getenv("BUDDY_OPENCODE_MODEL")); env != "" {
+			return env, []string{env}, nil
+		}
+		if cfg != nil {
+			_, _, defAgent, defModel, _ := cfg.GetOpenCodeConfig()
+			var cmds []string
+			if defAgent != "" {
+				cmds = append(cmds, defAgent)
+			}
+			if defModel != "" {
+				cmds = append(cmds, defModel)
+			}
+			label := defModel
+			if label == "" {
+				label = defAgent
+			}
+			if label == "" {
+				label = "opencode"
+			}
+			return label, cmds, nil
+		}
+		return "opencode", nil, nil
+	}
+
 	agentName := strings.TrimSpace(flagAgent)
 	if agentName == "" {
 		agentName = strings.TrimSpace(os.Getenv("BUDDY_WORKER_AGENT"))
@@ -103,7 +148,7 @@ func resolveTargetWithEngine(project, task, flagSession, flagWindow, flagBlock, 
 	taskSlug = task
 	engineName = resolveActiveEngine(flagEngine)
 
-	if (sessionID != "" || engineName == "t3") && (blockID != "" || windowID != "") {
+	if (sessionID != "" || config.IsNonTerminalEngine(engineName)) && (blockID != "" || windowID != "") {
 		return sessionID, windowID, blockID, projName, taskSlug, engineName, nil
 	}
 

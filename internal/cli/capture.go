@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/config"
 )
 
 func newCaptureCmd() *cobra.Command {
@@ -28,7 +29,7 @@ func newCaptureCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if blkID == "" || (engName != "t3" && sessID == "") {
+			if blkID == "" || (!config.IsNonTerminalEngine(engName) && sessID == "") {
 				return fmt.Errorf("missing session_id or agent_block_id (specify --project/--task or -s/-b)")
 			}
 
@@ -74,7 +75,7 @@ func newCaptureCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&block, "block", "b", "", "Direct block ID")
 	cmd.Flags().IntVarP(&lines, "lines", "n", 100, "Number of trailing lines to capture")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Print raw terminal output directly")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }

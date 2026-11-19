@@ -167,6 +167,16 @@ func newContextInjectCmd() *cobra.Command {
 				} else {
 					workerAgent = "unconfigured"
 				}
+			} else if resEngine.EngineName == "opencode" {
+				orchAgent = "opencode (desktop/server)"
+				_, _, defAgent, defModel, _ := cfg.GetOpenCodeConfig()
+				if defModel != "" {
+					workerAgent = defModel
+				} else if defAgent != "" {
+					workerAgent = defAgent
+				} else {
+					workerAgent = "default"
+				}
 			} else {
 				orchAgent = cfg.GetEffectiveOrchestratorAgent(resEngine.EngineName)
 				workerAgent = cfg.GetEffectiveWorkerAgent(resEngine.EngineName)

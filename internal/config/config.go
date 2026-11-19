@@ -18,7 +18,7 @@ type AgentConfig struct {
 
 // EngineConfig holds engine-specific settings.
 // Terminal engines (rex, wezterm) use SessionName, CaptureLines, OrchestratorAgent, and WorkerAgent.
-// API/thread engines (t3) use Provider and Model.
+// API/thread engines (t3, opencode) use Provider, Model, and server/desktop fields.
 type EngineConfig struct {
 	SessionName       string `json:"session_name,omitempty"`
 	CaptureLines      int    `json:"capture_lines,omitempty"`
@@ -27,6 +27,11 @@ type EngineConfig struct {
 
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
+
+	ServerURL        string `json:"server_url,omitempty"`
+	AutoStartService *bool  `json:"auto_start_service,omitempty"`
+	DefaultAgent     string `json:"default_agent,omitempty"`
+	FocusDesktop     *bool  `json:"focus_desktop,omitempty"`
 }
 
 type Config struct {
@@ -76,6 +81,14 @@ func DefaultConfig() *Config {
 			"t3": {
 				Provider: "",
 				Model:    "",
+			},
+			"opencode": {
+				ServerURL:        "",
+				AutoStartService: boolPtr(true),
+				DefaultAgent:     "",
+				Provider:         "",
+				Model:            "",
+				FocusDesktop:     boolPtr(true),
 			},
 		},
 		Agents: map[string]AgentConfig{
@@ -153,16 +166,25 @@ func (c *Config) GetEngineConfig(engineName string) EngineConfig {
 	return c.Engines[engineName]
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+// IsNonTerminalEngine returns true for API/desktop engines that do not run inside a terminal multiplexer.
+func IsNonTerminalEngine(engineName string) bool {
+	return engineName == "t3" || engineName == "opencode"
+}
+
 // GetEffectiveWorkerAgent returns the worker agent harness for a terminal engine.
-// For non-terminal engines like "t3", it returns an empty string.
+// For non-terminal engines like "t3" or "opencode", it returns an empty string.
 func (c *Config) GetEffectiveWorkerAgent(engineName string) string {
-	if engineName == "t3" {
+	if IsNonTerminalEngine(engineName) {
 		return ""
 	}
 	if ec, ok := c.Engines[engineName]; ok && ec.WorkerAgent != "" {
 		return ec.WorkerAgent
 	}
-	if engineName != "" && engineName != c.DefaultEngine && c.DefaultEngine != "" && c.DefaultEngine != "t3" {
+	if engineName != "" && engineName != c.DefaultEngine && c.DefaultEngine != "" && !IsNonTerminalEngine(c.DefaultEngine) {
 		if ec, ok := c.Engines[c.DefaultEngine]; ok && ec.WorkerAgent != "" {
 			return ec.WorkerAgent
 		}
@@ -171,20 +193,49 @@ func (c *Config) GetEffectiveWorkerAgent(engineName string) string {
 }
 
 // GetEffectiveOrchestratorAgent returns the orchestrator agent harness for a terminal engine.
-// For "t3", the user chats with the orchestrator thread directly, so it returns "".
+// For non-terminal engines ("t3", "opencode"), the user interacts directly with the app, so it returns "".
 func (c *Config) GetEffectiveOrchestratorAgent(engineName string) string {
-	if engineName == "t3" {
+	if IsNonTerminalEngine(engineName) {
 		return ""
 	}
 	if ec, ok := c.Engines[engineName]; ok && ec.OrchestratorAgent != "" {
 		return ec.OrchestratorAgent
 	}
-	if engineName != "" && engineName != c.DefaultEngine && c.DefaultEngine != "" && c.DefaultEngine != "t3" {
+	if engineName != "" && engineName != c.DefaultEngine && c.DefaultEngine != "" && !IsNonTerminalEngine(c.DefaultEngine) {
 		if ec, ok := c.Engines[c.DefaultEngine]; ok && ec.OrchestratorAgent != "" {
 			return ec.OrchestratorAgent
 		}
 	}
 	return "agy"
+}
+
+// GetOpenCodeConfig returns resolved OpenCode engine settings with sensible defaults.
+func (c *Config) GetOpenCodeConfig() (serverURL string, autoStart bool, defaultAgent string, defaultModel string, focusDesktop bool) {
+	autoStart = true
+	focusDesktop = true
+	if c == nil || c.Engines == nil {
+		return
+	}
+	ec, ok := c.Engines["opencode"]
+	if !ok {
+		return
+	}
+	serverURL = strings.TrimSpace(ec.ServerURL)
+	if ec.AutoStartService != nil {
+		autoStart = *ec.AutoStartService
+	}
+	defaultAgent = strings.TrimSpace(ec.DefaultAgent)
+	p := strings.TrimSpace(ec.Provider)
+	m := strings.TrimSpace(ec.Model)
+	if p != "" && m != "" {
+		defaultModel = p + "/" + m
+	} else if m != "" && strings.Contains(m, "/") {
+		defaultModel = m
+	}
+	if ec.FocusDesktop != nil {
+		focusDesktop = *ec.FocusDesktop
+	}
+	return
 }
 
 // GetT3ProviderModel returns the configured provider and model for the T3 engine.
