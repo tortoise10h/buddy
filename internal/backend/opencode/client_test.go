@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -220,5 +221,68 @@ func TestHTTPClient_SubscribeEventsSSE(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatalf("timed out waiting for SSE event")
+	}
+}
+
+func TestHTTPClient_UpdateSessionArchive(t *testing.T) {
+	var bodies []string
+	var paths []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		paths = append(paths, r.URL.Path)
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/session/ses_missing" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"_tag":"NotFoundError","message":"session not found"}`))
+			return
+		}
+		var req UpdateSessionRequest
+		_ = json.Unmarshal(raw, &req)
+		if req.Archived != nil && *req.Archived {
+			_, _ = w.Write([]byte(`{"data":{"id":"ses_1","time":{"created":100,"updated":200,"archived":300}}}`))
+		} else {
+			_, _ = w.Write([]byte(`{"data":{"id":"ses_1","time":{"created":100,"updated":250}}}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := NewHTTPClient(WithEndpoint(EndpointConfig{URL: srv.URL}))
+	ctx := context.Background()
+
+	archived := true
+	sess, err := client.UpdateSession(ctx, "ses_1", UpdateSessionRequest{Archived: &archived})
+	if err != nil {
+		t.Fatalf("UpdateSession(archived=true) failed: %v", err)
+	}
+	if sess.ID != "ses_1" || sess.Time.Archived != 300 {
+		t.Fatalf("unexpected archived session response: %+v", sess)
+	}
+
+	unarchived := false
+	sess2, err := client.UpdateSession(ctx, "ses_1", UpdateSessionRequest{Archived: &unarchived})
+	if err != nil {
+		t.Fatalf("UpdateSession(archived=false) failed: %v", err)
+	}
+	if sess2.ID != "ses_1" || sess2.Time.Archived != 0 {
+		t.Fatalf("unexpected unarchived session response: %+v", sess2)
+	}
+
+	if len(bodies) != 2 || bodies[0] != `{"archived":true}` || bodies[1] != `{"archived":false}` {
+		t.Fatalf("unexpected PATCH bodies: %+v", bodies)
+	}
+	if len(paths) != 2 || paths[0] != "/api/session/ses_1" || paths[1] != "/api/session/ses_1" {
+		t.Fatalf("unexpected PATCH paths: %+v", paths)
+	}
+
+	_, err = client.UpdateSession(ctx, "ses_missing", UpdateSessionRequest{Archived: &archived})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 }
