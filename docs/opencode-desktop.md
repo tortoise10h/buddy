@@ -1,26 +1,25 @@
-# Using Buddy with OpenCode Desktop (`--engine opencode`)
+# Using Buddy with OpenCode Desktop
 
-OpenCode v2 runs a **shared local background server** (`opencode serve --service`) that both **OpenCode Desktop** and the **`opencode` CLI** connect to. Buddy's `opencode` engine speaks directly to this shared server over HTTP/SSE, so tasks dispatched from `buddy-ctl` appear live in OpenCode Desktop—and sessions started directly in OpenCode Desktop or `opencode` CLI can be inspected and adopted by Buddy.
+OpenCode v2 runs a **shared local background server** (`opencode serve --service`) that both **OpenCode Desktop** and the **`opencode` CLI** connect to. Buddy's `opencode` engine speaks directly to this shared server over HTTP/SSE, so tasks Buddy dispatches appear live in OpenCode Desktop—and sessions you start directly in OpenCode Desktop or `opencode` CLI can be inspected and adopted by Buddy.
 
 > [!NOTE]
-> **`--engine opencode` vs. `--engine rex --agent opencode`**
-> - `--engine opencode`: Controls OpenCode Desktop directly via its shared local HTTP/SSE server (state stored in `~/.buddy/state/opencode.json`).
-> - `--engine rex --agent opencode`: Launches the `opencode` TUI inside a Rex terminal tab (state stored in `~/.buddy/state/rex.json`), which also connects to the same shared local server by default.
+> **`opencode` engine vs. Rex with `opencode` TUI**
+> - **OpenCode Desktop engine (`--engine opencode`)**: Controls OpenCode Desktop directly via its shared local HTTP/SSE server (state stored in `~/.buddy/state/opencode.json`). Auto-detected when running inside OpenCode Desktop.
+> - **Terminal `opencode` (`--engine rex --agent opencode`)**: Runs the `opencode` TUI inside a Rex terminal tab (state stored in `~/.buddy/state/rex.json`).
 
 ---
 
 ## 1. Prerequisites
 
-- **OpenCode Desktop** (v2.2+ / v2.3+) and/or the **`opencode` CLI** installed.
-- **`buddy-ctl`** built and installed:
-  ```sh
-  make build && make install
-  ```
+### 1a. Install OpenCode Desktop and Buddy
+1. Install **OpenCode Desktop** (v2.2+ / v2.3+).
+2. Clone and install **Buddy** using `install.sh` (pass `--build` to compile `buddy-ctl` from the latest repository source):
+   ```sh
+   ./install.sh          # Standard install
+   ./install.sh --build  # Build buddy-ctl from the latest repo code
+   ```
 
----
-
-## 2. Verify the Shared Local Service
-
+### 1b. Verify the Shared Local Service
 OpenCode Desktop automatically starts the shared background server and writes its loopback URL and auth token to `~/.local/state/opencode/service.json`.
 
 Verify it is running:
@@ -28,128 +27,65 @@ Verify it is running:
 opencode service status
 # Example output: http://127.0.0.1:49374
 ```
-
-If OpenCode Desktop is closed, `buddy-ctl` can auto-start the shared background service for you via `opencode service start` (enabled by default), so OpenCode Desktop will attach to the exact same server when you open it later.
+*(If OpenCode Desktop is closed, `buddy-ctl` automatically starts the shared background service via `opencode service start`, so OpenCode Desktop attaches to the same server when you open it.)*
 
 ---
 
-## 3. How Buddy Selects the Engine & Optional Configuration
+## 2. Use Buddy in OpenCode Desktop
 
-### Automatic Host Detection (Zero Config Inside OpenCode Desktop)
-When Buddy runs **inside OpenCode Desktop** (e.g. an OpenCode session in `~/.buddy`), `buddy-ctl` automatically detects the host environment (`OPENCODE`, `OPENCODE_SESSION_ID`, or `__CFBundleIdentifier=ai.opencode.desktop`) and resolves the `opencode` engine automatically. You do **not** need to pass `--engine opencode` or change `default_engine`.
+Once installed, you are ready to go—no extra configuration is required:
 
-You can verify what `buddy-ctl` detects at any time:
+1. Open **OpenCode Desktop**.
+2. Open the **`~/.buddy`** folder as a project and start a new session.
+3. Just talk to Buddy as your orchestrator, for example:
+   - *"Dispatch a task on `myapp` to add OAuth login with unit tests."*
+   - *"How is the `myapp` auth task going?"*
+   - *"Tell the `myapp` worker to also cover expired tokens."*
+   - *"Close and clean up the `myapp` auth task."*
+
+### What Happens Automatically
+- **Auto-detection**: Inside OpenCode Desktop, `buddy-ctl` detects the OpenCode runtime environment (`OPENCODE`, `OPENCODE_SESSION_ID`, or `__CFBundleIdentifier=ai.opencode.desktop`) and selects the `opencode` engine automatically.
+- **Shared sessions**: Worker sessions dispatched by Buddy run on the same local server, so you can inspect or jump into them directly in OpenCode Desktop (under **All sessions**, or under the project in the sidebar if you have added that project folder to your sidebar).
+- **Non-destructive cleanup**: Closing or cleaning a task interrupts it if running and removes it from Buddy's active tracking (`~/.buddy/state/opencode.json`), while keeping the full conversation history intact in OpenCode Desktop.
+
+### Optional: Pin a Default Agent or Model
+By default, Buddy lets OpenCode use its own default agent and model. If you want Buddy-dispatched workers to use a specific agent mode or provider/model, set them once:
 ```sh
-buddy-ctl engine
-```
-
-### Running From Outside OpenCode Desktop
-If you run `buddy-ctl` from a plain terminal, Rex, or T3 and want to target OpenCode Desktop:
-- **Per command**: Pass `--engine opencode` (for example, `buddy-ctl dispatch -p myapp -m "..." --engine opencode`).
-- **For a shell session**: Set `export BUDDY_ENGINE=opencode`.
-- **As the fallback default in plain terminals**: Run `buddy-ctl init --default-engine opencode` (note that inside Rex or T3, host detection still takes precedence over `default_engine` unless overridden with `--engine` or `BUDDY_ENGINE`).
-
-### Configuring Default Agent & Model (Optional)
-If omitted, OpenCode uses its own default agent and model. To pin a default agent mode or provider/model for Buddy-dispatched tasks:
-
-```sh
-# Via buddy-ctl init
-buddy-ctl init --opencode-agent build --opencode-model opencode-go/mimo-v2.6-flash
-
-# Or explicitly via config set
+buddy-ctl config set engines.opencode.default_agent build
 buddy-ctl config set engines.opencode.provider opencode-go
 buddy-ctl config set engines.opencode.model mimo-v2.6-flash
 ```
-
-This updates `~/.buddy/config.json` under `engines.opencode`:
-```json
-{
-  "engines": {
-    "opencode": {
-      "server_url": "",
-      "auto_start_service": true,
-      "default_agent": "",
-      "provider": "opencode-go",
-      "model": "mimo-v2.6-flash",
-      "focus_desktop": true
-    }
-  }
-}
-```
-When `engines.opencode.provider` and `engines.opencode.model` are configured, Buddy propagates `model: { providerID, id }` on both initial `dispatch` prompts and follow-up `send` prompts.
-
-### Environment Overrides
-- `BUDDY_ENGINE=opencode`: Force the `opencode` engine for the current shell.
-- `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL`: Connect to a specific OpenCode server URL instead of `~/.local/state/opencode/service.json`.
-- `BUDDY_OPENCODE_PASSWORD` / `OPENCODE_SERVER_PASSWORD`: Basic Auth password when using a custom server URL.
-- `BUDDY_OPENCODE_BIN`: Explicit path to the `opencode` binary (Buddy also falls back to OpenCode Desktop's bundled `opencode-cli`).
+When `provider` and `model` are configured, Buddy propagates `model: { providerID, id }` on both initial dispatches and follow-up messages.
 
 ---
 
-## 4. Day-to-Day Workflow
+## 3. Using `buddy-ctl` Directly (Optional)
 
-*(Inside OpenCode Desktop—or when `BUDDY_ENGINE=opencode` / `default_engine: "opencode"` is active—you can omit `--engine opencode` from the commands below.)*
+You rarely need to run `buddy-ctl` by hand, but it is useful for scripting, debugging, or controlling OpenCode Desktop from an external terminal (pass `--engine opencode` or set `BUDDY_ENGINE=opencode` when running outside OpenCode Desktop):
 
-### Dispatch a New Task
 ```sh
-buddy-ctl dispatch -p myapp -t feat-auth \
-  -m "Add OAuth login with unit tests" \
-  --engine opencode
-```
-- Creates a session scoped to `myapp`'s directory, enqueues the prompt, and records the `ses_...` ID in `~/.buddy/state/opencode.json`.
-- The session appears immediately in **OpenCode Desktop**.
-- Pass `--agent plan` (or `--agent <provider>/<model>`) to override the agent mode or model for a single dispatch.
+# Check which engine Buddy resolves in your current environment
+buddy-ctl engine
 
-### Watch Live Progress
-```sh
-buddy-ctl watch -p myapp -t feat-auth --engine opencode --interval 3 --timeout 600
-```
-Buddy probes structured server state (no terminal scraping):
-- Active session → `running` (or `planning` when using the `plan` agent)
-- Pending permission or interactive form → `waiting_for_input`
-- Completed turn (`succeeded`) → `ready_for_demo`
-- Failed/interrupted turn → `error`
+# Dispatch a task and watch live status transitions (running / planning / waiting_for_input / ready_for_demo / error)
+buddy-ctl dispatch -p myapp -t feat-auth -m "Add OAuth login" --engine opencode
+buddy-ctl watch -p myapp -t feat-auth --engine opencode
 
-### Inspect Output & Send Follow-Ups
-```sh
-# View formatted session header and recent messages
+# Inspect messages, send a follow-up, or interrupt a running turn
 buddy-ctl capture -p myapp -t feat-auth --engine opencode
-
-# Send a follow-up prompt
-buddy-ctl send -p myapp -t feat-auth --text "Also add edge-case tests for expired tokens" --engine opencode
-
-# Interrupt an actively running turn
+buddy-ctl send -p myapp -t feat-auth --text "Add expired-token tests" --engine opencode
 buddy-ctl send -p myapp -t feat-auth --key ctrl-c --engine opencode
 
-# Bring OpenCode Desktop to the foreground (macOS)
-buddy-ctl focus -p myapp -t feat-auth --engine opencode
-```
-
-### Sync & Adopt Out-of-Band Desktop/CLI Sessions
-Sessions created directly in OpenCode Desktop or via `opencode run` are automatically discovered when syncing:
-```sh
+# Sync out-of-band Desktop/CLI sessions (active or updated within 24h, max 10/project) and adopt one
 buddy-ctl status --sync --format table --engine opencode
-```
-- Surfaces untracked sessions that are **currently active** or **updated within the last 24 hours** (capped at 10 per project, excluding child/subagent and archived sessions).
-- Adopt any untracked session into Buddy tracking:
-  ```sh
-  buddy-ctl task adopt -p myapp -w <ses_id> -t my-task-slug --engine opencode
-  ```
+buddy-ctl task adopt -p myapp -w <ses_id> -t my-task --engine opencode
 
-### Close & Clean Up (Non-Destructive)
-```sh
-# 1. Close: interrupts the session if actively running and marks it "closed" in Buddy state
+# Non-destructive close & clean
 buddy-ctl task close -p myapp -t feat-auth --engine opencode
-
-# 2. Clean: removes the closed task from active state and logs an audit entry in task history
 buddy-ctl task clean -p myapp -t feat-auth --reason "merged PR" --engine opencode
 ```
-Closing and cleaning **never deletes** your conversation history in OpenCode Desktop, and cleaned session IDs are remembered so they will not reappear as untracked on future syncs.
 
----
-
-## 5. Troubleshooting
-
-- **`opencode background service is not running`**: Open **OpenCode Desktop** or run `opencode service start`, then verify with `opencode service status`.
-- **`HTTP 401 Unauthorized`**: If you restarted OpenCode Desktop, Buddy automatically re-reads `~/.local/state/opencode/service.json` once on auth failure. If connecting to a custom URL via `BUDDY_OPENCODE_URL`, ensure `BUDDY_OPENCODE_PASSWORD` (or `OPENCODE_SERVER_PASSWORD`) is set.
-- **Inspect engine resolution**: Run `buddy-ctl engine` to confirm which engine and signal source Buddy resolved.
+### Environment Overrides & Troubleshooting
+- **Overrides**: `BUDDY_ENGINE=opencode`, `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL`, `BUDDY_OPENCODE_PASSWORD` / `OPENCODE_SERVER_PASSWORD`, `BUDDY_OPENCODE_BIN`.
+- **Service not running**: Open OpenCode Desktop or run `opencode service start`, then check `opencode service status`.
+- **HTTP 401 Unauthorized**: Buddy automatically re-reads `~/.local/state/opencode/service.json` once if OpenCode Desktop restarts on a new port/token; for custom URLs, ensure `BUDDY_OPENCODE_PASSWORD` is set.
