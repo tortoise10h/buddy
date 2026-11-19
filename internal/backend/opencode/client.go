@@ -24,6 +24,7 @@ type Client interface {
 	CreateSession(ctx context.Context, req CreateSessionRequest) (*SessionInfo, error)
 	GetActiveSessions(ctx context.Context) (map[string]SessionActive, error)
 	GetSession(ctx context.Context, sessionID string) (*SessionInfo, error)
+	UpdateSession(ctx context.Context, sessionID string, req UpdateSessionRequest) (*SessionInfo, error)
 	Prompt(ctx context.Context, sessionID string, req PromptRequest) error
 	Interrupt(ctx context.Context, sessionID string) error
 	ListMessages(ctx context.Context, sessionID string, limit int, order string) ([]MessageInfo, error)
@@ -288,6 +289,19 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 		Data SessionInfo `json:"data"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, "/api/session/"+url.PathEscape(sessionID), nil, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+func (c *HTTPClient) UpdateSession(ctx context.Context, sessionID string, req UpdateSessionRequest) (*SessionInfo, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("opencode update session: sessionID is required")
+	}
+	var resp struct {
+		Data SessionInfo `json:"data"`
+	}
+	if err := c.doJSON(ctx, http.MethodPatch, "/api/session/"+url.PathEscape(sessionID), nil, req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil

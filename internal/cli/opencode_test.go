@@ -165,6 +165,7 @@ func TestCLI_OpenCodeFullLifecycle(t *testing.T) {
 	var mu sync.Mutex
 	active := map[string]opencode.SessionActive{}
 	interrupted := false
+	archived := false
 	prompts := []string{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +192,13 @@ func TestCLI_OpenCodeFullLifecycle(t *testing.T) {
 			interrupted = true
 			delete(active, "ses_live1")
 			_, _ = w.Write([]byte(`{"interrupted":true}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/session/ses_live1":
+			var req opencode.UpdateSessionRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Archived != nil && *req.Archived {
+				archived = true
+			}
+			_, _ = w.Write([]byte(`{"data":{"id":"ses_live1","projectID":"proj_demo","title":"feat-login","agent":"build","time":{"archived":1700000000000}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_oob1":
 			_, _ = w.Write([]byte(`{"data":{"id":"ses_oob1","projectID":"proj_demo","title":"Manual desktop chat","agent":"build","outcome":"succeeded"}}`))
 		case r.Method == http.MethodGet && (r.URL.Path == "/api/session/ses_oob1/permission" || r.URL.Path == "/api/session/ses_oob1/form"):
@@ -247,11 +255,14 @@ func TestCLI_OpenCodeFullLifecycle(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// 3. Close (interrupts active session non-destructively and marks closed)
+	// 3. Close (interrupts active session, archives it, and marks closed)
 	_ = runCmd("task", "close", "-p", "demoapp", "-t", "feat-login", "--engine", "opencode")
 	mu.Lock()
 	if !interrupted {
 		t.Fatalf("expected active session to be interrupted on task close")
+	}
+	if !archived {
+		t.Fatalf("expected session to be archived via PATCH /api/session/ses_live1 on task close")
 	}
 	mu.Unlock()
 
