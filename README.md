@@ -158,6 +158,13 @@ buddy-ctl config set orchestrator_agent opencode
 buddy-ctl config set worker_agent agy
 ```
 
+### OpenCode Desktop Engine (`--engine opencode`)
+OpenCode v2 runs a shared local background server (`opencode serve --service`) that both **OpenCode Desktop** and the **`opencode` CLI** attach to. Buddy can orchestrate OpenCode Desktop sessions directly over its local HTTP/SSE API using `--engine opencode` (distinct from running the `opencode` TUI inside Rex via `--engine rex --agent opencode`):
+
+- **Auto-discovery & bootstrap**: Reads `~/.local/state/opencode/service.json` (with `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL` and `engines.opencode.server_url` overrides) and can auto-start the shared background service via `opencode service start`.
+- **Shared state**: Tasks dispatched with `buddy-ctl dispatch -p <project> -m "..." --engine opencode` appear immediately in OpenCode Desktop; sessions created directly in OpenCode Desktop or `opencode` CLI (active or updated within 24h, capped at 10 per project) are surfaced by `buddy-ctl status --sync --engine opencode` and can be adopted via `buddy-ctl task adopt`.
+- **Non-destructive close**: `buddy-ctl task close --engine opencode` interrupts an actively running turn (`POST /api/session/{id}/interrupt`) and marks the task `"closed"` in `~/.buddy/state/opencode.json` while keeping the session history intact in OpenCode Desktop.
+
 ### Pinning a Model (Model Variants)
 The install picker intentionally offers agent harnesses only (using each harness's own default model).
 
