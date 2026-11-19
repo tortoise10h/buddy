@@ -33,18 +33,30 @@ If OpenCode Desktop is closed, `buddy-ctl` can auto-start the shared background 
 
 ---
 
-## 3. Configure Buddy (Optional)
+## 3. How Buddy Selects the Engine & Optional Configuration
 
-You can use `--engine opencode` on any command with zero configuration, or set it as your default engine and configure defaults via `buddy-ctl init`:
+### Automatic Host Detection (Zero Config Inside OpenCode Desktop)
+When Buddy runs **inside OpenCode Desktop** (e.g. an OpenCode session in `~/.buddy`), `buddy-ctl` automatically detects the host environment (`OPENCODE`, `OPENCODE_SESSION_ID`, or `__CFBundleIdentifier=ai.opencode.desktop`) and resolves the `opencode` engine automatically. You do **not** need to pass `--engine opencode` or change `default_engine`.
+
+You can verify what `buddy-ctl` detects at any time:
+```sh
+buddy-ctl engine
+```
+
+### Running From Outside OpenCode Desktop
+If you run `buddy-ctl` from a plain terminal, Rex, or T3 and want to target OpenCode Desktop:
+- **Per command**: Pass `--engine opencode` (for example, `buddy-ctl dispatch -p myapp -m "..." --engine opencode`).
+- **For a shell session**: Set `export BUDDY_ENGINE=opencode`.
+- **As the fallback default in plain terminals**: Run `buddy-ctl init --default-engine opencode` (note that inside Rex or T3, host detection still takes precedence over `default_engine` unless overridden with `--engine` or `BUDDY_ENGINE`).
+
+### Configuring Default Agent & Model (Optional)
+If omitted, OpenCode uses its own default agent and model. To pin a default agent mode or provider/model for Buddy-dispatched tasks:
 
 ```sh
-# Make OpenCode Desktop the default engine
-buddy-ctl init --default-engine opencode
-
-# Optional: configure default OpenCode agent mode (e.g. build, plan) or provider/model
+# Via buddy-ctl init
 buddy-ctl init --opencode-agent build --opencode-model opencode-go/mimo-v2.6-flash
 
-# Or configure provider and model explicitly via config set
+# Or explicitly via config set
 buddy-ctl config set engines.opencode.provider opencode-go
 buddy-ctl config set engines.opencode.model mimo-v2.6-flash
 ```
@@ -52,7 +64,6 @@ buddy-ctl config set engines.opencode.model mimo-v2.6-flash
 This updates `~/.buddy/config.json` under `engines.opencode`:
 ```json
 {
-  "default_engine": "opencode",
   "engines": {
     "opencode": {
       "server_url": "",
@@ -77,7 +88,7 @@ When `engines.opencode.provider` and `engines.opencode.model` are configured, Bu
 
 ## 4. Day-to-Day Workflow
 
-*(Omit `--engine opencode` in the commands below if `default_engine` is `"opencode"` or `BUDDY_ENGINE=opencode` is set.)*
+*(Inside OpenCode Desktop—or when `BUDDY_ENGINE=opencode` / `default_engine: "opencode"` is active—you can omit `--engine opencode` from the commands below.)*
 
 ### Dispatch a New Task
 ```sh
