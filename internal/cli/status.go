@@ -32,7 +32,7 @@ func newStatusCmd() *cobra.Command {
 			if !noSync {
 				enginesToSync := []string{res.EngineName}
 				if allEngines {
-					enginesToSync = []string{"rex", "t3"}
+					enginesToSync = []string{"rex", "t3", "opencode"}
 				}
 				for _, engName := range enginesToSync {
 					if syncLive {

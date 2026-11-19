@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/backend/opencode"
 	"github.com/tortoise10h/buddy/internal/backend/rex"
 	"github.com/tortoise10h/buddy/internal/backend/t3"
 	"github.com/tortoise10h/buddy/internal/engine"
@@ -15,6 +18,12 @@ import (
 
 const defaultSyncTTL = 45 * time.Second
 const defaultT3SyncTimeout = 5 * time.Second
+const defaultOpenCodeSyncTimeout = 5 * time.Second
+const openCodeUntrackedWindow = 24 * time.Hour
+const openCodeUntrackedMaxPerProject = 10
+
+// nowFn is injectable for deterministic time-window tests.
+var nowFn = time.Now
 
 // defaultRexBackend returns the injectable Rex backend used by status --sync and TTL auto-sync.
 var defaultRexBackend = func() backend.TerminalBackend {
@@ -32,6 +41,19 @@ var syncT3Fn = func(ctx context.Context) error {
 		return nil
 	}
 	return reconcileT3WithEngine(ctx, t3Eng)
+}
+
+// syncOpenCodeFn is injectable for testing to reconcile state with live OpenCode sessions.
+var syncOpenCodeFn = func(ctx context.Context) error {
+	eng, err := getEngine("opencode")
+	if err != nil {
+		return err
+	}
+	ocEng, ok := eng.(*engine.OpenCodeEngine)
+	if !ok {
+		return nil
+	}
+	return reconcileOpenCodeWithEngine(ctx, ocEng)
 }
 
 var defaultShellWindowLabels = map[string]bool{
@@ -340,6 +362,8 @@ func reconcileActiveIfStale(ctx context.Context, engineName string, ttl time.Dur
 		reconcileRexIfStale(ctx, ttl)
 	case "t3":
 		reconcileT3IfStale(ctx, ttl)
+	case "opencode":
+		reconcileOpenCodeIfStale(ctx, ttl)
 	}
 }
 
@@ -350,7 +374,23 @@ func reconcileActiveNow(ctx context.Context, engineName string) {
 		_ = reconcileRexWithBackend(ctx, defaultRexBackend())
 	case "t3":
 		_ = syncT3Fn(ctx)
+	case "opencode":
+		_ = syncOpenCodeFn(ctx)
 	}
+}
+
+// reconcileOpenCodeIfStale runs a bounded deep reconcile when the OpenCode state cache is older than ttl.
+func reconcileOpenCodeIfStale(ctx context.Context, ttl time.Duration) {
+	st, err := state.LoadStateForEngine("opencode")
+	if err != nil {
+		return
+	}
+	if state.IsFreshWithin(st.LastSyncedAt, ttl) {
+		return
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, defaultOpenCodeSyncTimeout)
+	defer cancel()
+	_ = syncOpenCodeFn(syncCtx)
 }
 
 // reconcileT3IfStale runs a bounded deep reconcile when the T3 state cache is older than ttl.
@@ -567,6 +607,197 @@ func mapT3ThreadSummaryStatus(th t3.ThreadSummary) string {
 		}
 		return "ready_for_demo"
 	default:
+		return "unknown"
+	}
+}
+
+// reconcileOpenCodeWithEngine reconciles cached OpenCode tasks against the shared local server
+// and discovers recent/active out-of-band sessions created in OpenCode Desktop or CLI.
+func reconcileOpenCodeWithEngine(ctx context.Context, eng *engine.OpenCodeEngine) error {
+	if eng == nil {
+		return nil
+	}
+
+	st, err := state.LoadStateForEngine("opencode")
+	if err != nil {
+		return err
+	}
+
+	// Single batch call for all running sessions on the shared server.
+	activeMap, activeErr := eng.GetActiveSessions(ctx)
+	if activeErr != nil {
+		// Server unreachable: do not mutate or fabricate state.
+		return activeErr
+	}
+
+	type taskProbeResult struct {
+		probe   engine.TaskStatusProbe
+		missing bool
+		ok      bool
+	}
+	probeResults := make(map[string]taskProbeResult)
+	projectSessions := make(map[string][]opencode.SessionInfo)
+	projectListed := make(map[string]bool)
+
+	for pName, pData := range st.Projects {
+		for tSlug, tData := range pData.Tasks {
+			if tData.GetEngine() != "opencode" {
+				continue
+			}
+			if tData.Status == "closed" || tData.Status == "done" {
+				continue
+			}
+			sessID := tData.AgentBlockID
+			if sessID == "" {
+				sessID = tData.WindowID
+			}
+			if sessID == "" {
+				continue
+			}
+			probe, probeErr := eng.ProbeStatusWithActive(ctx, sessID, activeMap)
+			key := pName + "\x00" + tSlug
+			if probeErr != nil {
+				if errors.Is(probeErr, opencode.ErrSessionNotFound) {
+					probeResults[key] = taskProbeResult{missing: true}
+				}
+				continue
+			}
+			probeResults[key] = taskProbeResult{probe: probe, ok: true}
+		}
+
+		if pData.ProjectPath != "" {
+			if sessions, listErr := eng.ListProjectSessions(ctx, pData.ProjectPath, 50); listErr == nil {
+				projectSessions[pName] = sessions
+				projectListed[pName] = true
+			}
+		}
+	}
+
+	cleanedSessions, _ := state.CleanedWindowIDs("opencode")
+	cutoffMs := nowFn().Add(-openCodeUntrackedWindow).UnixMilli()
+
+	return state.MutateStateForEngine("opencode", func(s *state.State) error {
+		now := state.NowISO()
+		s.LastSyncedAt = now
+
+		for pName, pData := range s.Projects {
+			trackedIDs := make(map[string]bool, len(pData.Tasks)*2)
+
+			for tSlug, tData := range pData.Tasks {
+				if tData.WindowID != "" {
+					trackedIDs[tData.WindowID] = true
+				}
+				if tData.AgentBlockID != "" {
+					trackedIDs[tData.AgentBlockID] = true
+				}
+				if tData.GetEngine() != "opencode" {
+					continue
+				}
+				if tData.Status == "closed" || tData.Status == "done" {
+					continue
+				}
+
+				res, hasRes := probeResults[pName+"\x00"+tSlug]
+				if !hasRes {
+					continue
+				}
+				if res.missing {
+					if tData.Status != "missing" {
+						tData.Status = "missing"
+						tData.UpdatedAt = now
+					}
+					tData.LastSummary = "Session not found in OpenCode"
+					tData.LastVerifiedAt = now
+					pData.Tasks[tSlug] = tData
+					continue
+				}
+				if !res.ok {
+					continue
+				}
+
+				if res.probe.Status != "" && res.probe.Status != "unknown" && res.probe.Status != tData.Status {
+					tData.Status = res.probe.Status
+					tData.UpdatedAt = now
+				}
+				if res.probe.Summary != "" && res.probe.Summary != tData.LastSummary {
+					tData.LastSummary = res.probe.Summary
+					tData.UpdatedAt = now
+				}
+				tData.LastVerifiedAt = now
+				pData.Tasks[tSlug] = tData
+			}
+
+			if projectListed[pName] {
+				sessions := projectSessions[pName]
+				// Sort newest updated first before applying cap.
+				sort.SliceStable(sessions, func(i, j int) bool {
+					return sessions[i].Time.Updated > sessions[j].Time.Updated
+				})
+
+				var untracked []state.UntrackedWindow
+				for _, sess := range sessions {
+					if sess.ID == "" || trackedIDs[sess.ID] {
+						continue
+					}
+					if sess.ParentID != "" || sess.Time.Archived > 0 {
+						continue
+					}
+					if _, wasCleaned := cleanedSessions[sess.ID]; wasCleaned {
+						continue
+					}
+
+					_, isActive := activeMap[sess.ID]
+					if !isActive && sess.Time.Updated < cutoffMs {
+						continue
+					}
+
+					label := truncateT3Label(sess.Title, 40)
+					if label == "" {
+						label = sess.ID
+					}
+					summary := strings.Join(strings.Fields(sess.Title), " ")
+					if summary == "" {
+						summary = "Untracked session in OpenCode"
+					} else if len(summary) > 240 {
+						summary = summary[:237] + "..."
+					}
+
+					untracked = append(untracked, state.UntrackedWindow{
+						WindowID:       sess.ID,
+						Label:          label,
+						BlockID:        sess.ID,
+						DetectedStatus: mapOpenCodeSessionSummaryStatus(sess, isActive),
+						Summary:        summary,
+					})
+					if len(untracked) >= openCodeUntrackedMaxPerProject {
+						break
+					}
+				}
+				pData.UntrackedWindows = untracked
+			}
+
+			s.Projects[pName] = pData
+		}
+		return nil
+	})
+}
+
+func mapOpenCodeSessionSummaryStatus(sess opencode.SessionInfo, isActive bool) string {
+	if isActive {
+		if strings.EqualFold(strings.TrimSpace(sess.Agent), "plan") {
+			return "planning"
+		}
+		return "running"
+	}
+	switch strings.ToLower(strings.TrimSpace(sess.Outcome)) {
+	case "failed", "interrupted":
+		return "error"
+	case "succeeded":
+		return "ready_for_demo"
+	default:
+		if sess.Time.Idle > 0 {
+			return "ready_for_demo"
+		}
 		return "unknown"
 	}
 }

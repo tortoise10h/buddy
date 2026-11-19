@@ -478,6 +478,8 @@ func syncEngine(ctx context.Context, engineName string) {
 		_ = syncRexFn(ctx)
 	case "t3":
 		_ = syncT3Fn(ctx)
+	case "opencode":
+		_ = syncOpenCodeFn(ctx)
 	}
 }
 
@@ -921,7 +923,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 
 	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Project name")
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 	cmd.Flags().BoolVar(&watchAll, "all", false, "Monitor all active tasks across projects")
 	cmd.Flags().IntVar(&intervalSec, "interval", 5, "Polling interval in seconds")
 	cmd.Flags().IntVar(&timeoutSec, "timeout", 600, "Timeout in seconds")

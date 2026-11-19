@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/state"
 )
 
@@ -29,7 +30,7 @@ func newSendCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if blkID == "" || (engName != "t3" && sessID == "") {
+			if blkID == "" || (!config.IsNonTerminalEngine(engName) && sessID == "") {
 				return fmt.Errorf("missing session_id or agent_block_id (specify --project/--task or -s/-b)")
 			}
 
@@ -92,7 +93,7 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().StringVar(&text, "text", "", "Text to send to the pane")
 	cmd.Flags().StringVar(&key, "key", "", "Key or shortcut to send (e.g. enter, ctrl+c, esc)")
 	cmd.Flags().BoolVar(&noEnter, "no-enter", false, "Do not press enter after typing text")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }

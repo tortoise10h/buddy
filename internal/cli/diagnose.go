@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tortoise10h/buddy/internal/config"
 )
 
 var errorIndicators = []string{
@@ -29,7 +30,7 @@ func newDiagnoseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if blkID == "" || (engName != "t3" && sessID == "") {
+			if blkID == "" || (!config.IsNonTerminalEngine(engName) && sessID == "") {
 				return fmt.Errorf("missing session_id or block_id for task '%s'", task)
 			}
 
@@ -101,7 +102,7 @@ func newDiagnoseCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&project, "project", "p", "", "Project name")
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().IntVarP(&lines, "lines", "n", 300, "Number of trailing lines to analyze")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }

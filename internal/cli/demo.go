@@ -63,7 +63,7 @@ func newDemoCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&task, "task", "t", "", "Task slug")
 	cmd.Flags().StringVar(&cmdStr, "cmd", "", "Command to run in dev split pane (e.g. 'npm run dev')")
 	cmd.Flags().BoolVar(&focusOnly, "focus-only", false, "Only switch focus without launching dev split")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 
 	return cmd
 }

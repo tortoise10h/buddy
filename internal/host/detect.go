@@ -8,9 +8,10 @@ import (
 type HostKind string
 
 const (
-	HostRex     HostKind = "rex"
-	HostT3      HostKind = "t3"
-	HostUnknown HostKind = "unknown"
+	HostRex      HostKind = "rex"
+	HostT3       HostKind = "t3"
+	HostOpenCode HostKind = "opencode"
+	HostUnknown  HostKind = "unknown"
 )
 
 type HostInfo struct {
@@ -47,9 +48,17 @@ var T3SignalVars = []string{
 	"GEMINI_HOME",
 }
 
+// OpenCodeSignalVars lists the environment variable names that indicate an OpenCode host environment.
+var OpenCodeSignalVars = []string{
+	"OPENCODE_SESSION_ID",
+	"OPENCODE",
+	"__CFBundleIdentifier",
+}
+
 // DetectHostFromEnv is a pure function that inspects the environment using getEnv.
-// It never touches the filesystem (~/.t3, ~/.buddy) or makes network calls.
-// If both Rex and T3 signals are detected, T3 wins deterministically as the innermost context.
+// It never touches the filesystem (~/.t3, ~/.buddy, ~/.local/state/opencode) or makes network calls.
+// If multiple signals are detected, the innermost desktop/session host wins deterministically:
+// OpenCode > T3 > Rex.
 func DetectHostFromEnv(getEnv func(string) string) HostInfo {
 	if getEnv == nil {
 		getEnv = os.Getenv
@@ -58,6 +67,7 @@ func DetectHostFromEnv(getEnv func(string) string) HostInfo {
 	signals := make(map[string]string)
 	rexMatches := make(map[string]string)
 	t3Matches := make(map[string]string)
+	openCodeMatches := make(map[string]string)
 
 	for _, v := range RexSignalVars {
 		val := getEnv(v)
@@ -103,6 +113,34 @@ func DetectHostFromEnv(getEnv func(string) string) HostInfo {
 		}
 		t3Matches[v] = val
 		signals[v] = val
+	}
+
+	for _, v := range OpenCodeSignalVars {
+		val := getEnv(v)
+		if val == "" {
+			continue
+		}
+		if v == "__CFBundleIdentifier" {
+			if val == "ai.opencode.desktop" || strings.HasPrefix(val, "ai.opencode.desktop.") {
+				openCodeMatches[v] = val
+				signals[v] = val
+			}
+			continue
+		}
+		openCodeMatches[v] = val
+		signals[v] = val
+	}
+
+	if len(openCodeMatches) > 0 {
+		details := "detected OpenCode host environment"
+		if len(rexMatches) > 0 || len(t3Matches) > 0 {
+			details = "conflicting host signals detected; OpenCode selected as innermost context"
+		}
+		return HostInfo{
+			Kind:    HostOpenCode,
+			Signals: signals,
+			Details: details,
+		}
 	}
 
 	if len(t3Matches) > 0 {

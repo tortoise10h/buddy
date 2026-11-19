@@ -144,7 +144,7 @@ func newDispatchCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&prompt, "prompt", "m", "", "Task prompt to execute")
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
 	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch (agy, pi, opencode, etc.)")
-	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 	cmd.Flags().BoolVar(&force, "force", false, "Bypass candidate duplicate guard and start a new task tab")
 
 	return cmd
