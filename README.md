@@ -1,98 +1,89 @@
 # Buddy
 
-Single-session Rex terminal orchestrator and agent skill for managing as many concurrent project sessions and feature tabs as you want without cognitive overload or context drift.
+Single-session multi-engine orchestrator and agent skill for managing concurrent project sessions, feature tabs, and agent threads across **Rex**, **WezTerm**, **T3 Code**, and **OpenCode Desktop** without cognitive overload or context drift.
 
 ---
 
 ## The Vision
 
-Instead of manually navigating dozens of terminal tabs across projects to see which agent is blocked or waiting for input, you talk to **one** terminal agent session: **Buddy**.
+Instead of manually navigating dozens of terminal tabs or desktop threads across projects to see which agent is blocked or waiting for input, you talk to **one** control session: **Buddy**.
 
-- **Dispatch work**: *"Hey Buddy, add inline comment shortcuts to Docnotate"* -> Buddy finds or creates the `docnotate` Rex session, creates a dedicated tab for the feature, launches `agy` (or `pi`/`opencode` if requested), starts planning, and relays questions back to you.
-- **Check progress**: *"Hey, how is the Docnotate task going?"* -> Buddy checks the pane in O(1) via its local state cache (`~/.buddy/state.json`), summarizes progress or clarifying questions, and relays your answers back to the worker.
-- **Review / Demo**: *"Show me a demo"* -> Buddy splits a dev server pane beside the worker and focuses the tab in Rex.
+- **Dispatch work**: *"Hey Buddy, add inline comment shortcuts to Docnotate"* -> Buddy resolves the project and active engine (`rex`, `wezterm`, `t3`, or `opencode`), creates a dedicated task tab or thread, launches the configured worker agent (e.g. `agy`, `pi`, `opencode`, or a T3 model), starts work, and relays questions back to you.
+- **Check progress**: *"Hey, how is the Docnotate task going?"* -> Buddy checks state in O(1) via its per-engine local state cache (`~/.buddy/state/<engine>.json`), summarizes progress or clarifying questions, and relays your answers back to the worker.
+- **Review / Demo**: *"Show me a demo"* -> Buddy splits a dev server pane beside the worker and focuses the tab in Rex (or focuses the active session).
 
 ---
 
 ## Architecture & Memory Layers
 
-Buddy solves the 3 core multi-project orchestration challenges:
+Buddy solves the 3 core multi-project orchestration challenges and routes execution across all 4 supported engines:
 
-```
-+-------------------------------------------------------------+
-|                      User talks to Buddy                    |
-+-------------------------------------------------------------+
-                               |
-                               v
-               +-------------------------------+
-               |   Buddy Control Tower         |
-               |   Current Rex Tab / Session   |
-               |   CWD: ~/.buddy/              |
-               +-------------------------------+
-                 | Layer 1: AGENTS.md (Always-on system prompt)
-                 | Layer 2: .agents/hooks.json (PreInvocation ephemeral state)
-                 | Layer 3: state.json (O(1) cached IDs: project -> session -> task)
-                               |
-                               v
-               +-------------------------------+
-               | buddy-ctl (Go CLI tool)       |
-               +-------------------------------+
-                               |
-                               v
-                     rex CLI & Rex Server
-                    /         |         \
-                   /          |          \
-        Rex Session         Rex Session   ...
-        'docnotate'         'daily-catch'
-        - Tab 1: feat-auth   - Tab 1: fix-sync
-        - Tab 2: feat-ui
+```mermaid
+flowchart TD
+    User["User talks to Buddy"] --> Tower["Buddy Control Tower (CWD: ~/.buddy/)"]
+
+    subgraph Memory["3 Memory Layers"]
+        L1["Layer 1: ~/.buddy/AGENTS.md (Always-on system prompt)"]
+        L2["Layer 2: ~/.buddy/.agents/hooks.json (PreInvocation context-inject)"]
+        L3["Layer 3: ~/.buddy/state/engine.json (O(1) per-engine state cache)"]
+        Hist["Audit Log: ~/.buddy/history/tasks.jsonl"]
+    end
+
+    Tower --- L1
+    Tower --- L2
+    Tower --- L3
+    L3 -.-> Hist
+
+    Tower --> CTL["buddy-ctl (Go CLI)"]
+    CTL --> Resolver["Engine Resolution (buddy-ctl engine)"]
+
+    Resolver --> Rex["rex: Rex Terminal Sessions & Tabs (~/.buddy/state/rex.json)"]
+    Resolver --> WezTerm["wezterm: WezTerm Terminal Backend (~/.buddy/state/wezterm.json)"]
+    Resolver --> T3["t3: T3 Code CLI Threads (~/.buddy/state/t3.json)"]
+    Resolver --> OpenCode["opencode: OpenCode Desktop HTTP/SSE (~/.buddy/state/opencode.json)"]
 ```
 
 1. **Always-On System Prompt Identity**: `~/.buddy/AGENTS.md` (symlinked from `templates/orchestrator-AGENTS.md`) is injected on every turn and survives `/compact`. Because it lives in `~/.buddy/`, worker agents in project repositories never inherit it.
 2. **Ephemeral Turn Injections (Zero History Bloat)**: `~/.buddy/.agents/hooks.json` (generated from `templates/hooks.json` with resolved binary paths) runs `buddy-ctl context-inject` on `PreInvocation`, emitting a transient `ephemeralMessage` with active project statuses that is discarded immediately after the turn.
-3. **O(1) Local State Cache**: `~/.buddy/state.json` maps projects and tasks to exact Rex session and block IDs, eliminating slow scans across Rex sessions.
+3. **Per-Engine O(1) Local State Cache & Audit History**: State is isolated per engine under `~/.buddy/state/<engine>.json` (`rex.json`, `wezterm.json`, `t3.json`, `opencode.json`), mapping projects and tasks to exact session, window, block, or thread IDs without slow full-host scans. When tasks are cleaned up via `buddy-ctl task clean`, immutable audit records are appended to `~/.buddy/history/tasks.jsonl`.
 
 ---
 
 ## Hybrid Execution Model
 
-```
-                  ┌─────────────────────────────────────────────────────────┐
-                  │                   User Interaction                      │
-                  └──────────────────────────┬──────────────────────────────┘
-                                             │
-                                   ┌─────────▼────────┐
-                                   │ Buddy Control    │
-                                   │ Tower (Main)     │
-                                   └────┬────────┬────┘
-           Fast Interactive Operations  │        │  Heavy / Background Workloads
-                     (<50ms O(1) Cache) │        │  (Isolated Subagents)
-                                        │        │
-      ┌─────────────────────────────────┘        └───────────────────────────────┐
-      ▼                                                                          ▼
-┌─────────────────────────────────┐                    ┌──────────────────────────────────────────────────┐
-│ Main Thread CLI:                │                    │ Subagent Tasks (Zero Main Token Bloat):          │
-│ • buddy-ctl status              │                    │ • Watchdog: buddy-ctl watch (sleeps in Python,   │
-│ • buddy-ctl send                │                    │   wakes Buddy via send_message)                  │
-│ • buddy-ctl focus / demo        │                    │ • Diagnostician: buddy-ctl diagnose              │
-│ • buddy-ctl capture             │                    │ • Batch Dispatch: buddy-ctl batch                │
-└──────────────┬──────────────────┘                    └────────────────────────┬─────────────────────────┘
-               │                                                                │
-               └───────────────────────────┬────────────────────────────────────┘
-                                           ▼
-                         ┌───────────────────────────────────┐
-                         │      Rex Terminal Worker Panes    │
-                         │ (docnotate, daily-catch, etc.)    │
-                         └───────────────────────────────────┘
+Buddy separates fast, interactive control-tower lookups from heavy or long-running background work:
+
+```mermaid
+flowchart TD
+    User["User Interaction"] --> Main["Buddy Control Tower (Main Thread)"]
+
+    Main -->|"Fast Interactive (<50ms O(1) Cache)"| Interactive
+    Main -->|"Heavy / Background (Isolated Subagents)"| Subagents
+
+    subgraph Interactive["Main Thread CLI"]
+        M1["buddy-ctl status / capture"]
+        M2["buddy-ctl send"]
+        M3["buddy-ctl focus / demo"]
+    end
+
+    subgraph Subagents["Subagent Workflows (Zero Main Token Bloat)"]
+        S1["Buddy Scout: writes ~/.buddy/briefs/ & runs buddy-ctl dispatch"]
+        S2["Buddy Watchdog: buddy-ctl watch (Go CLI poller, wakes Buddy via send_message)"]
+        S3["Buddy Diagnostician: buddy-ctl diagnose"]
+        S4["Batch Dispatch: buddy-ctl batch"]
+    end
+
+    Interactive --> Workers["Worker Surfaces (rex, wezterm, t3, opencode)"]
+    Subagents --> Workers
 ```
 
 | Workflow | Execution Mode | Tools Used | Why |
 | :--- | :--- | :--- | :--- |
-| **Status, Quick Capture, Q&A Relay, Demo** | **Main Thread** | `buddy-ctl status`, `capture`, `send`, `demo` | O(1) cache lookup (<50ms). Instant interactive replies. |
+| **Status, Quick Capture, Q&A Relay, Focus, Demo** | **Main Thread** | `buddy-ctl status`, `capture`, `send`, `focus`, `demo` | O(1) cache lookup (<50ms). Instant interactive replies. |
 | **Investigatory Dispatch (`Buddy Scout`)** | **Subagent** | `invoke_subagent` / `delegate_task` (`Role: 'Buddy Scout'`) + `buddy-ctl dispatch` | Writes brief to `~/.buddy/briefs/` and dispatches; keeps codebase reading out of the main transcript and the chat responsive. |
-| **Background Watchdog** | **Subagent** | `invoke_subagent` (`Role: 'Buddy Watchdog'`) + `buddy-ctl watch` | Waits asynchronously for questions/completion; alerts main Buddy without blocking user chat. |
-| **Deep Pane Diagnosis** | **Subagent** | `invoke_subagent` (`Role: 'Buddy Diagnostician'`) + `buddy-ctl diagnose` | Analyzes large scrollback/stack traces in isolation without cluttering main transcript. |
-| **Batch Multi-Repo Dispatch** | **Subagents / Batch CLI** | `buddy-ctl batch` or parallel `invoke_subagent` | Dispatches tasks across 3+ repos concurrently. |
+| **Background Watchdog (`Buddy Watchdog`)** | **Subagent** | `invoke_subagent` (`Role: 'Buddy Watchdog'`) + `buddy-ctl watch` | Runs the Go `buddy-ctl watch` polling loop asynchronously for questions/completion; alerts main Buddy via `send_message` without blocking user chat. |
+| **Deep Pane Diagnosis (`Buddy Diagnostician`)** | **Subagent** | `invoke_subagent` (`Role: 'Buddy Diagnostician'`) + `buddy-ctl diagnose` | Analyzes large scrollback/stack traces in isolation without cluttering main transcript. |
+| **Batch Multi-Repo Dispatch** | **Subagents / Batch CLI** | `buddy-ctl batch` or parallel `invoke_subagent` | Dispatches tasks across multiple repos concurrently. |
 
 ---
 
@@ -111,13 +102,20 @@ During installation, Buddy prompts you for:
    - Hit **Enter** to accept the default (`~/Dev/Personal/Projects`).
    - Enter multiple paths separated by commas or spaces, or add more iteratively when prompted.
    - Non-existent directories are validated with an option to auto-create them.
-2. **Orchestrator and Worker agent harnesses**:
+2. **Default fallback engine** (`rex`, `wezterm`, `t3`) when host auto-detection is unknown.
+3. **Orchestrator and Worker agent harnesses**:
    - Buddy dynamically discovers installed agent harnesses from `agents` (e.g. `agy`, `opencode`, `pi`) and prompts you to select the harness for each role. Each harness starts with that agent's own default model.
    - Hit **Enter** to accept the default (`agy`, or previously configured values on re-install).
    - Unknown harness names are validated with re-prompting.
+4. **T3 worker model** (when the `t3` CLI is detected): prompts for `<provider>/<model>` (e.g. `antigravity/gemini-3.8-flash-medium`).
 
-- Re-running `install.sh` on an existing installation automatically detects and preserves your configured roots and agent choices.
-- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` (and optionally `BUDDY_PROJECTS_ROOTS="dir1:dir2"`, `BUDDY_ORCHESTRATOR_AGENT="opencode"`, `BUDDY_WORKER_AGENT="agy"`).
+- Re-running `install.sh` on an existing installation automatically detects and preserves your configured roots, engine, and agent choices.
+- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` along with optional environment variables:
+  - `BUDDY_PROJECTS_ROOTS="dir1:dir2"`
+  - `BUDDY_DEFAULT_ENGINE="rex"` (`rex`, `wezterm`, or `t3`)
+  - `BUDDY_ORCHESTRATOR_AGENT="opencode"`
+  - `BUDDY_WORKER_AGENT="agy"`
+  - `BUDDY_T3_PROVIDER="antigravity"` and `BUDDY_T3_MODEL="antigravity/gemini-3.8-flash-medium"`
 
 This:
 1. Links `bin/buddy` and `buddy-ctl` -> `~/.local/bin/`
@@ -127,7 +125,59 @@ This:
    - `~/.gemini/antigravity-cli/skills/buddy`
    - `~/.pi/agent/skills/buddy`
    - `~/.config/opencode/skills/buddy`
-3. Initializes `~/.buddy/` (`config.json`, `state.json`, `AGENTS.md` symlinked to `templates/orchestrator-AGENTS.md`, and generated `.agents/hooks.json` from `templates/hooks.json`) with your configured project roots and agent roles.
+3. Initializes `~/.buddy/` (`config.json`, per-engine state under `~/.buddy/state/<engine>.json`, `AGENTS.md` symlinked to `templates/orchestrator-AGENTS.md`, and generated `.agents/hooks.json` from `templates/hooks.json`) with your configured project roots, engine, and agent roles.
+
+---
+
+## Multi-Engine Support & Resolution
+
+Buddy supports 4 execution engines, each with isolated state in `~/.buddy/state/<engine>.json`:
+
+| Engine | State File | Description |
+| :--- | :--- | :--- |
+| **`rex`** | `~/.buddy/state/rex.json` | Default terminal engine. Manages Rex sessions, tabs, split dev panes, and live TUI reconciliation. |
+| **`wezterm`** | `~/.buddy/state/wezterm.json` | Terminal multiplexer engine option configurable via `default_engine` / `BUDDY_DEFAULT_ENGINE`. |
+| **`t3`** | `~/.buddy/state/t3.json` | Drives the local `t3` CLI to register projects, start/message threads, and probe live thread status. |
+| **`opencode`** | `~/.buddy/state/opencode.json` | Connects directly to the shared local OpenCode v2 HTTP/SSE server (`opencode serve --service`) used by OpenCode Desktop and `opencode` CLI. |
+
+### Adaptive Engine Resolution (`buddy-ctl engine`)
+Inspect host detection and active engine resolution at any time:
+
+```sh
+buddy-ctl engine                    # Alias: buddy-ctl host
+buddy-ctl engine --json
+buddy-ctl engine --engine opencode
+```
+
+Buddy resolves the active engine using a 5-tier precedence order:
+1. Explicit CLI flag (`--engine <name>`)
+2. Environment override (`BUDDY_ENGINE`, then `BUDDY_WORKER_BACKEND`)
+3. Automatic host detection (`rex`, `t3`, or `opencode`)
+4. User configuration (`config.default_engine`, configurable via `BUDDY_DEFAULT_ENGINE` in `install.sh` or `buddy-ctl config set default_engine <name>`)
+5. Fallback default: `"rex"`
+
+### T3 Code Engine (`--engine t3`)
+When dispatching to T3, Buddy requires a `<provider>/<model>` specification, resolved in order from:
+1. `--agent <provider>/<model>` on `dispatch` or `task start`
+2. `BUDDY_T3_MODEL=<provider>/<model>` environment variable
+3. `engines.t3.provider` and `engines.t3.model` in `~/.buddy/config.json`:
+
+```sh
+buddy-ctl config set engines.t3.provider antigravity
+buddy-ctl config set engines.t3.model gemini-3.8-flash-medium
+buddy-ctl dispatch -p docnotate --engine t3 -m "Investigate sync race"
+```
+
+See [docs/t3-integration-progress.md](docs/t3-integration-progress.md) for current T3 capabilities and known caveats.
+
+### OpenCode Desktop Engine (`--engine opencode`)
+OpenCode v2 runs a shared local background server (`opencode serve --service`) that both **OpenCode Desktop** and the **`opencode` CLI** attach to. Buddy can orchestrate OpenCode Desktop sessions directly over its local HTTP/SSE API using `--engine opencode` (distinct from running the `opencode` TUI inside Rex via `--engine rex --agent opencode`):
+
+- **Auto-discovery & bootstrap**: Reads `~/.local/state/opencode/service.json` (with `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL` and `engines.opencode.server_url` overrides) and can auto-start the shared background service via `opencode service start`.
+- **Shared state**: Tasks dispatched with `buddy-ctl dispatch -p <project> -m "..." --engine opencode` appear immediately in OpenCode Desktop; sessions created directly in OpenCode Desktop or `opencode` CLI (active or updated within 24h, capped at 10 per project) are surfaced by `buddy-ctl status --sync --engine opencode` and can be adopted via `buddy-ctl task adopt`.
+- **Non-destructive close**: `buddy-ctl task close --engine opencode` interrupts an actively running turn (`POST /api/session/{id}/interrupt`) and marks the task `"closed"` in `~/.buddy/state/opencode.json` while keeping the session history intact in OpenCode Desktop.
+
+See [docs/opencode-desktop.md](docs/opencode-desktop.md) for full setup and usage details.
 
 ---
 
@@ -157,13 +207,6 @@ Or configure via `buddy-ctl`:
 buddy-ctl config set orchestrator_agent opencode
 buddy-ctl config set worker_agent agy
 ```
-
-### OpenCode Desktop Engine (`--engine opencode`)
-OpenCode v2 runs a shared local background server (`opencode serve --service`) that both **OpenCode Desktop** and the **`opencode` CLI** attach to. Buddy can orchestrate OpenCode Desktop sessions directly over its local HTTP/SSE API using `--engine opencode` (distinct from running the `opencode` TUI inside Rex via `--engine rex --agent opencode`):
-
-- **Auto-discovery & bootstrap**: Reads `~/.local/state/opencode/service.json` (with `BUDDY_OPENCODE_URL` / `OPENCODE_SERVER_URL` and `engines.opencode.server_url` overrides) and can auto-start the shared background service via `opencode service start`.
-- **Shared state**: Tasks dispatched with `buddy-ctl dispatch -p <project> -m "..." --engine opencode` appear immediately in OpenCode Desktop; sessions created directly in OpenCode Desktop or `opencode` CLI (active or updated within 24h, capped at 10 per project) are surfaced by `buddy-ctl status --sync --engine opencode` and can be adopted via `buddy-ctl task adopt`.
-- **Non-destructive close**: `buddy-ctl task close --engine opencode` interrupts an actively running turn (`POST /api/session/{id}/interrupt`) and marks the task `"closed"` in `~/.buddy/state/opencode.json` while keeping the session history intact in OpenCode Desktop.
 
 ### Pinning a Model (Model Variants)
 The install picker intentionally offers agent harnesses only (using each harness's own default model).
@@ -228,41 +271,48 @@ Use `buddy --help` (or `-h`) to inspect launcher options, supported agents, and 
 Run `buddy-ctl --help` for top-level command usage or `buddy-ctl <subcommand> --help` for command-specific flags. Any unknown options or invalid subcommands print an error and the full help message to stderr and exit with code 2.
 
 ```sh
-# View tracked projects, tasks, and untracked live tabs (auto-reconciles if Rex cache >45s old)
-buddy-ctl status
+# Inspect host environment detection and resolved engine (alias: host)
+buddy-ctl engine [--engine rex|t3|opencode] [--json]
 
-# Force an immediate deep reconcile against live Rex panes and discover untracked tabs
-buddy-ctl status --sync
+# View tracked projects, tasks, and untracked live tabs (auto-reconciles if cache >45s old)
+buddy-ctl status [--format json|brief|table] [--project docnotate]
+buddy-ctl status --sync                         # Force immediate live reconcile
+buddy-ctl status --no-sync                      # Read cache only (skip TTL reconcile)
+buddy-ctl status --engine opencode              # Scope to a specific engine
+buddy-ctl status --all-engines                  # Aggregate state across all engines
 
-# List available projects across all configured project roots
+# List available projects and manage project roots
 buddy-ctl projects
 buddy-ctl projects --query docnotate
-
-# Manage project roots
 buddy-ctl projects roots
 buddy-ctl projects add-root ~/Dev/Work/repos
 buddy-ctl projects remove-root ~/Dev/Work/repos
 
+# View or update configuration (~/.buddy/config.json)
+buddy-ctl config show
+buddy-ctl config get worker_agent
+buddy-ctl config set worker_agent agy
+
 # Fast-path atomic dispatch (auto-slug, spawn, prompt, verify pickup in 1 shot)
 # Note: Include any planning requirements directly inside --prompt.
-buddy-ctl dispatch --project docnotate --prompt "First draft a plan, then add shortcut to resolve comments" [--task inline-comments] [--force]
+buddy-ctl dispatch --project docnotate --prompt "First draft a plan, then add shortcut to resolve comments" [--task inline-comments] [--engine rex|t3|opencode] [--force]
 
-# Adopt an untracked tab that you opened manually in Rex so Buddy can track and message it
-buddy-ctl task adopt --project docnotate --window manual-refactor [--task manual-refactor]
-
-# Start a new task tab with worker agent (agy by default)
+# Task lifecycle: start, adopt, update, close, clean, history
 buddy-ctl task start --project docnotate --task inline-comments --prompt "Add shortcut to resolve comments"
-
-# Start with a specific worker agent (pi or opencode)
 buddy-ctl task start --project daily-catch --task sync-engine --agent pi --prompt "Fix sync timeout"
+buddy-ctl task adopt --project docnotate --window manual-refactor [--task manual-refactor]
+buddy-ctl task update --project docnotate --task inline-comments --status blocked --summary "Waiting for API key"
+buddy-ctl task close --project docnotate --task inline-comments
+buddy-ctl task clean --project docnotate --task inline-comments --reason "merged and verified"
+buddy-ctl task clean --all-closed               # Clean all closed/done tasks and log to ~/.buddy/history/tasks.jsonl
+buddy-ctl task history --project docnotate --limit 20
 
-# Inspect worker terminal output (O(1))
+# Inspect worker output (O(1)) and relay input / answers
 buddy-ctl capture --project docnotate --task inline-comments
-
-# Relay user input or answer questions to worker agent (transitions task back to running)
 buddy-ctl send --project docnotate --task inline-comments --text "Use Cmd+Shift+E"
 
-# Focus task in Rex and launch dev server split
+# Focus a task tab/session or launch a dev server split demo
+buddy-ctl focus --project docnotate --task inline-comments
 buddy-ctl demo --project docnotate --task inline-comments --cmd "npm run dev"
 
 # Situational Watchdog: Monitor a single task, all active tasks in one project, or all projects
@@ -276,15 +326,16 @@ buddy-ctl diagnose --project docnotate --task inline-comments --lines 300
 # Batch dispatch tasks across multiple projects
 buddy-ctl batch --json '[{"project":"docnotate","task":"feat-a","prompt":"..."},{"project":"daily-catch","task":"feat-b","prompt":"..."}]'
 
-# Clean up task tab when finished
-buddy-ctl task close --project docnotate --task inline-comments
-buddy-ctl task clean --project docnotate --task inline-comments --reason "merged and verified"
-buddy-ctl task history --project docnotate --limit 20
+# Send a macOS desktop notification or check CLI version
+buddy-ctl notify --title "Buddy" --message "Docnotate tests passed"
+buddy-ctl version
 ```
 
 ---
 
-## Planning & Implementation Docs
+## Documentation & Reference
 
-- [Implementation Handoff & Context Notes](plans/buddy-handoff.md)
-- [Full Architecture Plan](plans/buddy-terminal-orchestrator.md)
+- [OpenCode Desktop Integration Guide](docs/opencode-desktop.md)
+- [T3 Integration Progress & Caveats](docs/t3-integration-progress.md)
+- [Buddy Orchestrator Skill](skills/buddy/SKILL.md)
+- [Control Tower System Prompt Template](templates/orchestrator-AGENTS.md)
