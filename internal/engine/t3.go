@@ -49,12 +49,15 @@ func (e *T3Engine) Dispatch(ctx context.Context, req DispatchRequest) (*Dispatch
 		return nil, fmt.Errorf("t3 dispatch: prompt is required")
 	}
 
-	provider, model := parseProviderModel(req.AgentCmd)
+	provider, model := parseProviderModelSpec(req.Model)
+	if provider == "" || model == "" {
+		provider, model = parseProviderModel(req.AgentCmd)
+	}
 	if provider == "" || model == "" {
 		provider, model = resolveEnvProviderModel()
 	}
 	if provider == "" || model == "" {
-		return nil, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --agent <provider>/<model>, or set BUDDY_T3_MODEL=<provider>/<model>")
+		return nil, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --model <provider>/<model> (or --agent <provider>/<model>), or set BUDDY_T3_MODEL=<provider>/<model>")
 	}
 
 	if err := e.runner.ProjectAdd(ctx, req.ProjectPath, req.ProjectName); err != nil && !isProjectAlreadyExistsError(err) {
@@ -452,12 +455,26 @@ func isProjectAlreadyExistsError(err error) bool {
 }
 
 func resolveEnvProviderModel() (string, string) {
-	if env := strings.TrimSpace(os.Getenv("BUDDY_T3_MODEL")); env != "" {
-		if p, m, ok := strings.Cut(env, "/"); ok && p != "" && m != "" {
-			return p, m
+	for _, key := range []string{"BUDDY_T3_MODEL", "BUDDY_MODEL"} {
+		if env := strings.TrimSpace(os.Getenv(key)); env != "" {
+			if p, m := parseProviderModelSpec(env); p != "" && m != "" {
+				return p, m
+			}
 		}
 	}
 	return "", ""
+}
+
+func parseProviderModelSpec(spec string) (string, string) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", ""
+	}
+	provider, model, ok := strings.Cut(spec, "/")
+	if !ok || strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return "", ""
+	}
+	return strings.TrimSpace(provider), strings.TrimSpace(model)
 }
 
 // parseProviderModel extracts a <provider>/<model> pair from AgentCmd.
@@ -467,10 +484,5 @@ func parseProviderModel(agentCmd []string) (string, string) {
 	if len(agentCmd) == 0 {
 		return "", ""
 	}
-	spec := strings.TrimSpace(agentCmd[0])
-	provider, model, ok := strings.Cut(spec, "/")
-	if !ok || provider == "" || model == "" {
-		return "", ""
-	}
-	return provider, model
+	return parseProviderModelSpec(agentCmd[0])
 }

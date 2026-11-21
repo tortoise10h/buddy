@@ -78,3 +78,47 @@ func TestBatch_Execution(t *testing.T) {
 		t.Errorf("task-b missing in state: %v", err)
 	}
 }
+
+func TestBatch_PerItemModelOverride(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+	t.Setenv("BUDDY_MODEL", "")
+
+	proj1 := filepath.Join(tmpDir, "batch-model-proj")
+	_ = os.MkdirAll(proj1, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	_ = config.SaveConfig(cfg)
+
+	mockBackend := &mockTerminalBackend{}
+	getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+	batchPayload := `[
+		{"project": "batch-model-proj", "task": "task-custom", "prompt": "complex work", "model": "gemini-4-neon-high"}
+	]`
+
+	buf := new(bytes.Buffer)
+	cmd := newBatchCmd()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--json", batchPayload})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("batch execution failed: %v", err)
+	}
+	if len(mockBackend.lastAgentCmd) != 3 || mockBackend.lastAgentCmd[1] != "--model" || mockBackend.lastAgentCmd[2] != "gemini-4-neon-high" {
+		t.Fatalf("expected --model injected in batch dispatch, got %v", mockBackend.lastAgentCmd)
+	}
+
+	var resp struct {
+		Results []BatchTaskResult `json:"results"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Model != "gemini-4-neon-high" {
+		t.Fatalf("expected BatchTaskResult.Model populated, got %+v", resp.Results)
+	}
+}

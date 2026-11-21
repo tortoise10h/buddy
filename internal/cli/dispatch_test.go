@@ -20,6 +20,7 @@ import (
 
 type mockTerminalBackend struct {
 	dispatched    bool
+	lastAgentCmd  []string
 	lastSentText  string
 	staticCapture string
 	windows       []backend.WindowInfo
@@ -42,6 +43,7 @@ func (m *mockTerminalBackend) InspectWindow(ctx context.Context, sessionID, wind
 }
 func (m *mockTerminalBackend) CreateTaskWindow(ctx context.Context, sessionID, taskSlug, cwd string, agentCmd []string) (string, string, error) {
 	m.dispatched = true
+	m.lastAgentCmd = append([]string(nil), agentCmd...)
 	return "win_mock_1", "blk_mock_1", nil
 }
 func (m *mockTerminalBackend) Close(ctx context.Context, sessionID, windowID string) error { return nil }
@@ -589,5 +591,117 @@ func TestTaskAdopt_RegistersUntrackedWindow(t *testing.T) {
 	}
 	if len(p.UntrackedWindows) != 0 {
 		t.Errorf("expected adopted window to be removed from UntrackedWindows, got %+v", p.UntrackedWindows)
+	}
+}
+
+func TestDispatchAndTaskStart_CustomModelSelection(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+	t.Setenv("BUDDY_MODEL", "")
+
+	projDir := filepath.Join(tmpDir, "test-proj")
+	_ = os.MkdirAll(projDir, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	cfg.Engines["t3"] = config.EngineConfig{
+		Provider: "antigravity",
+		Model:    "gemini-3.8-flash-medium",
+	}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig failed: %v", err)
+	}
+
+	mockBackend := &mockTerminalBackend{}
+	mockT3 := &mockCLIT3Runner{}
+	reg := getRegistry()
+	origT3, _ := reg.Get("t3")
+	reg.Register("rex", engine.NewTerminalEngine(mockBackend, engine.WithReadinessTimeout(200*time.Millisecond)))
+	reg.Register("t3", engine.NewT3EngineWithRunner(mockT3))
+	t.Cleanup(func() {
+		if origT3 != nil {
+			reg.Register("t3", origT3)
+		}
+	})
+
+	// 1. Rex dispatch without --model preserves default command ["agy"] and omits model in state/JSON.
+	buf := new(bytes.Buffer)
+	cmd1 := newDispatchCmd()
+	cmd1.SetOut(buf)
+	cmd1.SetErr(buf)
+	cmd1.SetArgs([]string{"-p", "test-proj", "-t", "default-task", "-m", "routine fix"})
+	if err := cmd1.Execute(); err != nil {
+		t.Fatalf("default dispatch failed: %v", err)
+	}
+	if len(mockBackend.lastAgentCmd) != 1 || mockBackend.lastAgentCmd[0] != "agy" {
+		t.Fatalf("expected untouched default [agy], got %v", mockBackend.lastAgentCmd)
+	}
+	var resp1 map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &resp1)
+	if _, hasModel := resp1["model"]; hasModel {
+		t.Fatalf("expected model to be omitted from JSON when default, got %v", resp1["model"])
+	}
+
+	// 2. Rex dispatch with --model injects --model flag and persists TaskState.Model.
+	buf.Reset()
+	cmd2 := newDispatchCmd()
+	cmd2.SetOut(buf)
+	cmd2.SetErr(buf)
+	cmd2.SetArgs([]string{"-p", "test-proj", "-t", "complex-refactor", "-m", "refactor state lock", "--model", "gemini-4-neon-high"})
+	if err := cmd2.Execute(); err != nil {
+		t.Fatalf("dispatch --model failed: %v", err)
+	}
+	if len(mockBackend.lastAgentCmd) != 3 || mockBackend.lastAgentCmd[0] != "agy" || mockBackend.lastAgentCmd[1] != "--model" || mockBackend.lastAgentCmd[2] != "gemini-4-neon-high" {
+		t.Fatalf("expected [agy --model gemini-4-neon-high], got %v", mockBackend.lastAgentCmd)
+	}
+	var resp2 map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &resp2)
+	if resp2["model"] != "gemini-4-neon-high" {
+		t.Fatalf("expected model in JSON response, got %v", resp2["model"])
+	}
+
+	st, _ := state.LoadState()
+	p, _ := st.FindProject("test-proj")
+	task2, _ := p.FindTask("complex-refactor")
+	if task2.Model != "gemini-4-neon-high" {
+		t.Fatalf("expected TaskState.Model='gemini-4-neon-high', got %q", task2.Model)
+	}
+	histRec := state.NewHistoryRecord(*p, *task2, "verified", false)
+	if histRec.Model != "gemini-4-neon-high" {
+		t.Fatalf("expected HistoryRecord.Model='gemini-4-neon-high', got %q", histRec.Model)
+	}
+
+	// 3. task start --model works on rex with opencode ModelCommand.
+	buf.Reset()
+	cmd3 := newTaskStartCmd()
+	cmd3.SetOut(buf)
+	cmd3.SetErr(buf)
+	cmd3.SetArgs([]string{"-p", "test-proj", "-t", "oc-tui-task", "--agent", "opencode", "--model", "openai/gpt-5.6-cyber", "--prompt", "build parser"})
+	if err := cmd3.Execute(); err != nil {
+		t.Fatalf("task start --model failed: %v", err)
+	}
+	if len(mockBackend.lastAgentCmd) != 4 || mockBackend.lastAgentCmd[0] != "opencode" || mockBackend.lastAgentCmd[1] != "mini" || mockBackend.lastAgentCmd[3] != "openai/gpt-5.6-cyber" {
+		t.Fatalf("expected opencode mini --model command, got %v", mockBackend.lastAgentCmd)
+	}
+
+	// 4. T3 dispatch with bare --model combines with engines.t3.provider.
+	buf.Reset()
+	cmdT3 := newDispatchCmd()
+	cmdT3.SetOut(buf)
+	cmdT3.SetErr(buf)
+	cmdT3.SetArgs([]string{"-p", "test-proj", "-t", "t3-bare", "-m", "deep fix", "--engine", "t3", "--model", "gemini-4-neon-high"})
+	if err := cmdT3.Execute(); err != nil {
+		t.Fatalf("t3 dispatch bare --model failed: %v", err)
+	}
+	if len(mockT3.started) != 1 || mockT3.started[0].Provider != "antigravity" || mockT3.started[0].Model != "gemini-4-neon-high" {
+		t.Fatalf("expected antigravity/gemini-4-neon-high, got %+v", mockT3.started)
+	}
+
+	// 5. T3 conflicting --agent and --model returns an explicit error.
+	cmdConflict := newDispatchCmd()
+	cmdConflict.SetArgs([]string{"-p", "test-proj", "-t", "t3-conflict", "-m", "deep fix", "--engine", "t3", "--agent", "antigravity/model-a", "--model", "antigravity/model-b"})
+	if err := cmdConflict.Execute(); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("expected conflicting --agent/--model error, got: %v", err)
 	}
 }

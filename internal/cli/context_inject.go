@@ -120,6 +120,9 @@ func newContextInjectCmd() *cobra.Command {
 					if agent == "" {
 						agent = "agy"
 					}
+					if tData.Model != "" && tData.Model != agent {
+						agent = fmt.Sprintf("%s:%s", agent, tData.Model)
+					}
 					staleTag := ""
 					if tData.LastVerifiedAt != "" && !state.IsFreshWithin(tData.LastVerifiedAt, defaultSyncTTL) {
 						staleTag = ", stale"

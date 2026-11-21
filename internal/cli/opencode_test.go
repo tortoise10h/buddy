@@ -267,3 +267,82 @@ func TestCLI_OpenCodeFullLifecycle(t *testing.T) {
 		t.Fatalf("unexpected adopt output:\n%s", adoptOut)
 	}
 }
+
+func TestCLI_OpenCodeDispatch_CustomModelPreservesDefaultAgent(t *testing.T) {
+	buddyDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", buddyDir)
+	t.Setenv("BUDDY_ENGINE", "opencode")
+	t.Setenv("BUDDY_MODEL", "")
+	t.Setenv("BUDDY_OPENCODE_MODEL", "")
+
+	projRoot := t.TempDir()
+	projDir := filepath.Join(projRoot, "demoapp")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.DefaultEngine = "opencode"
+	cfg.ProjectsRoots = []string{projRoot}
+	ec := cfg.Engines["opencode"]
+	ec.DefaultAgent = "build"
+	cfg.Engines["opencode"] = ec
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotCreate opencode.CreateSessionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			_ = json.NewDecoder(r.Body).Decode(&gotCreate)
+			_, _ = w.Write([]byte(`{"data":{"id":"ses_m1","projectID":"proj_demo","title":"feat-model","agent":"build"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_m1/prompt":
+			_, _ = w.Write([]byte(`{"data":{"id":"in_1"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	origReg := defaultRegistry
+	origSync := syncOpenCodeFn
+	t.Cleanup(func() {
+		defaultRegistry = origReg
+		syncOpenCodeFn = origSync
+	})
+	ocEng := engine.NewOpenCodeEngine(
+		[]opencode.ClientOption{opencode.WithEndpoint(opencode.EndpointConfig{URL: srv.URL})},
+		engine.OpenCodeEngineOptions{DefaultAgent: "build", FocusDesktop: false},
+	)
+	reg := engine.NewRegistry("opencode")
+	reg.Register("opencode", ocEng)
+	defaultRegistry = reg
+	syncOpenCodeFn = func(ctx context.Context) error { return nil }
+
+	var out bytes.Buffer
+	cmd := newDispatchCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{
+		"-p", "demoapp",
+		"-t", "feat-model",
+		"-m", "refactor router",
+		"--engine", "opencode",
+		"--model", "opencode-go/deepseek-v4.1-flash#high",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("opencode dispatch --model failed: %v", err)
+	}
+
+	if gotCreate.Agent != "build" {
+		t.Fatalf("expected default_agent 'build' preserved, got %q", gotCreate.Agent)
+	}
+	if gotCreate.Model == nil || gotCreate.Model.ProviderID != "opencode-go" || gotCreate.Model.ID != "deepseek-v4.1-flash" || gotCreate.Model.Variant != "high" {
+		t.Fatalf("unexpected ModelRef sent to OpenCode server: %+v", gotCreate.Model)
+	}
+	if !strings.Contains(out.String(), `"model": "opencode-go/deepseek-v4.1-flash#high"`) {
+		t.Fatalf("expected model in dispatch JSON output, got:\n%s", out.String())
+	}
+}

@@ -17,6 +17,7 @@ type TaskState struct {
 	AgentBlockID   string  `json:"agent_block_id"`
 	DevBlockID     *string `json:"dev_block_id,omitempty"`
 	Agent          string  `json:"agent,omitempty"`
+	Model          string  `json:"model,omitempty"`
 	Cwd            string  `json:"cwd,omitempty"`
 	WorktreePath   *string `json:"worktree_path,omitempty"`
 	Branch         *string `json:"branch,omitempty"`

@@ -18,6 +18,7 @@ type BatchTaskSpec struct {
 	Task    string `json:"task"`
 	Prompt  string `json:"prompt"`
 	Agent   string `json:"agent,omitempty"`
+	Model   string `json:"model,omitempty"`
 	Engine  string `json:"engine,omitempty"`
 }
 
@@ -25,6 +26,7 @@ type BatchTaskResult struct {
 	Status       string `json:"status"`
 	Project      string `json:"project,omitempty"`
 	Task         string `json:"task,omitempty"`
+	Model        string `json:"model,omitempty"`
 	WindowID     string `json:"window_id,omitempty"`
 	AgentBlockID string `json:"agent_block_id,omitempty"`
 	PickedUp     bool   `json:"picked_up,omitempty"`
@@ -120,7 +122,7 @@ func newBatchCmd() *cobra.Command {
 					continue
 				}
 
-				agentName, agentCmd, err := resolveWorkerForEngine(engineName, spec.Agent, cfg)
+				resolved, err := resolveWorkerWithModel(engineName, spec.Agent, spec.Model, cfg)
 				if err != nil {
 					results = append(results, BatchTaskResult{
 						Status:  "error",
@@ -137,7 +139,8 @@ func newBatchCmd() *cobra.Command {
 					ProjectPath: projPath,
 					TaskSlug:    slug,
 					Prompt:      spec.Prompt,
-					AgentCmd:    agentCmd,
+					Model:       resolved.Model,
+					AgentCmd:    resolved.AgentCmd,
 				})
 				if err != nil {
 					results = append(results, BatchTaskResult{
@@ -167,7 +170,8 @@ func newBatchCmd() *cobra.Command {
 						WindowID:      res.WindowID,
 						WindowLabel:   slug,
 						AgentBlockID:  res.BlockID,
-						Agent:         agentName,
+						Agent:         resolved.AgentLabel,
+						Model:         resolved.Model,
 						Cwd:           projPath,
 						Status:        "running",
 						Origin:        "buddy",
@@ -185,6 +189,7 @@ func newBatchCmd() *cobra.Command {
 					Status:       "dispatched",
 					Project:      projName,
 					Task:         slug,
+					Model:        resolved.Model,
 					WindowID:     res.WindowID,
 					AgentBlockID: res.BlockID,
 					PickedUp:     res.PickedUp,

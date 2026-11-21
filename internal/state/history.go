@@ -29,6 +29,7 @@ type HistoryRecord struct {
 	AgentBlockID   string  `json:"agent_block_id"`
 	DevBlockID     *string `json:"dev_block_id"`
 	Agent          string  `json:"agent"`
+	Model          string  `json:"model,omitempty"`
 	Cwd            string  `json:"cwd"`
 	WorktreePath   *string `json:"worktree_path"`
 	Branch         *string `json:"branch"`
@@ -85,6 +86,7 @@ func NewHistoryRecord(proj ProjectState, task TaskState, reason string, forced b
 		AgentBlockID:   task.AgentBlockID,
 		DevBlockID:     task.DevBlockID,
 		Agent:          task.Agent,
+		Model:          task.Model,
 		Cwd:            task.Cwd,
 		WorktreePath:   task.WorktreePath,
 		Branch:         task.Branch,

@@ -62,7 +62,7 @@ func (e *OpenCodeEngine) Dispatch(ctx context.Context, req DispatchRequest) (*Di
 		return nil, fmt.Errorf("opencode dispatch: project path is required")
 	}
 
-	agent, modelRef := e.resolveAgentAndModel(req.AgentCmd)
+	agent, modelRef := e.resolveAgentAndModel(req.Agent, req.Model, req.AgentCmd)
 
 	title := strings.TrimSpace(req.TaskSlug)
 	createReq := opencode.CreateSessionRequest{
@@ -105,7 +105,7 @@ func (e *OpenCodeEngine) Send(ctx context.Context, sessionID, blockID string, in
 		return fmt.Errorf("opencode send: session ID (blockID) is required")
 	}
 	if input.Text != "" {
-		_, modelRef := e.resolveAgentAndModel(nil)
+		_, modelRef := e.resolveAgentAndModel("", "", nil)
 		return e.client.Prompt(ctx, blockID, opencode.PromptRequest{Text: input.Text, Model: modelRef})
 	}
 	key := strings.ToLower(strings.TrimSpace(input.Key))
@@ -326,7 +326,7 @@ func (e *OpenCodeEngine) ProbeStatusWithActive(ctx context.Context, sessionID st
 	}, nil
 }
 
-func (e *OpenCodeEngine) resolveAgentAndModel(agentCmd []string) (string, *opencode.ModelRef) {
+func (e *OpenCodeEngine) resolveAgentAndModel(reqAgent, reqModel string, agentCmd []string) (string, *opencode.ModelRef) {
 	agent := e.defaultAgent
 	modelSpec := e.defaultModel
 
@@ -340,6 +340,13 @@ func (e *OpenCodeEngine) resolveAgentAndModel(agentCmd []string) (string, *openc
 		} else {
 			agent = s
 		}
+	}
+
+	if a := strings.TrimSpace(reqAgent); a != "" {
+		agent = a
+	}
+	if m := strings.TrimSpace(reqModel); m != "" {
+		modelSpec = m
 	}
 
 	return agent, parseOpenCodeModelRef(modelSpec)

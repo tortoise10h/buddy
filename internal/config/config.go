@@ -12,6 +12,10 @@ import (
 
 type AgentConfig struct {
 	Command       []string `json:"command"`
+	ModelArgs     []string `json:"model_args,omitempty"`    // e.g. ["--model", "{{model}}"]
+	ModelCommand  []string `json:"model_command,omitempty"` // optional full command override when --model is set
+	ModelsCmd     []string `json:"models_cmd,omitempty"`    // e.g. ["agy", "models"], ["pi", "--list-models"]
+	Models        []string `json:"models,omitempty"`        // optional static model list fallback
 	SubmitDelayMS int      `json:"submit_delay_ms"`
 	SubmitKey     string   `json:"submit_key"`
 }
@@ -25,8 +29,9 @@ type EngineConfig struct {
 	OrchestratorAgent string `json:"orchestrator_agent,omitempty"`
 	WorkerAgent       string `json:"worker_agent,omitempty"`
 
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
+	Provider string   `json:"provider,omitempty"`
+	Model    string   `json:"model,omitempty"`
+	Models   []string `json:"models,omitempty"` // optional static model list (useful for t3)
 
 	ServerURL        string `json:"server_url,omitempty"`
 	AutoStartService *bool  `json:"auto_start_service,omitempty"`
@@ -94,16 +99,34 @@ func DefaultConfig() *Config {
 		Agents: map[string]AgentConfig{
 			"agy": {
 				Command:       []string{"agy"},
+				ModelArgs:     []string{"--model", "{{model}}"},
+				ModelsCmd:     []string{"agy", "models"},
 				SubmitDelayMS: 1500,
 				SubmitKey:     "enter",
 			},
 			"pi": {
 				Command:       []string{"pi"},
+				ModelArgs:     []string{"--model", "{{model}}"},
+				ModelsCmd:     []string{"pi", "--list-models"},
 				SubmitDelayMS: 1000,
 				SubmitKey:     "enter",
 			},
 			"opencode": {
 				Command:       []string{"opencode"},
+				ModelCommand:  []string{"opencode", "mini", "--model", "{{model}}"},
+				ModelsCmd:     []string{"opencode", "models"},
+				SubmitDelayMS: 1500,
+				SubmitKey:     "enter",
+			},
+			"claude": {
+				Command:       []string{"claude"},
+				ModelArgs:     []string{"--model", "{{model}}"},
+				SubmitDelayMS: 1500,
+				SubmitKey:     "enter",
+			},
+			"codex": {
+				Command:       []string{"codex"},
+				ModelArgs:     []string{"--model", "{{model}}"},
 				SubmitDelayMS: 1500,
 				SubmitKey:     "enter",
 			},
@@ -132,6 +155,24 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.Agents == nil {
 		cfg.Agents = make(map[string]AgentConfig)
+	}
+
+	// Backfill built-in model metadata for existing config.json files that predate these fields.
+	defaults := DefaultConfig()
+	for name, defAgent := range defaults.Agents {
+		if existing, ok := cfg.Agents[name]; ok {
+			if len(existing.ModelArgs) == 0 && len(existing.ModelCommand) == 0 {
+				if len(defAgent.ModelCommand) > 0 && len(existing.Command) == 1 && existing.Command[0] == defAgent.Command[0] {
+					existing.ModelCommand = append([]string(nil), defAgent.ModelCommand...)
+				} else if len(defAgent.ModelArgs) > 0 {
+					existing.ModelArgs = append([]string(nil), defAgent.ModelArgs...)
+				}
+			}
+			if len(existing.ModelsCmd) == 0 && len(defAgent.ModelsCmd) > 0 {
+				existing.ModelsCmd = append([]string(nil), defAgent.ModelsCmd...)
+			}
+			cfg.Agents[name] = existing
+		}
 	}
 
 	return cfg, nil
@@ -294,20 +335,117 @@ func (c *Config) GetAgentCommand(agentName string) ([]string, int, string) {
 		agentName = "agy"
 	}
 
-	if a, ok := c.Agents[agentName]; ok && len(a.Command) > 0 {
-		delay := a.SubmitDelayMS
-		if delay <= 0 {
-			delay = 1500
+	if c != nil {
+		if a, ok := c.Agents[agentName]; ok && len(a.Command) > 0 {
+			delay := a.SubmitDelayMS
+			if delay <= 0 {
+				delay = 1500
+			}
+			key := a.SubmitKey
+			if key == "" {
+				key = "enter"
+			}
+			return cloneStrings(a.Command), delay, key
 		}
-		key := a.SubmitKey
-		if key == "" {
-			key = "enter"
-		}
-		return a.Command, delay, key
 	}
 
 	// Fallback to calling agentName directly as command
 	return []string{agentName}, 1500, "enter"
+}
+
+// BuildAgentCommand constructs the argv slice for a terminal worker agent, optionally
+// injecting a custom model override while preserving defaults when model is empty.
+func (c *Config) BuildAgentCommand(agentName, model string) ([]string, int, string, error) {
+	if agentName == "" {
+		agentName = c.GetEffectiveWorkerAgent(c.DefaultEngine)
+	}
+	if agentName == "" {
+		agentName = "agy"
+	}
+
+	baseCmd, delay, key := c.GetAgentCommand(agentName)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return baseCmd, delay, key, nil
+	}
+
+	var agentCfg AgentConfig
+	var hasCfg bool
+	if c != nil && c.Agents != nil {
+		agentCfg, hasCfg = c.Agents[agentName]
+	}
+
+	// 1. Explicit full-command override (e.g. opencode -> ["opencode", "mini", "--model", "{{model}}"]).
+	if hasCfg && len(agentCfg.ModelCommand) > 0 {
+		return substituteModelPlaceholder(agentCfg.ModelCommand, model), delay, key, nil
+	}
+
+	// 2. If base command already pins a model (e.g. variant ["agy", "--model", "flash"]),
+	// replace its value in-place rather than emitting duplicate flags.
+	if replaced, ok := replaceExistingModelFlag(baseCmd, model); ok {
+		return replaced, delay, key, nil
+	}
+
+	// 3. Inject ModelArgs (defaulting to ["--model", "{{model}}"]).
+	modelArgs := agentCfg.ModelArgs
+	if len(modelArgs) == 0 {
+		modelArgs = []string{"--model", "{{model}}"}
+	}
+	injected := substituteModelPlaceholder(modelArgs, model)
+	out := make([]string, 0, len(baseCmd)+len(injected))
+	out = append(out, baseCmd...)
+	out = append(out, injected...)
+	return out, delay, key, nil
+}
+
+func cloneStrings(src []string) []string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func substituteModelPlaceholder(tokens []string, model string) []string {
+	out := make([]string, len(tokens))
+	replaced := false
+	for i, tok := range tokens {
+		if strings.Contains(tok, "{{model}}") {
+			out[i] = strings.ReplaceAll(tok, "{{model}}", model)
+			replaced = true
+		} else {
+			out[i] = tok
+		}
+	}
+	if !replaced {
+		out = append(out, model)
+	}
+	return out
+}
+
+func replaceExistingModelFlag(cmd []string, model string) ([]string, bool) {
+	out := cloneStrings(cmd)
+	for i := 1; i < len(out); i++ {
+		tok := out[i]
+		if tok == "--model" || tok == "-m" {
+			if i+1 < len(out) {
+				out[i+1] = model
+				return out, true
+			}
+			out = append(out, model)
+			return out, true
+		}
+		if strings.HasPrefix(tok, "--model=") {
+			out[i] = "--model=" + model
+			return out, true
+		}
+		if strings.HasPrefix(tok, "-m=") {
+			out[i] = "-m=" + model
+			return out, true
+		}
+	}
+	return nil, false
 }
 
 // GetPath retrieves a value by dot-separated path from the config.

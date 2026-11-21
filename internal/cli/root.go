@@ -83,6 +83,7 @@ func init() {
 	rootCmd.AddCommand(newNotifyCmd())
 	rootCmd.AddCommand(newDiagnoseCmd())
 	rootCmd.AddCommand(newEngineCmd())
+	rootCmd.AddCommand(newModelsCmd())
 	rootCmd.AddCommand(newBatchCmd())
 	rootCmd.AddCommand(newContextInjectCmd())
 

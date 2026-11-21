@@ -130,6 +130,37 @@ func TestOpenCodeEngine_Dispatch(t *testing.T) {
 	}
 }
 
+func TestOpenCodeEngine_Dispatch_ExplicitModelPreservesDefaultAgent(t *testing.T) {
+	mock := &mockOpenCodeClient{
+		createdSess: &opencode.SessionInfo{
+			ID:        "ses_model1",
+			ProjectID: "proj_xyz",
+			Title:     "feat-model",
+		},
+	}
+	eng := NewOpenCodeEngineWithClient(mock, OpenCodeEngineOptions{
+		DefaultAgent: "build",
+		DefaultModel: "opencode-go/default-model",
+	})
+
+	_, err := eng.Dispatch(context.Background(), DispatchRequest{
+		ProjectName: "buddy",
+		ProjectPath: "/tmp/buddy",
+		TaskSlug:    "feat-model",
+		Prompt:      "refactor lock",
+		Model:       "opencode-go/deepseek-v4.1-flash#high",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch failed: %v", err)
+	}
+	if mock.createReq.Agent != "build" {
+		t.Fatalf("expected DefaultAgent 'build' to be preserved, got %q", mock.createReq.Agent)
+	}
+	if mock.createReq.Model == nil || mock.createReq.Model.ProviderID != "opencode-go" || mock.createReq.Model.ID != "deepseek-v4.1-flash" || mock.createReq.Model.Variant != "high" {
+		t.Fatalf("unexpected ModelRef from req.Model: %+v", mock.createReq.Model)
+	}
+}
+
 func TestOpenCodeEngine_SendTextAndInterrupt(t *testing.T) {
 	mock := &mockOpenCodeClient{}
 	eng := NewOpenCodeEngineWithClient(mock, OpenCodeEngineOptions{

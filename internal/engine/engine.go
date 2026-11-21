@@ -12,7 +12,9 @@ type DispatchRequest struct {
 	ProjectPath string
 	TaskSlug    string
 	Prompt      string
-	AgentCmd    []string
+	Agent       string   // Optional resolved agent name
+	Model       string   // Optional resolved model identifier (empty when default)
+	AgentCmd    []string // Full command argv for TerminalEngine (or legacy fallback)
 }
 
 // DispatchResult represents the outcome of a task dispatch operation.

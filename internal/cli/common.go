@@ -55,66 +55,36 @@ func getEngine(name string) (engine.Engine, error) {
 	return getRegistry().Get(name)
 }
 
+type workerResolution struct {
+	AgentLabel string   // Persisted in TaskState.Agent (e.g. "agy", "t3", "opencode")
+	Model      string   // Persisted in TaskState.Model (empty if default)
+	AgentCmd   []string // Passed to TerminalEngine (or legacy fallback)
+}
+
 // resolveWorkerForEngine resolves the worker label and command arguments for the target engine.
-// For "t3", it resolves <provider>/<model> from --agent, BUDDY_T3_MODEL, or cfg.Engines["t3"].
-// For terminal engines, it resolves the CLI harness from --agent, BUDDY_WORKER_AGENT, or cfg.Engines[engine].
 func resolveWorkerForEngine(engineName, flagAgent string, cfg *config.Config) (string, []string, error) {
+	res, err := resolveWorkerWithModel(engineName, flagAgent, "", cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	return res.AgentLabel, res.AgentCmd, nil
+}
+
+// resolveWorkerWithModel resolves the worker label, model identifier, and command arguments
+// for the target engine while preserving defaults when model is omitted.
+func resolveWorkerWithModel(engineName, flagAgent, flagModel string, cfg *config.Config) (workerResolution, error) {
+	flagAgent = strings.TrimSpace(flagAgent)
+	flagModel = strings.TrimSpace(flagModel)
+
 	if engineName == "t3" {
-		if flagAgent != "" {
-			p, m, ok := strings.Cut(strings.TrimSpace(flagAgent), "/")
-			if !ok || p == "" || m == "" {
-				return "", nil, fmt.Errorf("t3 engine requires <provider>/<model> for --agent (got %q), e.g. antigravity/gemini-3.8-flash-medium", flagAgent)
-			}
-			spec := p + "/" + m
-			return spec, []string{spec}, nil
-		}
-		if env := strings.TrimSpace(os.Getenv("BUDDY_T3_MODEL")); env != "" {
-			p, m, ok := strings.Cut(env, "/")
-			if !ok || p == "" || m == "" {
-				return "", nil, fmt.Errorf("invalid BUDDY_T3_MODEL %q: expected <provider>/<model>", env)
-			}
-			spec := p + "/" + m
-			return spec, []string{spec}, nil
-		}
-		if cfg != nil {
-			p, m := cfg.GetT3ProviderModel()
-			if p != "" && m != "" {
-				spec := p + "/" + m
-				return spec, []string{spec}, nil
-			}
-		}
-		return "", nil, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --agent <provider>/<model>, or set BUDDY_T3_MODEL=<provider>/<model>")
+		return resolveT3Worker(flagAgent, flagModel, cfg)
 	}
 
 	if engineName == "opencode" {
-		if spec := strings.TrimSpace(flagAgent); spec != "" {
-			return spec, []string{spec}, nil
-		}
-		if env := strings.TrimSpace(os.Getenv("BUDDY_OPENCODE_MODEL")); env != "" {
-			return env, []string{env}, nil
-		}
-		if cfg != nil {
-			_, _, defAgent, defModel, _ := cfg.GetOpenCodeConfig()
-			var cmds []string
-			if defAgent != "" {
-				cmds = append(cmds, defAgent)
-			}
-			if defModel != "" {
-				cmds = append(cmds, defModel)
-			}
-			label := defModel
-			if label == "" {
-				label = defAgent
-			}
-			if label == "" {
-				label = "opencode"
-			}
-			return label, cmds, nil
-		}
-		return "opencode", nil, nil
+		return resolveOpenCodeWorker(flagAgent, flagModel, cfg)
 	}
 
-	agentName := strings.TrimSpace(flagAgent)
+	agentName := flagAgent
 	if agentName == "" {
 		agentName = strings.TrimSpace(os.Getenv("BUDDY_WORKER_AGENT"))
 	}
@@ -124,11 +94,208 @@ func resolveWorkerForEngine(engineName, flagAgent string, cfg *config.Config) (s
 	if agentName == "" {
 		agentName = "agy"
 	}
-	if cfg != nil {
-		agentCmd, _, _ := cfg.GetAgentCommand(agentName)
-		return agentName, agentCmd, nil
+
+	model := flagModel
+	if model == "" {
+		model = strings.TrimSpace(os.Getenv("BUDDY_MODEL"))
 	}
-	return agentName, []string{agentName}, nil
+
+	effectiveCfg := cfg
+	if effectiveCfg == nil {
+		effectiveCfg = config.DefaultConfig()
+	}
+	agentCmd, _, _, err := effectiveCfg.BuildAgentCommand(agentName, model)
+	if err != nil {
+		return workerResolution{}, err
+	}
+	return workerResolution{
+		AgentLabel: agentName,
+		Model:      model,
+		AgentCmd:   agentCmd,
+	}, nil
+}
+
+func resolveT3Worker(flagAgent, flagModel string, cfg *config.Config) (workerResolution, error) {
+	var cfgProvider, cfgModel string
+	if cfg != nil {
+		cfgProvider, cfgModel = cfg.GetT3ProviderModel()
+	}
+
+	resolveSpec := func(raw, source string) (string, error) {
+		raw = strings.TrimSpace(raw)
+		if strings.Contains(raw, "/") {
+			p, m, ok := strings.Cut(raw, "/")
+			p, m = strings.TrimSpace(p), strings.TrimSpace(m)
+			if !ok || p == "" || m == "" {
+				return "", fmt.Errorf("t3 engine requires <provider>/<model> for %s (got %q), e.g. antigravity/gemini-3.8-flash-medium", source, raw)
+			}
+			return p + "/" + m, nil
+		}
+		if cfgProvider != "" {
+			return cfgProvider + "/" + raw, nil
+		}
+		return "", fmt.Errorf("t3 engine requires <provider>/<model> for %s (got %q) or engines.t3.provider in ~/.buddy/config.json", source, raw)
+	}
+
+	if flagModel != "" {
+		spec, err := resolveSpec(flagModel, "--model")
+		if err != nil {
+			return workerResolution{}, err
+		}
+		if flagAgent != "" && strings.Contains(flagAgent, "/") {
+			agentSpec, err := resolveSpec(flagAgent, "--agent")
+			if err != nil {
+				return workerResolution{}, err
+			}
+			if agentSpec != spec {
+				return workerResolution{}, fmt.Errorf("t3 dispatch: conflicting --agent %q and --model %q; specify only --model", flagAgent, flagModel)
+			}
+		}
+		return workerResolution{
+			AgentLabel: "t3",
+			Model:      spec,
+			AgentCmd:   []string{spec},
+		}, nil
+	}
+
+	if flagAgent != "" {
+		p, m, ok := strings.Cut(flagAgent, "/")
+		p, m = strings.TrimSpace(p), strings.TrimSpace(m)
+		if !ok || p == "" || m == "" {
+			return workerResolution{}, fmt.Errorf("t3 engine requires <provider>/<model> for --agent (got %q), e.g. antigravity/gemini-3.8-flash-medium", flagAgent)
+		}
+		spec := p + "/" + m
+		return workerResolution{
+			AgentLabel: spec,
+			Model:      spec,
+			AgentCmd:   []string{spec},
+		}, nil
+	}
+
+	if env := strings.TrimSpace(os.Getenv("BUDDY_T3_MODEL")); env != "" {
+		p, m, ok := strings.Cut(env, "/")
+		p, m = strings.TrimSpace(p), strings.TrimSpace(m)
+		if !ok || p == "" || m == "" {
+			return workerResolution{}, fmt.Errorf("invalid BUDDY_T3_MODEL %q: expected <provider>/<model>", env)
+		}
+		spec := p + "/" + m
+		return workerResolution{
+			AgentLabel: "t3",
+			Model:      spec,
+			AgentCmd:   []string{spec},
+		}, nil
+	}
+
+	if env := strings.TrimSpace(os.Getenv("BUDDY_MODEL")); env != "" {
+		spec, err := resolveSpec(env, "BUDDY_MODEL")
+		if err != nil {
+			return workerResolution{}, err
+		}
+		return workerResolution{
+			AgentLabel: "t3",
+			Model:      spec,
+			AgentCmd:   []string{spec},
+		}, nil
+	}
+
+	if cfgProvider != "" && cfgModel != "" {
+		spec := cfgProvider + "/" + cfgModel
+		return workerResolution{
+			AgentLabel: "t3",
+			Model:      spec,
+			AgentCmd:   []string{spec},
+		}, nil
+	}
+
+	return workerResolution{}, fmt.Errorf("t3 dispatch: missing provider/model. Set engines.t3.provider and engines.t3.model in ~/.buddy/config.json (via 'buddy-ctl config set'), pass --model <provider>/<model> (or --agent <provider>/<model>), or set BUDDY_T3_MODEL=<provider>/<model>")
+}
+
+func resolveOpenCodeWorker(flagAgent, flagModel string, cfg *config.Config) (workerResolution, error) {
+	var cfgProvider, defAgent, defModel string
+	if cfg != nil {
+		cfgProvider = strings.TrimSpace(cfg.GetEngineConfig("opencode").Provider)
+		_, _, defAgent, defModel, _ = cfg.GetOpenCodeConfig()
+	}
+
+	resolveModelSpec := func(raw, source string) (string, error) {
+		raw = strings.TrimSpace(raw)
+		if strings.Contains(raw, "/") {
+			p, rest, ok := strings.Cut(raw, "/")
+			p, rest = strings.TrimSpace(p), strings.TrimSpace(rest)
+			modelID := rest
+			if m, _, hasVariant := strings.Cut(rest, "#"); hasVariant {
+				modelID = strings.TrimSpace(m)
+			}
+			if !ok || p == "" || modelID == "" {
+				return "", fmt.Errorf("opencode engine requires <provider>/<model>[#<variant>] for %s (got %q)", source, raw)
+			}
+			return p + "/" + rest, nil
+		}
+		if cfgProvider != "" {
+			return cfgProvider + "/" + raw, nil
+		}
+		return "", fmt.Errorf("opencode engine requires <provider>/<model>[#<variant>] for %s (got %q) or engines.opencode.provider in ~/.buddy/config.json", source, raw)
+	}
+
+	var resolvedModel string
+	var err error
+	if flagModel != "" {
+		resolvedModel, err = resolveModelSpec(flagModel, "--model")
+		if err != nil {
+			return workerResolution{}, err
+		}
+		if flagAgent != "" && strings.Contains(flagAgent, "/") {
+			agentModel, err := resolveModelSpec(flagAgent, "--agent")
+			if err != nil {
+				return workerResolution{}, err
+			}
+			if agentModel != resolvedModel {
+				return workerResolution{}, fmt.Errorf("opencode dispatch: conflicting --agent %q and --model %q; specify only --model", flagAgent, flagModel)
+			}
+		}
+	} else if flagAgent != "" && strings.Contains(flagAgent, "/") {
+		resolvedModel, err = resolveModelSpec(flagAgent, "--agent")
+		if err != nil {
+			return workerResolution{}, err
+		}
+	} else if env := strings.TrimSpace(os.Getenv("BUDDY_OPENCODE_MODEL")); env != "" {
+		resolvedModel, err = resolveModelSpec(env, "BUDDY_OPENCODE_MODEL")
+		if err != nil {
+			return workerResolution{}, err
+		}
+	} else if env := strings.TrimSpace(os.Getenv("BUDDY_MODEL")); env != "" {
+		resolvedModel, err = resolveModelSpec(env, "BUDDY_MODEL")
+		if err != nil {
+			return workerResolution{}, err
+		}
+	} else if defModel != "" {
+		resolvedModel = defModel
+	}
+
+	// Preserve engines.opencode.default_agent behavior unchanged.
+	var cmds []string
+	if defAgent != "" {
+		cmds = append(cmds, defAgent)
+	}
+	if flagAgent != "" && !strings.Contains(flagAgent, "/") {
+		cmds = append(cmds, flagAgent)
+	}
+	if resolvedModel != "" {
+		cmds = append(cmds, resolvedModel)
+	}
+
+	label := "opencode"
+	if flagAgent != "" && !strings.Contains(flagAgent, "/") {
+		label = flagAgent
+	} else if defAgent != "" {
+		label = defAgent
+	}
+
+	return workerResolution{
+		AgentLabel: label,
+		Model:      resolvedModel,
+		AgentCmd:   cmds,
+	}, nil
 }
 
 func resolveActiveEngine(flagEngine string) string {

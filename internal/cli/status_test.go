@@ -289,3 +289,45 @@ func TestStatusCmd_Sync_T3_ReconcilesTasksAndDiscoversUntracked(t *testing.T) {
 		t.Errorf("expected table output to print 't3' engine for untracked thread, got:\n%s", outTable)
 	}
 }
+
+func TestStatusCmd_DisplaysCustomModelOnlyWhenSet(t *testing.T) {
+	clearAllHostSignals(t)
+	t.Setenv("BUDDY_DIR", t.TempDir())
+	t.Setenv("REX_SESSION", "session:1")
+	t.Setenv("TERM_PROGRAM", "rex")
+
+	cfg := config.DefaultConfig()
+	_ = config.SaveConfig(cfg)
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj", "/tmp/proj", "sess_1", "proj", state.TaskState{
+			TaskSlug:    "with-model",
+			Engine:      "rex",
+			Agent:       "agy",
+			Model:       "gemini-4-neon-high",
+			Status:      "running",
+			LastSummary: "deep work",
+		})
+		s.RecordTask("proj", "/tmp/proj", "sess_1", "proj", state.TaskState{
+			TaskSlug:    "default-model",
+			Engine:      "rex",
+			Agent:       "agy",
+			Status:      "running",
+			LastSummary: "routine work",
+		})
+		return nil
+	})
+
+	cmdBrief := newStatusCmd()
+	cmdBrief.SetArgs([]string{"--no-sync", "--format", "brief"})
+	outBrief, _, err := captureOutput(t, func() error { return cmdBrief.Execute() })
+	if err != nil {
+		t.Fatalf("status brief failed: %v", err)
+	}
+	if !strings.Contains(outBrief, "[agy | gemini-4-neon-high | running]") {
+		t.Errorf("expected model in brief output for with-model, got:\n%s", outBrief)
+	}
+	if !strings.Contains(outBrief, "default-model [agy | running]") {
+		t.Errorf("expected no model segment for default-model, got:\n%s", outBrief)
+	}
+}

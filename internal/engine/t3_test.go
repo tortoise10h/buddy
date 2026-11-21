@@ -105,6 +105,37 @@ func TestT3Engine_Dispatch_AddsProjectAndStartsThread(t *testing.T) {
 	}
 }
 
+func TestT3Engine_Dispatch_ModelFieldTakesPrecedence(t *testing.T) {
+	t.Setenv("BUDDY_T3_MODEL", "env-prov/env-model")
+	mock := &mockT3Runner{
+		threadStartOut: &t3.ThreadStartOutput{
+			ThreadID:  "mcp:thread-2",
+			ProjectID: "proj-2",
+			RunID:     "run-2",
+		},
+	}
+	eng := NewT3EngineWithRunner(mock)
+
+	_, err := eng.Dispatch(context.Background(), DispatchRequest{
+		ProjectName: "buddy",
+		ProjectPath: "/tmp/buddy",
+		TaskSlug:    "feat-model",
+		Prompt:      "Implement custom model",
+		Model:       "antigravity/gemini-4-neon-high",
+		AgentCmd:    []string{"legacy-prov/legacy-model"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected Dispatch error: %v", err)
+	}
+	if len(mock.threadStartCalls) != 1 {
+		t.Fatalf("expected 1 ThreadStart call, got %d", len(mock.threadStartCalls))
+	}
+	got := mock.threadStartCalls[0]
+	if got.Provider != "antigravity" || got.Model != "gemini-4-neon-high" {
+		t.Fatalf("expected req.Model to take precedence, got %q / %q", got.Provider, got.Model)
+	}
+}
+
 func TestT3Engine_Dispatch_MissingProviderModelFailsFast(t *testing.T) {
 	t.Setenv("BUDDY_T3_MODEL", "")
 	mock := &mockT3Runner{

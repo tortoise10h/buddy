@@ -103,8 +103,10 @@ Every `dispatch`, `send`, and `batch` JSON response includes a computed `recomme
 
 ### 1. Dispatch & Pickup Verification (`picked_up` & `pickup_reason`)
 ```sh
-buddy-ctl dispatch --project <proj> --prompt "<prompt>" [--task <slug>] [--agent agy|pi|opencode] [--force]
+buddy-ctl dispatch --project <proj> --prompt "<prompt>" [--task <slug>] [--agent agy|pi|opencode] [--model <model>] [--engine rex|t3|opencode] [--force]
 ```
+- Omitting `--model` (and `BUDDY_MODEL`) leaves worker commands untouched so each CLI/engine uses its own configured or last-used default model.
+- Use `buddy-ctl models [--agent <name>] [--engine <eng>] [--query <q>]` to inspect available models before passing `--model`.
 - `buddy-ctl dispatch` automatically dismisses known agent onboarding modals (`esc to dismiss` / `Auto mode: edits & safe commands auto-approved`) and verifies whether the prompt was actually received by the agent (`picked_up: true` only when the prompt text is echoed or the agent transitions to active working state).
 - **If `picked_up: true`**: Report the dispatch in 1 concise line and arm the Watchdog Subagent using `recommended_watch`.
 - **If `picked_up: false`**: Do **not** tell the user the worker is running! Inspect `pickup_reason` and `preview`:
@@ -177,7 +179,7 @@ Delegate investigatory dispatches (requiring repo reads, `git` checks, or multi-
   4. Write brief to `~/.buddy/briefs/<YYYYMMDD-HHMMSS>-<project>-<slug>.md` (even on Tier 2 needs_decision).
   5. Tier 1 (>=90% tracked): `buddy-ctl send -p "<project>" -t "<slug>" --text "$(cat '<brief_path>')"`.
      Tier 2 (30-89%, untracked, dirty conflict, or collision): STOP and return `status: needs_decision`.
-     Tier 3 (<30%): `buddy-ctl dispatch -p "<project>" -t "<slug>" -m "$(cat '<brief_path>')"`; if `picked_up: false`, run modal recovery (max 2 attempts).
+     Tier 3 (<30%): `buddy-ctl dispatch -p "<project>" -t "<slug>" -m "$(cat '<brief_path>')" [--model <chosen>]` (pass `--model` only if the user explicitly requested one; otherwise omit to use the worker's default model). If `picked_up: false`, run modal recovery (max 2 attempts).
   6. NEVER run `buddy-ctl watch` or spawn a Watchdog; copy `recommended_watch` verbatim from CLI JSON.
   7. Return ONLY the structured YAML report (no file contents, diffs, or prose).
   ```
@@ -238,9 +240,10 @@ next_action: "<1-line instruction for parent/user>"
 
 | Command | Flags & Purpose |
 | :--- | :--- |
-| `buddy-ctl dispatch` | `-p <proj> -m "<prompt>" [-t <slug>] [-a <agent>] [--engine <eng>] [--force]` — Atomic spawn, readiness probe, modal dismissal, prompt delivery, and pickup verification. |
+| `buddy-ctl dispatch` | `-p <proj> -m "<prompt>" [-t <slug>] [-a <agent>] [-M/--model <model>] [--engine <eng>] [--force]` — Atomic spawn, readiness probe, modal dismissal, prompt delivery, and pickup verification. |
 | `buddy-ctl task adopt` | `-p <proj> -w <window-id-or-label> [-t <slug>] [-a <agent>] [--engine <eng>]` — Adopt an untracked user-opened window into Buddy state (`origin: "user"`). |
-| `buddy-ctl task start` | `-p <proj> -t <slug> [-m "<prompt>"] [-a <agent>] [--engine <eng>] [--force]` — Start a task tab with explicit slug. |
+| `buddy-ctl task start` | `-p <proj> -t <slug> [--prompt "<prompt>"] [-a <agent>] [-M/--model <model>] [--engine <eng>] [--force]` — Start a task tab with explicit slug. |
+| `buddy-ctl models` | `[-a/--agent <name>] [--engine <eng>] [-q/--query <q>] [-f/--format json\|table\|brief]` — List available models for the target agent or engine. |
 | `buddy-ctl task update` | `-p <proj> -t <slug> --status <status> [--summary "<text>"]` — Manually update cached status/summary. |
 | `buddy-ctl task close` | `-p <proj> -t <slug>` — Close task window in multiplexer and mark closed. |
 | `buddy-ctl task clean` | `-p <proj> -t <slug> [--reason "..."] [--close] [--force] [--all-closed] [--prune-empty-project] [--dry-run]` — Remove closed task from active state and append audit record to `~/.buddy/history/tasks.jsonl` (`--force` requires explicit user consent). |
@@ -252,7 +255,7 @@ next_action: "<1-line instruction for parent/user>"
 | `buddy-ctl diagnose` | `-p <proj> -t <slug> [--lines 300]` — Extract structured error blocks, stack traces, and recent commands. |
 | `buddy-ctl demo` | `-p <proj> -t <slug> [--cmd "<dev-cmd>"] [--focus-only]` — Focus task window and optionally open a dev split pane. |
 | `buddy-ctl focus` | `-p <proj> [-t <slug>] [-w <win>]` — Focus project/task window and bring terminal app to front. |
-| `buddy-ctl batch` | `--json '[...]' \| --file <path>` — Dispatch multiple tasks across projects in one call. |
+| `buddy-ctl batch` | `--json '[...]' \| --file <path>` — Dispatch multiple tasks across projects in one call (each item supports `project`, `task`, `prompt`, optional `agent`, `model`, `engine`). |
 | `buddy-ctl projects` | `[--query <q>] \| roots \| add-root <path> \| remove-root <path>` — Discover repositories and manage project roots. |
 | `buddy-ctl config` | `show \| set <key> <val>` — Inspect or update `~/.buddy/config.json`. |
 | `buddy-ctl notify` | `-m "<msg>" [--title "..."] [--subtitle "..."] [--sound Glass]` — Trigger macOS desktop alert. |
@@ -321,7 +324,7 @@ Buddy stores per-engine settings under `engines.<name>` in `~/.buddy/config.json
 2. **T3 Engine (`t3`)**:
    - `provider` and `model`: Required for `t3 thread start` (e.g. `buddy-ctl config set engines.t3.provider antigravity` and `buddy-ctl config set engines.t3.model gemini-3.8-flash-medium`).
 
-### Pinning a Model Variant
-To use a model-pinned variant in terminal engines:
-1. Add an entry to `agents` in `~/.buddy/config.json` with the model args in its `command` array (e.g. `"agy-flash": {"command": ["agy", "--model", "gemini-3.8-flash-medium"]}`).
-2. Select it per-command (`buddy-ctl dispatch --agent agy-flash ...`) or set it as default (`buddy-ctl config set engines.rex.worker_agent agy-flash`).
+### Custom Model Selection (`--model` / `-M`)
+- Pass `--model <id>` (or `-M <id>`) on `buddy-ctl dispatch` or `buddy-ctl task start` (or `"model"` in `buddy-ctl batch` items) across `rex`, `t3`, and `opencode`. Omitting `--model` preserves each CLI/engine's default model.
+- Terminal agents configure injection via `agents.<name>.model_args` (default `["--model", "{{model}}"]`) or `agents.<name>.model_command` (e.g. `opencode` defaults to `["opencode", "mini", "--model", "{{model}}"]`), and discovery via `agents.<name>.models_cmd` and `models`.
+- To pin a model variant permanently as a named harness, add an entry to `agents` in `~/.buddy/config.json` with the model args in its `command` array (e.g. `"agy-flash": {"command": ["agy", "--model", "gemini-3.8-flash-medium"]}`) and select it via `--agent agy-flash` (passing `--model` explicitly still replaces the pinned `--model` flag cleanly without duplication).

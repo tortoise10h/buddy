@@ -101,3 +101,43 @@ func TestContextInject_FiltersDeadTasksAndShowsUntrackedAndWatch(t *testing.T) {
 		t.Errorf("expected situational watchdog command in context-inject output, got:\n%s", msg)
 	}
 }
+
+func TestContextInject_IncludesModelOnlyWhenSet(t *testing.T) {
+	t.Setenv("BUDDY_DIR", t.TempDir())
+
+	_ = state.MutateState(func(s *state.State) error {
+		s.RecordTask("proj-a", "/path/a", "sess_a", "proj-a", state.TaskState{
+			TaskSlug:    "custom-task",
+			Agent:       "agy",
+			Model:       "gemini-4-neon-high",
+			Status:      "running",
+			LastSummary: "complex work",
+		})
+		s.RecordTask("proj-a", "/path/a", "sess_a", "proj-a", state.TaskState{
+			TaskSlug:    "default-task",
+			Agent:       "agy",
+			Status:      "running",
+			LastSummary: "simple work",
+		})
+		return nil
+	})
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"context-inject"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("context-inject failed: %v", err)
+	}
+
+	var out map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &out)
+	msg := out["injectSteps"].([]any)[0].(map[string]any)["ephemeralMessage"].(string)
+
+	if !strings.Contains(msg, "proj-a/custom-task (agy:gemini-4-neon-high, running:") {
+		t.Errorf("expected model suffix for custom-task, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "proj-a/default-task (agy, running:") {
+		t.Errorf("expected no model suffix for default-task, got:\n%s", msg)
+	}
+}

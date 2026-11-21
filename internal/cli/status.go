@@ -145,7 +145,11 @@ func newStatusCmd() *cobra.Command {
 						if agent == "" {
 							agent = "agy"
 						}
-						lines = append(lines, fmt.Sprintf("• %s/%s [%s | %s]: %s", pName, tSlug, agent, tData.Status, tData.LastSummary))
+						if tData.Model != "" && tData.Model != agent {
+							lines = append(lines, fmt.Sprintf("• %s/%s [%s | %s | %s]: %s", pName, tSlug, agent, tData.Model, tData.Status, tData.LastSummary))
+						} else {
+							lines = append(lines, fmt.Sprintf("• %s/%s [%s | %s]: %s", pName, tSlug, agent, tData.Status, tData.LastSummary))
+						}
 					}
 					for _, uw := range pData.UntrackedWindows {
 						lines = append(lines, fmt.Sprintf("• %s/%s [untracked | %s]: %s (window: %s)", pName, uw.Label, uw.DetectedStatus, uw.Summary, uw.WindowID))
@@ -172,6 +176,9 @@ func newStatusCmd() *cobra.Command {
 					agent := tData.Agent
 					if agent == "" {
 						agent = "agy"
+					}
+					if tData.Model != "" && tData.Model != agent {
+						agent = fmt.Sprintf("%s (%s)", agent, tData.Model)
 					}
 					eng := tData.GetEngine()
 					summary := tData.LastSummary
@@ -202,7 +209,7 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&projectName, "project", "p", "", "Filter by project name")
 	cmd.Flags().BoolVar(&syncLive, "sync", false, "Reconcile cache with live Rex sessions and windows")
 	cmd.Flags().BoolVar(&noSync, "no-sync", false, "Skip automatic TTL reconciliation")
-	cmd.Flags().StringVar(&flagEngine, "engine", "", "Execution engine (rex, t3, wezterm)")
+	cmd.Flags().StringVar(&flagEngine, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 	cmd.Flags().BoolVar(&allEngines, "all-engines", false, "Show state across all engines")
 
 	return cmd

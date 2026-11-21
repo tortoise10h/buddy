@@ -18,6 +18,7 @@ func newDispatchCmd() *cobra.Command {
 		taskSlug    string
 		prompt      string
 		agentName   string
+		modelName   string
 		engineName  string
 		force       bool
 	)
@@ -71,7 +72,7 @@ func newDispatchCmd() *cobra.Command {
 			}
 
 			// 5. Resolve worker agent / model for target engine
-			agentName, agentCmd, err := resolveWorkerForEngine(engineName, agentName, cfg)
+			resolved, err := resolveWorkerWithModel(engineName, agentName, modelName, cfg)
 			if err != nil {
 				return err
 			}
@@ -82,7 +83,8 @@ func newDispatchCmd() *cobra.Command {
 				ProjectPath: projPath,
 				TaskSlug:    slug,
 				Prompt:      prompt,
-				AgentCmd:    agentCmd,
+				Model:       resolved.Model,
+				AgentCmd:    resolved.AgentCmd,
 			})
 			if err != nil {
 				return err
@@ -102,7 +104,8 @@ func newDispatchCmd() *cobra.Command {
 					WindowID:      res.WindowID,
 					WindowLabel:   slug,
 					AgentBlockID:  res.BlockID,
-					Agent:         agentName,
+					Agent:         resolved.AgentLabel,
+					Model:         resolved.Model,
 					Cwd:           projPath,
 					Status:        "running",
 					Origin:        "buddy",
@@ -127,9 +130,12 @@ func newDispatchCmd() *cobra.Command {
 				"preview":                 preview,
 				"window_id":               res.WindowID,
 				"agent_block_id":          res.BlockID,
-				"agent":                   agentName,
+				"agent":                   resolved.AgentLabel,
 				"active_tasks_in_project": activeInProj,
 				"recommended_watch":       recWatch,
+			}
+			if resolved.Model != "" {
+				resp["model"] = resolved.Model
 			}
 			if res.PickupReason != "" {
 				resp["pickup_reason"] = res.PickupReason
@@ -144,6 +150,7 @@ func newDispatchCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&prompt, "prompt", "m", "", "Task prompt to execute")
 	cmd.Flags().StringVarP(&taskSlug, "task", "t", "", "Task slug (e.g. feat-auth)")
 	cmd.Flags().StringVarP(&agentName, "agent", "a", "", "Agent CLI to launch (agy, pi, opencode, etc.)")
+	cmd.Flags().StringVarP(&modelName, "model", "M", "", "Model override for the worker agent (e.g. gemini-4-neon-high or provider/model)")
 	cmd.Flags().StringVar(&engineName, "engine", "", "Execution engine (rex, t3, opencode, wezterm)")
 	cmd.Flags().BoolVar(&force, "force", false, "Bypass candidate duplicate guard and start a new task tab")
 
