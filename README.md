@@ -26,6 +26,13 @@ Working with AI coding agents across multiple repositories quickly turns into ta
 - **Work outside Buddy anytime**: Open a manual tab, answer a worker directly, or start a session on your own—Buddy reconciles with live panes/threads and can adopt manual sessions on demand.
 
 ---
+## Quick look (How I use)
+
+[How I use Buddy in Rex terminal](https://drive.google.com/file/d/1rP3pNhMPHMfzvOCh1RUjGRIASAqDohHK/view?usp=sharing)
+
+[How I use Buddy in Opencode desktop](https://drive.google.com/file/d/1tio1zCzXfbu9Mqui4w_mXBFyb_izXNfY/view?usp=sharing)
+> [!note]
+> Skipped the waiting for models parts
 
 ## Features
 
