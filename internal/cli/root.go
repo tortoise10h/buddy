@@ -20,7 +20,7 @@ var rootCmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		cmd.Flags().VisitAll(func(f *pflag.Flag) {
 			if !f.Changed {
-				_ = f.Value.Set(f.DefValue)
+				resetFlagToDefault(f)
 			}
 		})
 	},
@@ -29,16 +29,26 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+func resetFlagToDefault(f *pflag.Flag) {
+	if sv, ok := f.Value.(pflag.SliceValue); ok {
+		if f.DefValue == "[]" || f.DefValue == "" {
+			_ = sv.Replace(nil)
+			return
+		}
+	}
+	_ = f.Value.Set(f.DefValue)
+}
+
 func resetCommandTreeFlags(cmd *cobra.Command) {
 	if cmd == nil {
 		return
 	}
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		_ = f.Value.Set(f.DefValue)
+		resetFlagToDefault(f)
 		f.Changed = false
 	})
 	cmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
-		_ = f.Value.Set(f.DefValue)
+		resetFlagToDefault(f)
 		f.Changed = false
 	})
 	for _, sub := range cmd.Commands() {
@@ -69,6 +79,8 @@ func init() {
 
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newInitCmd())
+	rootCmd.AddCommand(newSetupCmd())
+	rootCmd.AddCommand(newDoctorCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newProjectsCmd())
 	rootCmd.AddCommand(newEnsureSessionCmd())

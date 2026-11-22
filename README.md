@@ -97,35 +97,28 @@ cd /Users/sunday/Dev/Personal/Projects/buddy
 ./install.sh --build   # Or build locally from source with Go (tracks latest code on main)
 ```
 
-During installation, Buddy prompts you for:
-1. **Project root directories** where your repositories live (e.g. `~/Dev/Personal/Projects`, `~/Dev/Work/repos`, `~/Code/oss`):
-   - Hit **Enter** to accept the default (`~/Dev/Personal/Projects`).
-   - Enter multiple paths separated by commas or spaces, or add more iteratively when prompted.
-   - Non-existent directories are validated with an option to auto-create them.
-2. **Default fallback engine** (`rex`, `wezterm`, `t3`) when host auto-detection is unknown.
-3. **Orchestrator and Worker agent harnesses**:
-   - Buddy dynamically discovers installed agent harnesses from `agents` (e.g. `agy`, `opencode`, `pi`) and prompts you to select the harness for each role. Each harness starts with that agent's own default model.
-   - Hit **Enter** to accept the default (`agy`, or previously configured values on re-install).
-   - Unknown harness names are validated with re-prompting.
-4. **T3 worker model** (when the `t3` CLI is detected): prompts for `<provider>/<model>` (e.g. `antigravity/gemini-3.8-flash-medium`).
+`install.sh` installs `buddy` and `buddy-ctl` into `~/.local/bin/` and hands off onboarding directly to **`buddy-ctl setup`**:
 
-- Re-running `install.sh` on an existing installation automatically detects and preserves your configured roots, engine, and agent choices.
-- For headless CI or scripted installs, set `BUDDY_NONINTERACTIVE=1` along with optional environment variables:
+- **First-time interactive install**: Launches the interactive `buddy-ctl setup` TUI wizard (powered by `charm.land/huh/v2`), which:
+  1. Probes your machine for installed engines (`rex`, `opencode`, `t3`, `wezterm`), agent harnesses (`agy`, `opencode`, `pi`, `claude`, `codex`, `cursor`, `gemini`), and existing project directories (with live repo counts).
+  2. Configures your project roots, default fallback engine, optional T3/OpenCode defaults, terminal orchestrator & worker harnesses, and agent skill targets.
+  3. Provisions `~/.buddy/` (`config.json`, `state/<engine>.json`, `AGENTS.md`, `.agents/hooks.json`) and selected agent skill directories from embedded assets (or symlinks to the repo when using `--build` / `--dev-link`).
+  4. Checks your `$PATH` and prints next steps.
+- **Upgrades**: Re-running `./install.sh` on an existing installation automatically runs `buddy-ctl setup --upgrade`, refreshing managed assets without re-prompting or clobbering your custom edits.
+- **Reconfigure or diagnose anytime**:
+  ```sh
+  buddy-ctl setup                # Re-run the interactive onboarding wizard
+  buddy-ctl setup --only engines # Reconfigure a single section (projects, engines, agents, skills, assets)
+  buddy-ctl doctor               # Diagnose PATH, ~/.buddy/, hooks, skills, roots, engines, and harnesses
+  buddy-ctl doctor --fix         # Automatically repair safe issues
+  ```
+- **Headless / CI installs**: Set `BUDDY_NONINTERACTIVE=1` (or pass `buddy-ctl setup --yes`) along with optional environment variables:
   - `BUDDY_PROJECTS_ROOTS="dir1:dir2"`
-  - `BUDDY_DEFAULT_ENGINE="rex"` (`rex`, `wezterm`, or `t3`)
+  - `BUDDY_DEFAULT_ENGINE="rex"` (`rex`, `wezterm`, `t3`, or `opencode`)
   - `BUDDY_ORCHESTRATOR_AGENT="opencode"`
   - `BUDDY_WORKER_AGENT="agy"`
   - `BUDDY_T3_PROVIDER="antigravity"` and `BUDDY_T3_MODEL="antigravity/gemini-3.8-flash-medium"`
-
-This:
-1. Links `bin/buddy` and `buddy-ctl` -> `~/.local/bin/`
-2. Links `skills/buddy` into:
-   - `~/.agents/skills/buddy`
-   - `~/.gemini/config/skills/buddy`
-   - `~/.gemini/antigravity-cli/skills/buddy`
-   - `~/.pi/agent/skills/buddy`
-   - `~/.config/opencode/skills/buddy`
-3. Initializes `~/.buddy/` (`config.json`, per-engine state under `~/.buddy/state/<engine>.json`, `AGENTS.md` symlinked to `templates/orchestrator-AGENTS.md`, and generated `.agents/hooks.json` from `templates/hooks.json`) with your configured project roots, engine, and agent roles.
+  - `BUDDY_OPENCODE_MODEL="<provider>/<model>"`
 
 ---
 
