@@ -204,3 +204,37 @@ func TestTerminalEngine_Dispatch_PickupVerification(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalEngine_Send_And_Dispatch_PreserveExclamationPrompt(t *testing.T) {
+	fake := &fakeTerminalBackend{}
+	eng := NewTerminalEngine(fake, WithReadinessTimeout(300*time.Millisecond))
+
+	prompt := "Please upgrade the notes to match this look!"
+	if err := eng.Send(context.Background(), "sess_1", "blk_1", backend.Input{
+		Text:  prompt,
+		Enter: true,
+	}); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if fake.lastSentText != prompt {
+		t.Errorf("Send lastSentText = %q, want %q", fake.lastSentText, prompt)
+	}
+
+	fake.lastSentText = ""
+	res, err := eng.Dispatch(context.Background(), DispatchRequest{
+		ProjectName: "my-project",
+		ProjectPath: "/cwd",
+		TaskSlug:    "feat-exclaim",
+		Prompt:      prompt,
+		AgentCmd:    []string{"opencode"},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch failed: %v", err)
+	}
+	if fake.lastSentText != prompt {
+		t.Errorf("Dispatch lastSentText = %q, want %q", fake.lastSentText, prompt)
+	}
+	if !res.PickedUp {
+		t.Errorf("expected Dispatch with '!' prompt to be picked up, got false (reason: %s)", res.PickupReason)
+	}
+}

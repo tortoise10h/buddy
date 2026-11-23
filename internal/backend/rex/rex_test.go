@@ -2,8 +2,11 @@ package rex
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tortoise10h/buddy/internal/backend"
 )
 
 func TestRexBackend_Name(t *testing.T) {
@@ -104,5 +107,116 @@ func TestRexBackend_GetProgramStatus(t *testing.T) {
 	}
 	if recs[1].State != "blocked" || recs[1].Kind != "question" || recs[1].Msg != "Which port?" {
 		t.Errorf("unexpected second record: %+v", recs[1])
+	}
+}
+
+func TestWrapBracketedPaste(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "empty string unchanged",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "wraps text containing exclamation mark",
+			in:   "Please upgrade the notes to match this look!",
+			want: "\x1b[200~Please upgrade the notes to match this look!\x1b[201~",
+		},
+		{
+			name: "wraps multiline text",
+			in:   "line 1!\nline 2",
+			want: "\x1b[200~line 1!\nline 2\x1b[201~",
+		},
+		{
+			name: "does not double wrap",
+			in:   "\x1b[200~already wrapped!\x1b[201~",
+			want: "\x1b[200~already wrapped!\x1b[201~",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wrapBracketedPaste(tc.in); got != tc.want {
+				t.Errorf("wrapBracketedPaste(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRexBackend_Send(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     backend.Input
+		wantCalls [][]string
+	}{
+		{
+			name: "wraps text with exclamation mark in bracketed paste and sends enter",
+			input: backend.Input{
+				Text:  "Please upgrade the notes to match this look!",
+				Enter: true,
+			},
+			wantCalls: [][]string{
+				{"send", "-s", "sess_1", "-b", "blk_1", "\x1b[200~Please upgrade the notes to match this look!\x1b[201~"},
+				{"send-key", "-s", "sess_1", "-b", "blk_1", "enter"},
+			},
+		},
+		{
+			name: "avoids double wrapping already bracketed paste text",
+			input: backend.Input{
+				Text:  "\x1b[200~!echo hi\x1b[201~",
+				Enter: true,
+			},
+			wantCalls: [][]string{
+				{"send", "-s", "sess_1", "-b", "blk_1", "\x1b[200~!echo hi\x1b[201~"},
+				{"send-key", "-s", "sess_1", "-b", "blk_1", "enter"},
+			},
+		},
+		{
+			name: "no-enter skips enter key",
+			input: backend.Input{
+				Text:  "multiline!\nprompt",
+				Enter: false,
+			},
+			wantCalls: [][]string{
+				{"send", "-s", "sess_1", "-b", "blk_1", "\x1b[200~multiline!\nprompt\x1b[201~"},
+			},
+		},
+		{
+			name: "key-only skips rex send and bracketed paste",
+			input: backend.Input{
+				Key: "ctrl+c",
+			},
+			wantCalls: [][]string{
+				{"send-key", "-s", "sess_1", "-b", "blk_1", "ctrl+c"},
+			},
+		},
+		{
+			name:      "empty input makes no calls",
+			input:     backend.Input{},
+			wantCalls: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			runner := func(ctx context.Context, name string, args ...string) (string, error) {
+				calls = append(calls, append([]string(nil), args...))
+				return "", nil
+			}
+
+			b := NewRexBackend(WithRunner(runner))
+			if err := b.Send(context.Background(), "sess_1", "blk_1", tc.input); err != nil {
+				t.Fatalf("Send failed: %v", err)
+			}
+
+			if !reflect.DeepEqual(calls, tc.wantCalls) {
+				t.Errorf("calls = %#v, want %#v", calls, tc.wantCalls)
+			}
+		})
 	}
 }

@@ -273,9 +273,25 @@ func (r *RexBackend) Capture(ctx context.Context, sessionID, blockID string, lin
 	return strings.Join(allLines, "\n"), nil
 }
 
+const (
+	bracketedPasteStart = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
+func wrapBracketedPaste(text string) string {
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, bracketedPasteStart) && strings.HasSuffix(text, bracketedPasteEnd) {
+		return text
+	}
+	return bracketedPasteStart + text + bracketedPasteEnd
+}
+
 func (r *RexBackend) Send(ctx context.Context, sessionID, blockID string, input backend.Input) error {
 	if input.Text != "" {
-		if _, err := r.runRex(ctx, "send", "-s", sessionID, "-b", blockID, input.Text); err != nil {
+		payload := wrapBracketedPaste(input.Text)
+		if _, err := r.runRex(ctx, "send", "-s", sessionID, "-b", blockID, payload); err != nil {
 			return err
 		}
 	}
