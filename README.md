@@ -43,7 +43,6 @@ Buddy routes execution through pluggable engines, each with its own isolated sta
 | Engine | Type | Highlights | Docs |
 | :--- | :--- | :--- | :--- |
 | **`rex`** | Terminal multiplexer *(default)* | Manages Rex sessions, task tabs, side-by-side dev demo panes, and live TUI probing. | — |
-| **`wezterm`** | Terminal multiplexer | Manages WezTerm sessions, tabs, and panes with configurable terminal agent harnesses. | — |
 | **`opencode`** | Desktop / HTTP-SSE server | Connects directly to OpenCode's shared local background server (`opencode serve --service`) so dispatched sessions appear live in OpenCode Desktop. | [OpenCode Desktop Guide](docs/opencode-desktop.md) |
 | **`t3`** | CLI thread engine | Drives the local `t3` CLI to register projects, start/message threads, and monitor thread status. | — |
 
@@ -101,7 +100,7 @@ For automated or CI installs, run with `BUDDY_NONINTERACTIVE=1 ./install.sh` (or
 
 ## Quick Start
 
-### Terminal Engines (`rex` / `wezterm`)
+### Terminal Engine (`rex`)
 
 Launch Buddy from any terminal tab—it automatically starts your configured orchestrator agent with working directory `~/.buddy/`:
 
@@ -141,7 +140,7 @@ See [docs/opencode-desktop.md](docs/opencode-desktop.md) for full details.
 ```sh
 buddy-ctl engine                    # See detected host and active engine
 buddy-ctl status --engine opencode  # Target a specific engine for one command
-BUDDY_ENGINE=wezterm buddy-ctl status  # Override via environment variable
+BUDDY_ENGINE=rex buddy-ctl status   # Override via environment variable
 ```
 
 ---
@@ -221,7 +220,7 @@ Buddy's configuration (`~/.buddy/config.json`) separates **who coordinates** fro
 
 - **Orchestrator**: The single agent session you talk to in `~/.buddy/`. Its job is high-level coordination—understanding your goals, triaging requests, relaying questions, and surfacing results. It never modifies project files directly.
 - **Worker Agent & Engine Backend**: The isolated coding session that actually reads files, writes code, and runs tests inside a project directory.
-  - On **terminal engines** (`rex`, `wezterm`), you can independently configure the `orchestrator_agent` and `worker_agent` harnesses (for example, using `opencode` as your orchestrator while dispatching `agy` or `pi` workers), and override either the `--agent` or `--model` on any task.
+  - On **terminal engines** (such as `rex`), you can independently configure the `orchestrator_agent` and `worker_agent` harnesses (for example, using `opencode` as your orchestrator while dispatching `agy` or `pi` workers), and override either the `--agent` or `--model` on any task.
   - On **desktop/API engines** (`opencode`, `t3`), the app or CLI itself hosts the session while Buddy configures the target provider, model, or agent mode for dispatched worker threads.
 
 You can adjust these roles anytime through `buddy-ctl setup` or `buddy-ctl config set`.
