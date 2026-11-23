@@ -314,8 +314,12 @@ func (r *RexBackend) Close(ctx context.Context, sessionID, windowID string) erro
 }
 
 func (r *RexBackend) Focus(ctx context.Context, sessionID, windowID string) error {
-	_, _ = r.runRex(ctx, "window", "focus", "-s", sessionID, windowID)
-	_, err := r.runRex(ctx, "focus", windowID)
+	args := []string{"focus"}
+	if sessionID != "" {
+		args = append(args, "-s", sessionID)
+	}
+	args = append(args, windowID)
+	_, err := r.runRex(ctx, args...)
 	return err
 }
 

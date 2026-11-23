@@ -2,6 +2,7 @@ package rex
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -212,6 +213,64 @@ func TestRexBackend_Send(t *testing.T) {
 			b := NewRexBackend(WithRunner(runner))
 			if err := b.Send(context.Background(), "sess_1", "blk_1", tc.input); err != nil {
 				t.Fatalf("Send failed: %v", err)
+			}
+
+			if !reflect.DeepEqual(calls, tc.wantCalls) {
+				t.Errorf("calls = %#v, want %#v", calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestRexBackend_Focus(t *testing.T) {
+	tests := []struct {
+		name      string
+		sessionID string
+		windowID  string
+		runErr    error
+		wantCalls [][]string
+		wantErr   bool
+	}{
+		{
+			name:      "scopes focus with -s when sessionID is provided",
+			sessionID: "session:01a206f8-bfcc-72c6-94d4-66beee386f48",
+			windowID:  "window:01a206f8-c00d-7b00-8211-b8f0970bfb37",
+			wantCalls: [][]string{
+				{"focus", "-s", "session:01a206f8-bfcc-72c6-94d4-66beee386f48", "window:01a206f8-c00d-7b00-8211-b8f0970bfb37"},
+			},
+		},
+		{
+			name:      "omits -s when sessionID is empty",
+			sessionID: "",
+			windowID:  "window:01a206f8-c00d-7b00-8211-b8f0970bfb37",
+			wantCalls: [][]string{
+				{"focus", "window:01a206f8-c00d-7b00-8211-b8f0970bfb37"},
+			},
+		},
+		{
+			name:      "propagates error from rex focus",
+			sessionID: "sess_1",
+			windowID:  "win_missing",
+			runErr:    errors.New("rex command failed (exit 3)"),
+			wantCalls: [][]string{
+				{"focus", "-s", "sess_1", "win_missing"},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			runner := func(ctx context.Context, name string, args ...string) (string, error) {
+				calls = append(calls, append([]string(nil), args...))
+				return "", tc.runErr
+			}
+
+			b := NewRexBackend(WithRunner(runner))
+			err := b.Focus(context.Background(), tc.sessionID, tc.windowID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Focus() error = %v, wantErr %v", err, tc.wantErr)
 			}
 
 			if !reflect.DeepEqual(calls, tc.wantCalls) {
