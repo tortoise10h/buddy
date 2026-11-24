@@ -220,10 +220,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	// Notifications default: false on fresh interactive setup (Step 4 default); preserve on upgrade
 	notificationsDefault := false
-	if opts.Upgrade && existingCfg != nil && existingCfg.Notifications != nil {
-		if v, ok := existingCfg.Notifications["desktop_enabled"].(bool); ok {
-			notificationsDefault = v
-		}
+	if opts.Upgrade && existingCfg != nil {
+		notificationsDefault = existingCfg.DesktopNotificationsEnabled()
 	}
 
 	formState := &ConfigFormState{
@@ -402,12 +400,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		pathWarning = fmt.Sprintf("~/.local/bin is not in your PATH. Add it to %s:\n  export PATH=\"$HOME/.local/bin:$PATH\"", shellRC)
 	}
 
-	notifEnabled := false
-	if cfg.Notifications != nil {
-		if v, ok := cfg.Notifications["desktop_enabled"].(bool); ok {
-			notifEnabled = v
-		}
-	}
+	notifEnabled := cfg.DesktopNotificationsEnabled()
 
 	res := &Result{
 		Status:               "ok",

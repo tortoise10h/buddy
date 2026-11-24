@@ -1966,3 +1966,115 @@ func TestReconcileAndWatch_OpenCodeUnsubmittedPaste(t *testing.T) {
 		}
 	})
 }
+
+func TestWatch_NotificationConfigAndFlagPrecedence(t *testing.T) {
+	cases := []struct {
+		name          string
+		configEnabled bool
+		configSound   string
+		extraArgs     []string
+		wantNotifs    int
+		wantSound     string
+	}{
+		{
+			name:          "default config off and no flag sends zero notifications",
+			configEnabled: false,
+			configSound:   "Glass",
+			extraArgs:     nil,
+			wantNotifs:    0,
+		},
+		{
+			name:          "config enabled and no flag sends notification with configured sound",
+			configEnabled: true,
+			configSound:   "Ping",
+			extraArgs:     nil,
+			wantNotifs:    1,
+			wantSound:     "Ping",
+		},
+		{
+			name:          "explicit --notify flag overrides config disabled",
+			configEnabled: false,
+			configSound:   "Glass",
+			extraArgs:     []string{"--notify"},
+			wantNotifs:    1,
+			wantSound:     "Glass",
+		},
+		{
+			name:          "explicit --notify=false flag overrides config enabled",
+			configEnabled: true,
+			configSound:   "Glass",
+			extraArgs:     []string{"--notify=false"},
+			wantNotifs:    0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAllHostSignals(t)
+			tmpDir := t.TempDir()
+			t.Setenv("BUDDY_DIR", tmpDir)
+
+			cfg := config.DefaultConfig()
+			cfg.Notifications["desktop_enabled"] = tc.configEnabled
+			cfg.Notifications["sound"] = tc.configSound
+			if err := config.SaveConfig(cfg); err != nil {
+				t.Fatalf("SaveConfig failed: %v", err)
+			}
+
+			recorder := &notificationRecorder{}
+			notifyFn = recorder.Record
+			defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+			mockBackend := &mockWatchBackend{
+				captures: []string{"Task complete: all tests pass"},
+			}
+			getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+			_ = state.MutateStateForEngine("rex", func(s *state.State) error {
+				s.RecordTask("proj-notif", filepath.Join(tmpDir, "proj-notif"), "sess_notif", "proj-notif", state.TaskState{
+					TaskSlug:     "task-notif",
+					Engine:       "rex",
+					AgentBlockID: "blk_notif",
+					Agent:        "agy",
+					Status:       "running",
+				})
+				return nil
+			})
+
+			args := []string{
+				"--engine", "rex",
+				"--project", "proj-notif",
+				"--task", "task-notif",
+				"--interval", "0",
+				"--timeout", "1",
+				"--debounce", "1",
+			}
+			args = append(args, tc.extraArgs...)
+
+			buf := new(bytes.Buffer)
+			cmd := newWatchCmd()
+			cmd.SetOut(buf)
+			cmd.SetErr(buf)
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("watch execute failed: %v", err)
+			}
+
+			var resp map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid watch JSON: %v\nraw: %s", err, buf.String())
+			}
+			if resp["event"] != "ready_for_demo" {
+				t.Fatalf("watch event = %v, want ready_for_demo", resp["event"])
+			}
+
+			notifs := recorder.All()
+			if len(notifs) != tc.wantNotifs {
+				t.Fatalf("recorded notifications = %d, want %d", len(notifs), tc.wantNotifs)
+			}
+			if tc.wantNotifs == 1 && notifs[0].sound != tc.wantSound {
+				t.Errorf("notification sound = %q, want %q", notifs[0].sound, tc.wantSound)
+			}
+		})
+	}
+}

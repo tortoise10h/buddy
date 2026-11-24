@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/backend"
+	"github.com/tortoise10h/buddy/internal/config"
 	"github.com/tortoise10h/buddy/internal/engine"
 	"github.com/tortoise10h/buddy/internal/notify"
 	"github.com/tortoise10h/buddy/internal/state"
@@ -445,6 +446,7 @@ type watchRunner struct {
 	timeout       time.Duration
 	debounceCount int
 	notifyEnabled bool
+	notifySound   string
 	untilSet      map[string]bool
 
 	startTime       time.Time
@@ -481,6 +483,7 @@ func newWatchRunner(cmd *cobra.Command, projectName, taskSlug string, watchAll b
 		timeout:         time.Duration(timeoutSec) * time.Second,
 		debounceCount:   debounceCount,
 		notifyEnabled:   notifyEnabled,
+		notifySound:     "Glass",
 		untilSet:        untilSet,
 		startTime:       time.Now(),
 		sawWorking:      make(map[string]bool),
@@ -879,7 +882,7 @@ func (w *watchRunner) pollTarget(target watchTarget) (*watchEvent, error) {
 
 func (w *watchRunner) emitEvent(ev watchEvent) error {
 	if !ev.alreadyReported && w.notifyEnabled {
-		notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", ev.project, ev.task, ev.event), ev.summary, "Glass", true)
+		notifyFn("Buddy Watchdog", fmt.Sprintf("%s/%s (%s)", ev.project, ev.task, ev.event), ev.summary, w.notifySound, true)
 	}
 	resp := map[string]any{
 		"event":           ev.event,
@@ -939,7 +942,16 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 			if !watchAll && projectName == "" {
 				return fmt.Errorf("provide --project (optionally with --task), or use --all to monitor all active tasks")
 			}
-			runner := newWatchRunner(cmd, projectName, taskSlug, watchAll, intervalSec, timeoutSec, debounceCount, untilEvents, notifyEnabled)
+			cfg, err := config.LoadConfig()
+			if err != nil {
+				cfg = config.DefaultConfig()
+			}
+			effectiveNotify := cfg.DesktopNotificationsEnabled()
+			if cmd.Flags().Changed("notify") {
+				effectiveNotify = notifyEnabled
+			}
+			runner := newWatchRunner(cmd, projectName, taskSlug, watchAll, intervalSec, timeoutSec, debounceCount, untilEvents, effectiveNotify)
+			runner.notifySound = cfg.NotificationSound()
 			runner.engineName = resolveActiveEngine(engineName)
 			return runner.run()
 		},
@@ -953,7 +965,7 @@ Filters TUI chrome and verifies event stability across debounced polls before re
 	cmd.Flags().IntVar(&timeoutSec, "timeout", 600, "Timeout in seconds")
 	cmd.Flags().IntVar(&debounceCount, "debounce", 2, "Number of consecutive stable polls required to confirm an event")
 	cmd.Flags().StringVar(&untilEvents, "until", "input,demo,done,error,missing", "Comma-separated events to wait for")
-	cmd.Flags().BoolVar(&notifyEnabled, "notify", true, "Send desktop notification on trigger")
+	cmd.Flags().BoolVar(&notifyEnabled, "notify", false, "Send desktop notification on trigger (defaults to config notifications.desktop_enabled)")
 
 	return cmd
 }
