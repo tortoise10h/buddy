@@ -249,7 +249,7 @@ next_action: "<1-line instruction for parent/user>"
 | `buddy-ctl task clean` | `-p <proj> -t <slug> [--reason "..."] [--close] [--force] [--all-closed] [--prune-empty-project] [--dry-run]` — Remove closed task from active state and append audit record to `~/.buddy/history/tasks.jsonl` (`--force` requires explicit user consent). |
 | `buddy-ctl task history` | `[-p <proj>] [-t <slug>] [--engine <eng>] [--since 7d] [--limit 20] [--json]` — Query append-only task cleanup history, newest first. |
 | `buddy-ctl status` | `[--sync] [--no-sync] [--format json\|table\|brief] [--engine <eng>]` — View tracked projects, tasks, and `untracked_windows` (auto-syncs if Rex cache >45s old unless `--no-sync`). |
-| `buddy-ctl watch` | `[--project <P> --task <T>] \| [--project <P>] \| [--all] [--interval 5] [--timeout 600] [--debounce 2] [--notify]` — Block until a watched task hits `waiting_for_input`, `ready_for_demo`, or `error`. |
+| `buddy-ctl watch` | `[--project <P> --task <T>] \| [--project <P>] \| [--all] [--interval 5] [--timeout 600] [--debounce 2] [--notify]` — Block until a watched task hits `waiting_for_input`, `ready_for_demo`, or `error` (desktop alerts follow `notifications.desktop_enabled`, off by default; pass `--notify` to force on). |
 | `buddy-ctl send` | `-p <proj> -t <slug> (--text "<msg>" \| --key <key>)` — Send text (+ Enter) or special key (`enter`, `esc`, `ctrl+c`), transitioning task back to `running`. |
 | `buddy-ctl capture` | `-p <proj> -t <slug> [--lines 120]` — Capture recent terminal output lines from worker block. |
 | `buddy-ctl diagnose` | `-p <proj> -t <slug> [--lines 300]` — Extract structured error blocks, stack traces, and recent commands. |
@@ -258,7 +258,7 @@ next_action: "<1-line instruction for parent/user>"
 | `buddy-ctl batch` | `--json '[...]' \| --file <path>` — Dispatch multiple tasks across projects in one call (each item supports `project`, `task`, `prompt`, optional `agent`, `model`, `engine`). |
 | `buddy-ctl projects` | `[--query <q>] \| roots \| add-root <path> \| remove-root <path>` — Discover repositories and manage project roots. |
 | `buddy-ctl config` | `show \| set <key> <val>` — Inspect or update `~/.buddy/config.json`. |
-| `buddy-ctl notify` | `-m "<msg>" [--title "..."] [--subtitle "..."] [--sound Glass]` — Trigger macOS desktop alert. |
+| `buddy-ctl notify` | `-m "<msg>" [--title "..."] [--subtitle "..."] [--sound Glass] [--no-sound] [--force]` — Trigger macOS desktop alert (follows `notifications.desktop_enabled`, off by default; pass `--force` to override). |
 
 ### Key JSON Response Payloads
 

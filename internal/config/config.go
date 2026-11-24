@@ -63,7 +63,7 @@ func DefaultConfig() *Config {
 		ProjectsRoots:        []string{defaultProjectRoot},
 		UseWorktreeByDefault: false,
 		Notifications: map[string]any{
-			"desktop_enabled":          true,
+			"desktop_enabled":          false,
 			"sound":                    "Glass",
 			"auto_watchdog":            true,
 			"watchdog_mode":            "all",
@@ -205,6 +205,29 @@ func (c *Config) GetEngineConfig(engineName string) EngineConfig {
 		return EngineConfig{}
 	}
 	return c.Engines[engineName]
+}
+
+// DesktopNotificationsEnabled reports whether macOS desktop notifications are enabled in config.
+// Defaults to false unless explicitly set to true under notifications.desktop_enabled.
+func (c *Config) DesktopNotificationsEnabled() bool {
+	if c == nil || c.Notifications == nil {
+		return false
+	}
+	v, ok := c.Notifications["desktop_enabled"].(bool)
+	return ok && v
+}
+
+// NotificationSound returns the configured notification sound name.
+// Returns "" when explicitly silenced in config, and defaults to "Glass" when unset.
+func (c *Config) NotificationSound() string {
+	if c == nil || c.Notifications == nil {
+		return "Glass"
+	}
+	v, ok := c.Notifications["sound"].(string)
+	if !ok {
+		return "Glass"
+	}
+	return v
 }
 
 func boolPtr(v bool) *bool {

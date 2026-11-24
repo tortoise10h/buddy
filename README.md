@@ -55,7 +55,7 @@ Buddy routes execution through pluggable engines, each with its own isolated sta
 | **O(1) Local State Cache & Audit Log** | Tracks active projects, tabs, and threads per engine for sub-50ms status checks, and archives cleaned tasks to `~/.buddy/history/tasks.jsonl`. |
 | **Zero-Bloat Context Injection** | Injects live task status transiently on each turn via a `PreInvocation` hook and discards it afterward so chat history stays lean. |
 | **Confidence-Gated Tab Reuse** | Automatically reuses matching tabs, asks before duplicating ambiguous work, and creates fresh tabs for distinct tasks. |
-| **Background Watchdog & Alerts** | Monitors active workers asynchronously in a subagent and notifies you (including macOS desktop alerts) when input is needed or work completes. |
+| **Background Watchdog & Alerts** | Monitors active workers asynchronously in a subagent and alerts you when input is needed or work completes (optional macOS desktop notifications, off by default). |
 | **Live Reconciliation & Tab Adoption** | Treats live panes/threads as the source of truth and lets Buddy adopt sessions you started manually outside Buddy. |
 | **Flexible Agent & Model Routing** | Mix and match orchestrator vs. worker harnesses (`agy`, `opencode`, `pi`, `claude`, `codex`, `cursor`, `gemini`), discover models, and override `--model` per task. |
 | **Multi-Repo Batching & Live Demos** | Dispatch tasks across multiple repositories in parallel (`batch`) and launch side-by-side dev servers (`demo`) or focus any session (`focus`). |
@@ -266,9 +266,9 @@ While Buddy calls `buddy-ctl` automatically on your behalf, you can also run any
 | `buddy-ctl send` | Relay text or a keypress to an active worker (`-p`, `-t`, `--text`, `--key`) |
 | `buddy-ctl focus` | Focus a worker tab or session (`-p`, `-t`) |
 | `buddy-ctl demo` | Open a side-by-side dev server pane next to a worker (`-p`, `-t`, `--cmd`, `--focus-only`) |
-| `buddy-ctl watch` | Poll task(s) until input, demo, completion, or error (`-p`, `-t`, `--all`, `--interval`, `--timeout`) |
+| `buddy-ctl watch` | Poll task(s) until input, demo, completion, or error (`-p`, `-t`, `--all`, `--interval`, `--timeout`, `--notify`) |
 | `buddy-ctl diagnose` | Extract error snippets and failure context from worker output (`-p`, `-t`, `--lines`) |
-| `buddy-ctl notify` | Send a macOS desktop notification (`--title`, `--message`) |
+| `buddy-ctl notify` | Send a macOS desktop notification when enabled in config or with `--force` (`--title`, `--message`, `--force`) |
 
 ### Common Examples
 
@@ -290,6 +290,9 @@ buddy-ctl demo -p docnotate -t perf-fix --cmd "npm run dev"
 buddy-ctl watch --all --interval 5 --timeout 600
 buddy-ctl task adopt -p docnotate -w manual-refactor
 buddy-ctl task clean --all-closed --reason "merged"
+
+# Optional: opt in to macOS desktop notifications (off by default)
+buddy-ctl config set notifications.desktop_enabled true
 ```
 
 ---

@@ -178,3 +178,51 @@ func TestLoadConfig_BackfillsBuiltInModelMetadata(t *testing.T) {
 		t.Fatalf("expected opencode model_command to be backfilled, got %+v", cfg.Agents["opencode"])
 	}
 }
+
+func TestConfig_DesktopNotificationsDefaultOffAndOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	// Fresh default config disables desktop notifications.
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfg.DesktopNotificationsEnabled() {
+		t.Fatalf("expected DesktopNotificationsEnabled()=false by default")
+	}
+	if got := cfg.NotificationSound(); got != "Glass" {
+		t.Fatalf("NotificationSound() = %q, want Glass", got)
+	}
+
+	// Explicit opt-in via SetPath persists and enables desktop notifications.
+	if err := cfg.SetPath("notifications.desktop_enabled", true); err != nil {
+		t.Fatalf("SetPath desktop_enabled failed: %v", err)
+	}
+	if err := cfg.SetPath("notifications.sound", ""); err != nil {
+		t.Fatalf("SetPath sound failed: %v", err)
+	}
+
+	reloaded, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("reloaded LoadConfig failed: %v", err)
+	}
+	if !reloaded.DesktopNotificationsEnabled() {
+		t.Fatalf("expected DesktopNotificationsEnabled()=true after opting in")
+	}
+	if got := reloaded.NotificationSound(); got != "" {
+		t.Fatalf("NotificationSound() = %q, want empty string when explicitly silenced", got)
+	}
+
+	// Missing notifications block in config.json still defaults to disabled.
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), []byte(`{"version": 2}`), 0644); err != nil {
+		t.Fatalf("write minimal config failed: %v", err)
+	}
+	minimal, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig minimal failed: %v", err)
+	}
+	if minimal.DesktopNotificationsEnabled() {
+		t.Fatalf("expected minimal config without notifications to default to disabled")
+	}
+}

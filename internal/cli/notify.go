@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/config"
-	"github.com/tortoise10h/buddy/internal/notify"
 )
 
 func newNotifyCmd() *cobra.Command {
@@ -15,36 +14,42 @@ func newNotifyCmd() *cobra.Command {
 		message  string
 		sound    string
 		noSound  bool
+		force    bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "notify",
-		Short: "Send native macOS desktop notification",
+		Short: "Send native macOS desktop notification (when enabled in config or with --force)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.LoadConfig()
 			if err != nil {
 				cfg = config.DefaultConfig()
 			}
 
-			soundName := sound
+			soundName := cfg.NotificationSound()
+			if cmd.Flags().Changed("sound") {
+				soundName = sound
+			}
 			if noSound {
 				soundName = ""
 			}
 
-			sent := notify.SendDesktopNotification(title, subtitle, message, soundName, true)
+			enabled := force || cfg.DesktopNotificationsEnabled()
 
 			resp := map[string]any{
-				"status":   "failed_or_disabled",
+				"status":   "disabled",
 				"title":    title,
 				"subtitle": subtitle,
 				"message":  message,
 				"sound":    soundName,
 			}
-			if sent {
+			if !enabled {
+				resp["reason"] = "desktop notifications are disabled in config (enable via 'buddy-ctl config set notifications.desktop_enabled true' or pass --force)"
+			} else if notifyFn(title, subtitle, message, soundName, true) {
 				resp["status"] = "sent"
+			} else {
+				resp["status"] = "failed_or_disabled"
 			}
-
-			_ = cfg // cfg can be referenced if needed for config overrides
 
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
@@ -55,8 +60,9 @@ func newNotifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&title, "title", "Buddy Orchestrator", "Notification title")
 	cmd.Flags().StringVar(&subtitle, "subtitle", "", "Notification subtitle")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Notification message body")
-	cmd.Flags().StringVar(&sound, "sound", "Glass", "Sound effect name")
+	cmd.Flags().StringVar(&sound, "sound", "Glass", "Sound effect name (defaults to config notifications.sound)")
 	cmd.Flags().BoolVar(&noSound, "no-sound", false, "Disable audio chime")
+	cmd.Flags().BoolVar(&force, "force", false, "Send notification even when notifications.desktop_enabled is false")
 
 	return cmd
 }
