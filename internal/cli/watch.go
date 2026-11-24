@@ -29,7 +29,7 @@ var (
 	inputQuestionRe     = regexp.MustCompile(`(?i)^(?:(?:\[\?\]|\?)\s+.*|\s*(?:do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|what\s+would\s+you\s+like|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|clarification\s+needed|approval\s+needed|proceed\s*\?).*|.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\)).*$)`)
 	questionSentenceRe  = regexp.MustCompile(`(?i)^(?:which|what|how|where|when|who|should|can|could|would|do|does|did|is|are|will|may|shall)\s+.*\?$`)
 
-	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
+	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel|esc\s+(?:again\s+to\s+)?interrupt)`)
 
 	idlePromptLineRe = regexp.MustCompile(`(?i)^(?:[>❯›]\s*(?:type a message|ask anything)?|type a message|ask anything)\s*$`)
 
@@ -100,6 +100,8 @@ func isChromeLine(line string) bool {
 	lower := strings.ToLower(trimmed)
 	if strings.Contains(lower, "? for shortcuts") ||
 		strings.Contains(lower, "esc to cancel") ||
+		strings.Contains(lower, "esc interrupt") ||
+		strings.Contains(lower, "esc again to interrupt") ||
 		strings.Contains(lower, "esc to dismiss") ||
 		strings.Contains(lower, "press enter to dismiss") ||
 		strings.Contains(lower, "ctrl+o to expand") ||

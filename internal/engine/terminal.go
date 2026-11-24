@@ -25,7 +25,7 @@ var readinessIndicators = []string{
 
 var promptLineRe = regexp.MustCompile(`(?m)^[>❯]\s*$`)
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\].*?(?:\x07|\x1b\\)|\x1b[@-Z\\-_]`)
-var workingActivityRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
+var workingActivityRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel|esc\s+(?:again\s+to\s+)?interrupt)`)
 var onboardingOverlayRe = regexp.MustCompile(`(?i)(?:esc\s+to\s+dismiss|press\s+enter\s+to\s+dismiss|auto\s+mode:\s+edits\s+&\s+safe\s+commands\s+auto-approved)`)
 var unsubmittedPasteTokenRe = regexp.MustCompile(`(?i)\[pasted(?:\s+text)?(?:\s+#\d+)?\s+[~+]?\d+\+?\s+lines?\]`)
 var unsubmittedPasteLineRe = regexp.MustCompile(`(?i)^(?:\[pasted(?:\s+text)?(?:\s+#\d+)?\s+[~+]?\d+\+?\s+lines?\]\s*)+$`)

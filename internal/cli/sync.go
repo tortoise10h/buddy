@@ -82,7 +82,9 @@ func hasAgentChromeIndicators(raw string) bool {
 		strings.Contains(lower, "ctrl+p commands") ||
 		strings.Contains(lower, "thought for") ||
 		strings.Contains(lower, "running command") ||
-		strings.Contains(lower, "esc to cancel")
+		strings.Contains(lower, "esc to cancel") ||
+		strings.Contains(lower, "esc interrupt") ||
+		strings.Contains(lower, "esc again to interrupt")
 }
 
 // probeLiveBlockStatus inspects a terminal block via native OSC 7501 program_status

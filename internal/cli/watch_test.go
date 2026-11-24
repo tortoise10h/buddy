@@ -1790,6 +1790,16 @@ func TestReconcileAndWatch_OpenCodeUnsubmittedPaste(t *testing.T) {
 		"  ⊙ 2 MCP /mcps                                                            2.3.2",
 	}, "\n")
 
+	openCodeRunningPane := strings.Join([]string{
+		"Reconciling localStorage owned note IDs...",
+		"┃",
+		"┃  Ask anything...",
+		"┃",
+		"╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+		"■ esc interrupt   …/board-resolution  shift+tab agents  ctrl+p commands",
+		"⊙ 2 MCP /mcps                                      2.3.2",
+	}, "\n")
+
 	openCodeCompletedPane := strings.Join([]string{
 		"Reconciled localStorage owned note IDs with server ownership.",
 		"All 24 unit tests pass.",
@@ -1812,11 +1822,13 @@ func TestReconcileAndWatch_OpenCodeUnsubmittedPaste(t *testing.T) {
 			windowsBySession: map[string][]backend.WindowInfo{
 				"sess_oc": {
 					{WindowID: "win_unsub", Label: "owned-note-reconcile", SessionID: "sess_oc", BlockIDs: []string{"blk_unsub"}},
+					{WindowID: "win_run", Label: "note-running", SessionID: "sess_oc", BlockIDs: []string{"blk_run"}},
 					{WindowID: "win_done", Label: "note-tests", SessionID: "sess_oc", BlockIDs: []string{"blk_done"}},
 				},
 			},
 			capturesByBlock: map[string]string{
 				"blk_unsub": openCodeUnsubmittedPane,
+				"blk_run":   openCodeRunningPane,
 				"blk_done":  openCodeCompletedPane,
 			},
 		}
@@ -1831,6 +1843,16 @@ func TestReconcileAndWatch_OpenCodeUnsubmittedPaste(t *testing.T) {
 				Agent:        "opencode",
 				Status:       "running",
 				LastSummary:  "Reconcile localStorage owned note IDs...",
+			})
+			s.RecordTask("board-resolution", filepath.Join(tmpDir, "board-resolution"), "sess_oc", "board-resolution", state.TaskState{
+				TaskSlug:     "note-running",
+				Engine:       "rex",
+				WindowID:     "win_run",
+				WindowLabel:  "note-running",
+				AgentBlockID: "blk_run",
+				Agent:        "opencode",
+				Status:       "running",
+				LastSummary:  "Working on notes",
 			})
 			s.RecordTask("board-resolution", filepath.Join(tmpDir, "board-resolution"), "sess_oc", "board-resolution", state.TaskState{
 				TaskSlug:     "note-tests",
@@ -1867,6 +1889,14 @@ func TestReconcileAndWatch_OpenCodeUnsubmittedPaste(t *testing.T) {
 		}
 		if !strings.Contains(unsubTask.LastSummary, "[Pasted ~19 lines]") {
 			t.Errorf("unsubmitted OpenCode paste summary = %q, want containing [Pasted ~19 lines]", unsubTask.LastSummary)
+		}
+
+		runTask, err := proj.FindTask("note-running")
+		if err != nil {
+			t.Fatalf("FindTask note-running failed: %v", err)
+		}
+		if runTask.Status != "running" {
+			t.Errorf("running OpenCode session with 'esc interrupt' + footer hints status = %q, want running", runTask.Status)
 		}
 
 		doneTask, err := proj.FindTask("note-tests")
