@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tortoise10h/buddy/internal/backend"
@@ -54,7 +55,7 @@ func newSendCmd() *cobra.Command {
 			}
 
 			var recWatch string
-			if text != "" && projName != "" && taskSlug != "" {
+			if (text != "" || strings.EqualFold(strings.TrimSpace(key), "enter")) && projName != "" && taskSlug != "" {
 				var updatedState *state.State
 				_ = state.MutateStateForEngine(engName, func(s *state.State) error {
 					if p, pErr := s.FindProject(projName); pErr == nil {

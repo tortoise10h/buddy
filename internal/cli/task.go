@@ -122,6 +122,15 @@ func newTaskStartCmd() *cobra.Command {
 				initialPrompt = &prompt
 			}
 
+			taskStatus := "running"
+			taskSummary := preview
+			if prompt != "" && !res.PickedUp {
+				taskStatus = "waiting_for_input"
+				if res.PickupReason != "" {
+					taskSummary = res.PickupReason
+				}
+			}
+
 			var updatedState *state.State
 			err = state.MutateStateForEngine(engineName, func(s *state.State) error {
 				s.RecordTask(projName, projPath, res.SessionID, projName, state.TaskState{
@@ -133,10 +142,10 @@ func newTaskStartCmd() *cobra.Command {
 					Agent:         resolved.AgentLabel,
 					Model:         resolved.Model,
 					Cwd:           projPath,
-					Status:        "running",
+					Status:        taskStatus,
 					Origin:        "buddy",
 					InitialPrompt: initialPrompt,
-					LastSummary:   preview,
+					LastSummary:   taskSummary,
 				})
 				updatedState = s
 				return nil

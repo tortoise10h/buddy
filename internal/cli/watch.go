@@ -116,6 +116,10 @@ func isChromeLine(line string) bool {
 		strings.HasPrefix(lower, "welcome to claude") ||
 		strings.HasPrefix(lower, "antigravity v") ||
 		strings.HasPrefix(lower, "opencode v") ||
+		strings.HasPrefix(lower, "/update to install ") ||
+		strings.Contains(lower, "shift+tab agents") ||
+		strings.Contains(lower, "ctrl+p commands") ||
+		strings.Contains(lower, "mcp /mcps") ||
 		strings.Contains(lower, "type a message") ||
 		strings.Contains(lower, "ask anything") {
 		return true
@@ -145,8 +149,20 @@ func isIdlePromptChrome(line string) bool {
 		strings.HasPrefix(lower, "auto ·") ||
 		strings.HasPrefix(lower, "auto •") ||
 		strings.Contains(lower, "auto ·") ||
+		strings.Contains(lower, "shift+tab agents") ||
+		strings.Contains(lower, "ctrl+p commands") ||
 		strings.Contains(lower, "type a message") ||
 		strings.Contains(lower, "ask anything")
+}
+
+func detectUnsubmittedPrompt(raw string) (string, bool) {
+	if pasted := engine.FindUnsubmittedPaste(raw, ""); pasted != "" {
+		return fmt.Sprintf("Prompt pasted (%s) but not submitted", pasted), true
+	}
+	if engine.IsOpenCodeHomeSplash(raw) {
+		return "OpenCode is idle on home/splash screen (prompt not submitted)", true
+	}
+	return "", false
 }
 
 func paneState(raw string) (filtered []string, working bool, idlePrompt bool) {
@@ -767,13 +783,19 @@ func (w *watchRunner) probeTarget(eng engine.Engine, target watchTarget) (workin
 
 	// 2. Fallback: capture pane output and grep/analyze screen text
 	if !nativeHit {
-		out, capErr := eng.Capture(w.cmd.Context(), target.sessionID, target.blockID, 30)
+		out, capErr := eng.Capture(w.cmd.Context(), target.sessionID, target.blockID, 60)
 		if capErr != nil {
 			return false, "", "", "", capErr
 		}
 		filtered, isWorking, idlePrompt := paneState(out)
 		working = isWorking
 		if !working {
+			if unsubmittedSummary, isUnsubmitted := detectUnsubmittedPrompt(out); isUnsubmitted {
+				if w.untilSet["input"] || w.untilSet["any"] {
+					return false, "waiting_for_input", unsubmittedSummary, "unsubmitted:" + unsubmittedSummary, nil
+				}
+				return false, "", "", "", nil
+			}
 			matchedEvent, summary = detectEventWithIdle(filtered, idlePrompt, w.sawWorking[targetKey], w.untilSet)
 			snapshot = strings.Join(filtered, "\n")
 		}

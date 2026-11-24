@@ -158,6 +158,15 @@ func newBatchCmd() *cobra.Command {
 					preview = preview[:60] + "..."
 				}
 
+				taskStatus := "running"
+				taskSummary := preview
+				if spec.Prompt != "" && !res.PickedUp {
+					taskStatus = "waiting_for_input"
+					if res.PickupReason != "" {
+						taskSummary = res.PickupReason
+					}
+				}
+
 				var updatedState *state.State
 				_ = state.MutateStateForEngine(engineName, func(s *state.State) error {
 					var initialPrompt *string
@@ -173,10 +182,10 @@ func newBatchCmd() *cobra.Command {
 						Agent:         resolved.AgentLabel,
 						Model:         resolved.Model,
 						Cwd:           projPath,
-						Status:        "running",
+						Status:        taskStatus,
 						Origin:        "buddy",
 						InitialPrompt: initialPrompt,
-						LastSummary:   preview,
+						LastSummary:   taskSummary,
 					})
 					updatedState = s
 					return nil

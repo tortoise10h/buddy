@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/tortoise10h/buddy/internal/backend"
 )
@@ -16,8 +17,10 @@ import (
 type Runner func(ctx context.Context, name string, args ...string) (string, error)
 
 type RexBackend struct {
-	binPath string
-	runner  Runner
+	binPath             string
+	runner              Runner
+	pasteSubmitDelay    time.Duration
+	pasteSubmitDelaySet bool
 }
 
 func NewRexBackend(opts ...func(*RexBackend)) *RexBackend {
@@ -40,6 +43,15 @@ func WithRunner(r Runner) func(*RexBackend) {
 func WithBinPath(p string) func(*RexBackend) {
 	return func(b *RexBackend) {
 		b.binPath = p
+	}
+}
+
+// WithPasteSubmitDelay overrides the pause inserted between bracketed-paste text delivery
+// and a follow-up key/Enter press in Send. Pass 0 to disable the pause.
+func WithPasteSubmitDelay(d time.Duration) func(*RexBackend) {
+	return func(b *RexBackend) {
+		b.pasteSubmitDelay = d
+		b.pasteSubmitDelaySet = true
 	}
 }
 
@@ -276,6 +288,14 @@ func (r *RexBackend) Capture(ctx context.Context, sessionID, blockID string, lin
 const (
 	bracketedPasteStart = "\x1b[200~"
 	bracketedPasteEnd   = "\x1b[201~"
+
+	// defaultPasteSubmitDelay gives TUI agents time to process short bracketed pastes
+	// asynchronously before the submit key arrives.
+	defaultPasteSubmitDelay = 150 * time.Millisecond
+	// defaultMultilinePasteSubmitDelay gives TUI agents (such as OpenCode's async
+	// attachment resolution and "[Pasted ~N lines]" extmark insertion) enough time to
+	// materialize the pasted prompt before Enter is sent.
+	defaultMultilinePasteSubmitDelay = 500 * time.Millisecond
 )
 
 func wrapBracketedPaste(text string) string {
@@ -288,11 +308,32 @@ func wrapBracketedPaste(text string) string {
 	return bracketedPasteStart + text + bracketedPasteEnd
 }
 
+func (r *RexBackend) pasteSubmitDelayFor(text string) time.Duration {
+	if r.pasteSubmitDelaySet {
+		return r.pasteSubmitDelay
+	}
+	if strings.ContainsAny(text, "\r\n") || len(text) > 150 {
+		return defaultMultilinePasteSubmitDelay
+	}
+	return defaultPasteSubmitDelay
+}
+
 func (r *RexBackend) Send(ctx context.Context, sessionID, blockID string, input backend.Input) error {
 	if input.Text != "" {
 		payload := wrapBracketedPaste(input.Text)
 		if _, err := r.runRex(ctx, "send", "-s", sessionID, "-b", blockID, payload); err != nil {
 			return err
+		}
+		if input.Key != "" || input.Enter {
+			if delay := r.pasteSubmitDelayFor(input.Text); delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
 		}
 	}
 	if input.Key != "" {

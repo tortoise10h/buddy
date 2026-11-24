@@ -15,6 +15,8 @@ var readinessIndicators = []string{
 	"auto ·",
 	"Ask anything",
 	"Type a message",
+	"shift+tab agents",
+	"ctrl+p commands",
 	"Gemini",
 	"OpenCode",
 	"Anthropic",
@@ -25,6 +27,10 @@ var promptLineRe = regexp.MustCompile(`(?m)^[>❯]\s*$`)
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\].*?(?:\x07|\x1b\\)|\x1b[@-Z\\-_]`)
 var workingActivityRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
 var onboardingOverlayRe = regexp.MustCompile(`(?i)(?:esc\s+to\s+dismiss|press\s+enter\s+to\s+dismiss|auto\s+mode:\s+edits\s+&\s+safe\s+commands\s+auto-approved)`)
+var unsubmittedPasteTokenRe = regexp.MustCompile(`(?i)\[pasted(?:\s+text)?(?:\s+#\d+)?\s+[~+]?\d+\+?\s+lines?\]`)
+var unsubmittedPasteLineRe = regexp.MustCompile(`(?i)^(?:\[pasted(?:\s+text)?(?:\s+#\d+)?\s+[~+]?\d+\+?\s+lines?\]\s*)+$`)
+
+const maxUnsubmittedSubmitRetries = 2
 
 // TerminalEngine coordinates the task lifecycle on top of any terminal multiplexer (Rex, WezTerm, Herdr).
 // It manages session resolution, window creation, reactive TUI readiness probing, and prompt delivery.
@@ -147,6 +153,57 @@ func isPromptEchoed(paneText, prompt string) bool {
 	return false
 }
 
+// FindUnsubmittedPaste returns the first collapsed paste placeholder (such as OpenCode's
+// "[Pasted ~19 lines]" or Claude Code's "[Pasted text #1 +19 lines]") sitting unsubmitted
+// inside the pane's input box (tail lines), ignoring any placeholder literally present in prompt.
+func FindUnsubmittedPaste(paneText, prompt string) string {
+	norm := normalizePaneText(paneText)
+	if norm == "" {
+		return ""
+	}
+	rawLines := strings.Split(norm, "\n")
+	nonEmpty := make([]string, 0, len(rawLines))
+	for _, l := range rawLines {
+		if trimmed := strings.TrimSpace(l); trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	start := len(nonEmpty) - 15
+	if start < 0 {
+		start = 0
+	}
+	lowerPrompt := strings.ToLower(prompt)
+	for _, line := range nonEmpty[start:] {
+		inner := strings.TrimSpace(strings.Trim(line, "│┃║| \t"))
+		inner = strings.TrimSpace(strings.TrimLeft(inner, ">❯›"))
+		if inner == "" || !unsubmittedPasteLineRe.MatchString(inner) {
+			continue
+		}
+		for _, m := range unsubmittedPasteTokenRe.FindAllString(inner, -1) {
+			if prompt == "" || !strings.Contains(lowerPrompt, strings.ToLower(m)) {
+				return m
+			}
+		}
+	}
+	return ""
+}
+
+// IsOpenCodeHomeSplash reports whether paneText shows OpenCode's home/splash screen
+// (ASCII block-art banner + OpenCode composer chrome), indicating no session has started yet.
+func IsOpenCodeHomeSplash(paneText string) bool {
+	norm := normalizePaneText(paneText)
+	if norm == "" {
+		return false
+	}
+	if strings.Contains(norm, "█▀▀█ █▀▀█ █▀▀█") && strings.Contains(norm, "▀▀▀▀ █▀▀▀ ▀▀▀▀") {
+		return true
+	}
+	lower := strings.ToLower(norm)
+	hasBlockLogo := strings.Contains(norm, "█▀▀█") && strings.Contains(norm, "▀▀▀▀")
+	hasOpenCodeFooter := strings.Contains(lower, "shift+tab agents") || strings.Contains(lower, "ctrl+p commands")
+	return hasBlockLogo && hasOpenCodeFooter
+}
+
 func (e *TerminalEngine) verifyPickup(ctx context.Context, sessionID, blockID, prompt, preSendCap string) (bool, string) {
 	timeout := e.pickupVerifyTimeout
 	if timeout <= 0 {
@@ -161,6 +218,9 @@ func (e *TerminalEngine) verifyPickup(ctx context.Context, sessionID, blockID, p
 	deadline := time.Now().Add(timeout)
 	var lastCap string
 	first := true
+	submitRetries := 0
+	var lastRetryAt time.Time
+	retryCooldown := 2 * interval
 
 	for {
 		if !first {
@@ -181,22 +241,45 @@ func (e *TerminalEngine) verifyPickup(ctx context.Context, sessionID, blockID, p
 			}
 		}
 
-		capText, err := e.backend.Capture(ctx, sessionID, blockID, 30)
+		capText, err := e.backend.Capture(ctx, sessionID, blockID, 0)
 		if err == nil && capText != "" {
 			lastCap = capText
 			normAfter := normalizePaneText(capText)
 
-			// 1. Prompt text echoed in pane
-			if isPromptEchoed(normAfter, prompt) {
-				return true, ""
-			}
-
-			// 2. Agent entered active working state (spinner / Running command / Thought for / esc to cancel)
+			// 1. Agent entered active working state (spinner / Running command / Thought for / esc to cancel)
 			if workingActivityRe.MatchString(normAfter) {
 				return true, ""
 			}
 
-			// 3. If pre-send capture was non-empty and pane changed meaningfully (not stuck on onboarding overlay)
+			// 2. Guard against unsubmitted paste placeholders (e.g. OpenCode "[Pasted ~19 lines]")
+			// and OpenCode still sitting on the home/splash screen. Retry Enter when text/paste
+			// is visibly sitting in the input box so async paste handlers can still submit.
+			pastedPlaceholder := FindUnsubmittedPaste(normAfter, prompt)
+			onOpenCodeHome := IsOpenCodeHomeSplash(normAfter)
+			if pastedPlaceholder != "" || onOpenCodeHome {
+				shouldRetry := pastedPlaceholder != "" || isPromptEchoed(normAfter, prompt)
+				if shouldRetry && submitRetries < maxUnsubmittedSubmitRetries &&
+					(lastRetryAt.IsZero() || time.Since(lastRetryAt) >= retryCooldown) {
+					if sendErr := e.backend.Send(ctx, sessionID, blockID, backend.Input{Enter: true}); sendErr == nil {
+						submitRetries++
+						lastRetryAt = time.Now()
+						if newDeadline := lastRetryAt.Add(timeout); newDeadline.After(deadline) {
+							deadline = newDeadline
+						}
+					}
+				}
+				if !time.Now().Before(deadline) {
+					break
+				}
+				continue
+			}
+
+			// 3. Prompt text echoed in pane
+			if isPromptEchoed(normAfter, prompt) {
+				return true, ""
+			}
+
+			// 4. If pre-send capture was non-empty and pane changed meaningfully (not stuck on onboarding overlay)
 			if normBefore != "" && normAfter != normBefore && !onboardingOverlayRe.MatchString(normAfter) {
 				return true, ""
 			}
@@ -210,6 +293,12 @@ func (e *TerminalEngine) verifyPickup(ctx context.Context, sessionID, blockID, p
 	normLast := normalizePaneText(lastCap)
 	if normLast == "" {
 		return false, "pane output is empty after sending prompt"
+	}
+	if pasted := FindUnsubmittedPaste(normLast, prompt); pasted != "" {
+		return false, fmt.Sprintf("pasted prompt (%s) remained unsubmitted in input box", pasted)
+	}
+	if IsOpenCodeHomeSplash(normLast) {
+		return false, "OpenCode remained on the home/splash screen (prompt was not submitted)"
 	}
 	if onboardingOverlayRe.MatchString(normLast) {
 		return false, "agent onboarding modal ('esc to dismiss') is still active and swallowed or blocked the prompt"
