@@ -705,3 +705,90 @@ func TestDispatchAndTaskStart_CustomModelSelection(t *testing.T) {
 		t.Fatalf("expected conflicting --agent/--model error, got: %v", err)
 	}
 }
+
+func TestDispatch_OpenCodeUnsubmittedPaste_ReportsPickupFalseAndWaitingForInput(t *testing.T) {
+	clearAllHostSignals(t)
+	tmpDir := t.TempDir()
+	t.Setenv("BUDDY_DIR", tmpDir)
+
+	projDir := filepath.Join(tmpDir, "board-resolution")
+	_ = os.MkdirAll(projDir, 0755)
+
+	cfg := config.DefaultConfig()
+	cfg.ProjectsRoots = []string{tmpDir}
+	cfg.SetTerminalAgents("agy", "opencode")
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to save test config: %v", err)
+	}
+
+	openCodeSplash := strings.Join([]string{
+		"█▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█",
+		"█  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀",
+		"▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
+		"/update to install v2.4.1",
+		"┃",
+		"┃  [Pasted ~19 lines]",
+		"┃",
+		"┃  Build · MiMo-V2.6-Flash OpenCode Go",
+		"╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+		"…/board-resolution  shift+tab agents  ctrl+p commands",
+		"⊙ 2 MCP /mcps                                   2.3.2",
+	}, "\n")
+
+	mockBackend := &mockTerminalBackend{
+		staticCapture: openCodeSplash,
+	}
+	getRegistry().Register("rex", engine.NewTerminalEngine(
+		mockBackend,
+		engine.WithReadinessTimeout(200*time.Millisecond),
+		engine.WithPickupVerifyTimeout(80*time.Millisecond, 15*time.Millisecond),
+	))
+
+	buf := new(bytes.Buffer)
+	cmd := newDispatchCmd()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{
+		"--project", "board-resolution",
+		"--task", "owned-note-reconcile",
+		"--prompt", "Reconcile localStorage owned note IDs with the server\nStep 1\nStep 2",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("dispatch command failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json output: %v\nraw: %s", err, buf.String())
+	}
+
+	if resp["picked_up"] != false {
+		t.Errorf("expected picked_up=false when OpenCode shows unsubmitted [Pasted ~19 lines], got %v", resp["picked_up"])
+	}
+	reason, _ := resp["pickup_reason"].(string)
+	if !strings.Contains(reason, "[Pasted ~19 lines]") {
+		t.Errorf("expected pickup_reason to mention [Pasted ~19 lines], got %q", reason)
+	}
+	if recWatch, _ := resp["recommended_watch"].(string); recWatch != "" {
+		t.Errorf("expected empty recommended_watch when picked_up=false, got %q", recWatch)
+	}
+
+	st, err := state.LoadStateForEngine("rex")
+	if err != nil {
+		t.Fatalf("LoadStateForEngine failed: %v", err)
+	}
+	proj, err := st.FindProject("board-resolution")
+	if err != nil {
+		t.Fatalf("FindProject failed: %v", err)
+	}
+	task, err := proj.FindTask("owned-note-reconcile")
+	if err != nil {
+		t.Fatalf("FindTask failed: %v", err)
+	}
+	if task.Status != "waiting_for_input" {
+		t.Errorf("persisted task status = %q, want waiting_for_input", task.Status)
+	}
+	if !strings.Contains(task.LastSummary, "[Pasted ~19 lines]") {
+		t.Errorf("persisted task LastSummary = %q, want containing [Pasted ~19 lines]", task.LastSummary)
+	}
+}

@@ -16,6 +16,7 @@ type fakeTerminalBackend struct {
 	captureCalled          bool
 	lastSentText           string
 	sentKeys               []string
+	sentInputs             []backend.Input
 	staticCapture          string
 	captures               []string
 	captureIdx             int
@@ -84,6 +85,7 @@ func (f *fakeTerminalBackend) Capture(ctx context.Context, sessionID, blockID st
 
 func (f *fakeTerminalBackend) Send(ctx context.Context, sessionID, blockID string, input backend.Input) error {
 	f.sendCalled = true
+	f.sentInputs = append(f.sentInputs, input)
 	if input.Text != "" {
 		f.lastSentText = input.Text
 	}
@@ -236,5 +238,162 @@ func TestTerminalEngine_Send_And_Dispatch_PreserveExclamationPrompt(t *testing.T
 	}
 	if !res.PickedUp {
 		t.Errorf("expected Dispatch with '!' prompt to be picked up, got false (reason: %s)", res.PickupReason)
+	}
+}
+
+const openCodeEmptySplash = `
+                                                          ▄
+                            █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                            █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+                            ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+                                   /update to install v2.4.1
+
+          ┃
+          ┃  Ask anything...
+          ┃
+          ┃  Build · MiMo-V2.6-Flash OpenCode Go
+          ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+          …/board-resolu…/og-cards-and-handwriting  shift+tab agents  ctrl+p commands
+
+  ⊙ 2 MCP /mcps                                                            2.3.2
+`
+
+const openCodeUnsubmittedPasteSplash = `
+                                                          ▄
+                            █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                            █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+                            ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+                                   /update to install v2.4.1
+
+          ┃
+          ┃  [Pasted ~19 lines]
+          ┃
+          ┃  Build · MiMo-V2.6-Flash OpenCode Go
+          ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+          …/board-resolu…/og-cards-and-handwriting  shift+tab agents  ctrl+p commands
+
+  ⊙ 2 MCP /mcps                                                            2.3.2
+`
+
+func TestTerminalEngine_Dispatch_OpenCodeUnsubmittedPaste(t *testing.T) {
+	multiLinePrompt := "Reconcile localStorage owned note IDs with the server\nStep 1: inspect store\nStep 2: add tests"
+
+	t.Run("retries enter when [Pasted ~19 lines] appears and confirms pickup after submission", func(t *testing.T) {
+		fake := &fakeTerminalBackend{
+			captures: []string{
+				openCodeEmptySplash,
+				openCodeUnsubmittedPasteSplash,
+				"Reconcile localStorage owned note IDs with the server\n⠋ Thinking...\nshift+tab agents  ctrl+p commands",
+			},
+		}
+		eng := NewTerminalEngine(fake,
+			WithReadinessTimeout(200*time.Millisecond),
+			WithPickupVerifyTimeout(120*time.Millisecond, 15*time.Millisecond),
+		)
+
+		res, err := eng.Dispatch(context.Background(), DispatchRequest{
+			ProjectName: "board-resolution",
+			ProjectPath: "/cwd",
+			TaskSlug:    "owned-note-reconcile",
+			Prompt:      multiLinePrompt,
+			AgentCmd:    []string{"opencode"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected dispatch error: %v", err)
+		}
+		if !res.PickedUp {
+			t.Fatalf("expected PickedUp=true after retry enter submitted paste, got false (reason: %q)", res.PickupReason)
+		}
+		if len(fake.sentInputs) != 2 {
+			t.Fatalf("expected 2 Send calls (initial prompt + 1 enter retry), got %d: %+v", len(fake.sentInputs), fake.sentInputs)
+		}
+		if fake.sentInputs[1].Text != "" || !fake.sentInputs[1].Enter {
+			t.Errorf("expected retry Send to be Enter-only, got %+v", fake.sentInputs[1])
+		}
+	})
+
+	t.Run("stays unsubmitted as [Pasted ~19 lines] on splash -> picked_up false after retries", func(t *testing.T) {
+		fake := &fakeTerminalBackend{
+			captures: []string{
+				openCodeEmptySplash,
+				openCodeUnsubmittedPasteSplash,
+			},
+		}
+		eng := NewTerminalEngine(fake,
+			WithReadinessTimeout(200*time.Millisecond),
+			WithPickupVerifyTimeout(80*time.Millisecond, 15*time.Millisecond),
+		)
+
+		res, err := eng.Dispatch(context.Background(), DispatchRequest{
+			ProjectName: "board-resolution",
+			ProjectPath: "/cwd",
+			TaskSlug:    "owned-note-reconcile",
+			Prompt:      multiLinePrompt,
+			AgentCmd:    []string{"opencode"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected dispatch error: %v", err)
+		}
+		if res.PickedUp {
+			t.Fatalf("expected PickedUp=false when [Pasted ~19 lines] stays unsubmitted on splash screen")
+		}
+		if !strings.Contains(res.PickupReason, "[Pasted ~19 lines]") || !strings.Contains(strings.ToLower(res.PickupReason), "unsubmitted") {
+			t.Errorf("expected PickupReason to report unsubmitted [Pasted ~19 lines], got %q", res.PickupReason)
+		}
+		wantSends := 1 + maxUnsubmittedSubmitRetries
+		if len(fake.sentInputs) != wantSends {
+			t.Errorf("expected %d Send calls (1 initial + %d retries), got %d", wantSends, maxUnsubmittedSubmitRetries, len(fake.sentInputs))
+		}
+	})
+
+	t.Run("stays on OpenCode splash even when status bar changes -> picked_up false", func(t *testing.T) {
+		splashBefore := strings.Replace(openCodeEmptySplash, "2 MCP", "0 MCP", 1)
+		fake := &fakeTerminalBackend{
+			captures: []string{
+				splashBefore,
+				openCodeEmptySplash,
+			},
+		}
+		eng := NewTerminalEngine(fake,
+			WithReadinessTimeout(200*time.Millisecond),
+			WithPickupVerifyTimeout(60*time.Millisecond, 15*time.Millisecond),
+		)
+
+		res, err := eng.Dispatch(context.Background(), DispatchRequest{
+			ProjectName: "board-resolution",
+			ProjectPath: "/cwd",
+			TaskSlug:    "owned-note-reconcile",
+			Prompt:      multiLinePrompt,
+			AgentCmd:    []string{"opencode"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected dispatch error: %v", err)
+		}
+		if res.PickedUp {
+			t.Fatalf("expected PickedUp=false when pane remains on OpenCode home/splash screen")
+		}
+		if !strings.Contains(strings.ToLower(res.PickupReason), "home/splash") {
+			t.Errorf("expected PickupReason to mention home/splash screen, got %q", res.PickupReason)
+		}
+		if len(fake.sentInputs) != 1 {
+			t.Errorf("expected no blind Enter retries on empty splash, got %d Send calls", len(fake.sentInputs))
+		}
+	})
+}
+
+func TestFindUnsubmittedPaste_MatchingAndFalsePositiveGuards(t *testing.T) {
+	if got := FindUnsubmittedPaste("┃  [Pasted ~19 lines]  ", "some prompt"); got != "[Pasted ~19 lines]" {
+		t.Errorf("OpenCode paste token = %q, want [Pasted ~19 lines]", got)
+	}
+	if got := FindUnsubmittedPaste("> [Pasted text #1 +19 lines]", "some prompt"); got != "[Pasted text #1 +19 lines]" {
+		t.Errorf("Claude paste token = %q, want [Pasted text #1 +19 lines]", got)
+	}
+	if got := FindUnsubmittedPaste("PASS: Prompt pasted ([Pasted ~19 lines]) but not submitted", ""); got != "" {
+		t.Errorf("prose line should not match unsubmitted paste input box, got %q", got)
+	}
+	if got := FindUnsubmittedPaste("┃  [Pasted ~19 lines]", "Fix [Pasted ~19 lines] issue"); got != "" {
+		t.Errorf("placeholder literally present in prompt should be ignored, got %q", got)
 	}
 }

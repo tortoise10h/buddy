@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tortoise10h/buddy/internal/backend"
 )
@@ -210,7 +211,7 @@ func TestRexBackend_Send(t *testing.T) {
 				return "", nil
 			}
 
-			b := NewRexBackend(WithRunner(runner))
+			b := NewRexBackend(WithRunner(runner), WithPasteSubmitDelay(0))
 			if err := b.Send(context.Background(), "sess_1", "blk_1", tc.input); err != nil {
 				t.Fatalf("Send failed: %v", err)
 			}
@@ -220,6 +221,61 @@ func TestRexBackend_Send(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRexBackend_Send_PasteSubmitDelay(t *testing.T) {
+	bDefault := NewRexBackend()
+	if got := bDefault.pasteSubmitDelayFor("short prompt"); got != defaultPasteSubmitDelay {
+		t.Errorf("short prompt delay = %v, want %v", got, defaultPasteSubmitDelay)
+	}
+	if got := bDefault.pasteSubmitDelayFor("line 1\nline 2\nline 3"); got != defaultMultilinePasteSubmitDelay {
+		t.Errorf("multiline prompt delay = %v, want %v", got, defaultMultilinePasteSubmitDelay)
+	}
+	if got := bDefault.pasteSubmitDelayFor(strings.Repeat("a", 151)); got != defaultMultilinePasteSubmitDelay {
+		t.Errorf("long prompt delay = %v, want %v", got, defaultMultilinePasteSubmitDelay)
+	}
+
+	t.Run("pauses between bracketed paste and enter key", func(t *testing.T) {
+		var timestamps []time.Time
+		runner := func(ctx context.Context, name string, args ...string) (string, error) {
+			timestamps = append(timestamps, time.Now())
+			return "", nil
+		}
+		b := NewRexBackend(WithRunner(runner), WithPasteSubmitDelay(40*time.Millisecond))
+		if err := b.Send(context.Background(), "sess_1", "blk_1", backend.Input{
+			Text:  "line 1\nline 2",
+			Enter: true,
+		}); err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+		if len(timestamps) != 2 {
+			t.Fatalf("expected 2 rex calls, got %d", len(timestamps))
+		}
+		if gap := timestamps[1].Sub(timestamps[0]); gap < 30*time.Millisecond {
+			t.Errorf("expected pause >= 30ms between paste and enter, got %v", gap)
+		}
+	})
+
+	t.Run("honors context cancellation during paste delay", func(t *testing.T) {
+		var calls [][]string
+		ctx, cancel := context.WithCancel(context.Background())
+		runner := func(ctx context.Context, name string, args ...string) (string, error) {
+			calls = append(calls, append([]string(nil), args...))
+			cancel()
+			return "", nil
+		}
+		b := NewRexBackend(WithRunner(runner), WithPasteSubmitDelay(500*time.Millisecond))
+		err := b.Send(ctx, "sess_1", "blk_1", backend.Input{
+			Text:  "line 1\nline 2",
+			Enter: true,
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if len(calls) != 1 {
+			t.Fatalf("expected send-key enter to be skipped after cancel, got calls=%#v", calls)
+		}
+	})
 }
 
 func TestRexBackend_Focus(t *testing.T) {

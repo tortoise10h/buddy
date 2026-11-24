@@ -78,9 +78,13 @@ func hasAgentChromeIndicators(raw string) bool {
 		strings.Contains(lower, "auto •") ||
 		strings.Contains(lower, "ask anything") ||
 		strings.Contains(lower, "type a message") ||
+		strings.Contains(lower, "shift+tab agents") ||
+		strings.Contains(lower, "ctrl+p commands") ||
 		strings.Contains(lower, "thought for") ||
 		strings.Contains(lower, "running command") ||
-		strings.Contains(lower, "esc to cancel")
+		strings.Contains(lower, "esc to cancel") ||
+		strings.Contains(lower, "esc interrupt") ||
+		strings.Contains(lower, "esc again to interrupt")
 }
 
 // probeLiveBlockStatus inspects a terminal block via native OSC 7501 program_status
@@ -124,7 +128,7 @@ func probeLiveBlockStatus(ctx context.Context, tb backend.TerminalBackend, sessi
 	}
 
 	// 2. Screen text capture fallback
-	out, err := tb.Capture(ctx, sessionID, blockID, 30)
+	out, err := tb.Capture(ctx, sessionID, blockID, 60)
 	if err != nil {
 		return currentStatus, currentSummary, hasAgentSignal
 	}
@@ -135,6 +139,10 @@ func probeLiveBlockStatus(ctx context.Context, tb backend.TerminalBackend, sessi
 	filtered, working, idlePrompt := paneState(out)
 	if working {
 		return "running", currentSummary, true
+	}
+
+	if unsubmittedSummary, isUnsubmitted := detectUnsubmittedPrompt(out); isUnsubmitted {
+		return "waiting_for_input", unsubmittedSummary, true
 	}
 
 	matchedEvent, summary := detectEventWithIdle(filtered, idlePrompt, false, untilAll)

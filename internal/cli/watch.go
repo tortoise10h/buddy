@@ -29,7 +29,7 @@ var (
 	inputQuestionRe     = regexp.MustCompile(`(?i)^(?:(?:\[\?\]|\?)\s+.*|\s*(?:do\s+you\s+want\s+to|would\s+you\s+(?:like|prefer)|what\s+would\s+you\s+like|which\s+(?:one|option)|please\s+confirm|press\s+enter\s+to\s+continue|(?:select|choose)\s+(?:an?\s+)?(?:option|action|mode):?|clarification\s+needed|approval\s+needed|proceed\s*\?).*|.*(?:\[y/n\]|\(y/n\)|\[yes/no\]|\(yes/no\)).*$)`)
 	questionSentenceRe  = regexp.MustCompile(`(?i)^(?:which|what|how|where|when|who|should|can|could|would|do|does|did|is|are|will|may|shall)\s+.*\?$`)
 
-	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel)`)
+	workingRe = regexp.MustCompile(`[\x{2800}-\x{28ff}⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒]|(?i)(?:running\s+command|thought\s+for|thinking\.\.\.|esc\s+to\s+cancel|esc\s+(?:again\s+to\s+)?interrupt)`)
 
 	idlePromptLineRe = regexp.MustCompile(`(?i)^(?:[>❯›]\s*(?:type a message|ask anything)?|type a message|ask anything)\s*$`)
 
@@ -100,6 +100,8 @@ func isChromeLine(line string) bool {
 	lower := strings.ToLower(trimmed)
 	if strings.Contains(lower, "? for shortcuts") ||
 		strings.Contains(lower, "esc to cancel") ||
+		strings.Contains(lower, "esc interrupt") ||
+		strings.Contains(lower, "esc again to interrupt") ||
 		strings.Contains(lower, "esc to dismiss") ||
 		strings.Contains(lower, "press enter to dismiss") ||
 		strings.Contains(lower, "ctrl+o to expand") ||
@@ -116,6 +118,10 @@ func isChromeLine(line string) bool {
 		strings.HasPrefix(lower, "welcome to claude") ||
 		strings.HasPrefix(lower, "antigravity v") ||
 		strings.HasPrefix(lower, "opencode v") ||
+		strings.HasPrefix(lower, "/update to install ") ||
+		strings.Contains(lower, "shift+tab agents") ||
+		strings.Contains(lower, "ctrl+p commands") ||
+		strings.Contains(lower, "mcp /mcps") ||
 		strings.Contains(lower, "type a message") ||
 		strings.Contains(lower, "ask anything") {
 		return true
@@ -145,8 +151,20 @@ func isIdlePromptChrome(line string) bool {
 		strings.HasPrefix(lower, "auto ·") ||
 		strings.HasPrefix(lower, "auto •") ||
 		strings.Contains(lower, "auto ·") ||
+		strings.Contains(lower, "shift+tab agents") ||
+		strings.Contains(lower, "ctrl+p commands") ||
 		strings.Contains(lower, "type a message") ||
 		strings.Contains(lower, "ask anything")
+}
+
+func detectUnsubmittedPrompt(raw string) (string, bool) {
+	if pasted := engine.FindUnsubmittedPaste(raw, ""); pasted != "" {
+		return fmt.Sprintf("Prompt pasted (%s) but not submitted", pasted), true
+	}
+	if engine.IsOpenCodeHomeSplash(raw) {
+		return "OpenCode is idle on home/splash screen (prompt not submitted)", true
+	}
+	return "", false
 }
 
 func paneState(raw string) (filtered []string, working bool, idlePrompt bool) {
@@ -767,13 +785,19 @@ func (w *watchRunner) probeTarget(eng engine.Engine, target watchTarget) (workin
 
 	// 2. Fallback: capture pane output and grep/analyze screen text
 	if !nativeHit {
-		out, capErr := eng.Capture(w.cmd.Context(), target.sessionID, target.blockID, 30)
+		out, capErr := eng.Capture(w.cmd.Context(), target.sessionID, target.blockID, 60)
 		if capErr != nil {
 			return false, "", "", "", capErr
 		}
 		filtered, isWorking, idlePrompt := paneState(out)
 		working = isWorking
 		if !working {
+			if unsubmittedSummary, isUnsubmitted := detectUnsubmittedPrompt(out); isUnsubmitted {
+				if w.untilSet["input"] || w.untilSet["any"] {
+					return false, "waiting_for_input", unsubmittedSummary, "unsubmitted:" + unsubmittedSummary, nil
+				}
+				return false, "", "", "", nil
+			}
 			matchedEvent, summary = detectEventWithIdle(filtered, idlePrompt, w.sawWorking[targetKey], w.untilSet)
 			snapshot = strings.Join(filtered, "\n")
 		}

@@ -1770,3 +1770,199 @@ func TestWatch_T3_TransitionsAndProbeErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestReconcileAndWatch_OpenCodeUnsubmittedPaste(t *testing.T) {
+	openCodeUnsubmittedPane := strings.Join([]string{
+		"                                                          ▄",
+		"                            █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█",
+		"                            █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀",
+		"                            ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
+		"",
+		"                                   /update to install v2.4.1",
+		"",
+		"          ┃",
+		"          ┃  [Pasted ~19 lines]",
+		"          ┃",
+		"          ┃  Build · MiMo-V2.6-Flash OpenCode Go",
+		"          ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+		"          …/board-resolu…/og-cards-and-handwriting  shift+tab agents  ctrl+p commands",
+		"",
+		"  ⊙ 2 MCP /mcps                                                            2.3.2",
+	}, "\n")
+
+	openCodeRunningPane := strings.Join([]string{
+		"Reconciling localStorage owned note IDs...",
+		"┃",
+		"┃  Ask anything...",
+		"┃",
+		"╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+		"■ esc interrupt   …/board-resolution  shift+tab agents  ctrl+p commands",
+		"⊙ 2 MCP /mcps                                      2.3.2",
+	}, "\n")
+
+	openCodeCompletedPane := strings.Join([]string{
+		"Reconciled localStorage owned note IDs with server ownership.",
+		"All 24 unit tests pass.",
+		"┃",
+		"┃  Ask anything...",
+		"┃",
+		"╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+		"…/board-resolution  shift+tab agents  ctrl+p commands",
+		"⊙ 2 MCP /mcps                                      2.3.2",
+	}, "\n")
+
+	t.Run("status sync detects unsubmitted [Pasted ~19 lines] as waiting_for_input instead of running", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("BUDDY_DIR", tmpDir)
+
+		mockBackend := &mockWatchBackend{
+			sessions: []backend.SessionInfo{
+				{SessionID: "sess_oc", Name: "board-resolution", Path: filepath.Join(tmpDir, "board-resolution")},
+			},
+			windowsBySession: map[string][]backend.WindowInfo{
+				"sess_oc": {
+					{WindowID: "win_unsub", Label: "owned-note-reconcile", SessionID: "sess_oc", BlockIDs: []string{"blk_unsub"}},
+					{WindowID: "win_run", Label: "note-running", SessionID: "sess_oc", BlockIDs: []string{"blk_run"}},
+					{WindowID: "win_done", Label: "note-tests", SessionID: "sess_oc", BlockIDs: []string{"blk_done"}},
+				},
+			},
+			capturesByBlock: map[string]string{
+				"blk_unsub": openCodeUnsubmittedPane,
+				"blk_run":   openCodeRunningPane,
+				"blk_done":  openCodeCompletedPane,
+			},
+		}
+
+		_ = state.MutateStateForEngine("rex", func(s *state.State) error {
+			s.RecordTask("board-resolution", filepath.Join(tmpDir, "board-resolution"), "sess_oc", "board-resolution", state.TaskState{
+				TaskSlug:     "owned-note-reconcile",
+				Engine:       "rex",
+				WindowID:     "win_unsub",
+				WindowLabel:  "owned-note-reconcile",
+				AgentBlockID: "blk_unsub",
+				Agent:        "opencode",
+				Status:       "running",
+				LastSummary:  "Reconcile localStorage owned note IDs...",
+			})
+			s.RecordTask("board-resolution", filepath.Join(tmpDir, "board-resolution"), "sess_oc", "board-resolution", state.TaskState{
+				TaskSlug:     "note-running",
+				Engine:       "rex",
+				WindowID:     "win_run",
+				WindowLabel:  "note-running",
+				AgentBlockID: "blk_run",
+				Agent:        "opencode",
+				Status:       "running",
+				LastSummary:  "Working on notes",
+			})
+			s.RecordTask("board-resolution", filepath.Join(tmpDir, "board-resolution"), "sess_oc", "board-resolution", state.TaskState{
+				TaskSlug:     "note-tests",
+				Engine:       "rex",
+				WindowID:     "win_done",
+				WindowLabel:  "note-tests",
+				AgentBlockID: "blk_done",
+				Agent:        "opencode",
+				Status:       "running",
+				LastSummary:  "Add tests",
+			})
+			return nil
+		})
+
+		if err := reconcileRexWithBackend(context.Background(), mockBackend); err != nil {
+			t.Fatalf("reconcileRexWithBackend failed: %v", err)
+		}
+
+		st, err := state.LoadStateForEngine("rex")
+		if err != nil {
+			t.Fatalf("LoadStateForEngine failed: %v", err)
+		}
+		proj, err := st.FindProject("board-resolution")
+		if err != nil {
+			t.Fatalf("FindProject failed: %v", err)
+		}
+
+		unsubTask, err := proj.FindTask("owned-note-reconcile")
+		if err != nil {
+			t.Fatalf("FindTask owned-note-reconcile failed: %v", err)
+		}
+		if unsubTask.Status != "waiting_for_input" {
+			t.Errorf("unsubmitted OpenCode paste status = %q, want waiting_for_input", unsubTask.Status)
+		}
+		if !strings.Contains(unsubTask.LastSummary, "[Pasted ~19 lines]") {
+			t.Errorf("unsubmitted OpenCode paste summary = %q, want containing [Pasted ~19 lines]", unsubTask.LastSummary)
+		}
+
+		runTask, err := proj.FindTask("note-running")
+		if err != nil {
+			t.Fatalf("FindTask note-running failed: %v", err)
+		}
+		if runTask.Status != "running" {
+			t.Errorf("running OpenCode session with 'esc interrupt' + footer hints status = %q, want running", runTask.Status)
+		}
+
+		doneTask, err := proj.FindTask("note-tests")
+		if err != nil {
+			t.Fatalf("FindTask note-tests failed: %v", err)
+		}
+		if doneTask.Status != "ready_for_demo" {
+			t.Errorf("completed OpenCode session status = %q, want ready_for_demo", doneTask.Status)
+		}
+		if !strings.Contains(doneTask.LastSummary, "All 24 unit tests pass") {
+			t.Errorf("completed OpenCode session summary = %q, want containing test pass output", doneTask.LastSummary)
+		}
+	})
+
+	t.Run("watch alerts waiting_for_input when OpenCode sits on splash with unsubmitted paste", func(t *testing.T) {
+		clearAllHostSignals(t)
+		tmpDir := t.TempDir()
+		t.Setenv("BUDDY_DIR", tmpDir)
+
+		recorder := &notificationRecorder{}
+		notifyFn = recorder.Record
+		defer func() { notifyFn = globalNotificationRecorder.Record }()
+
+		mockBackend := &mockWatchBackend{
+			captures: []string{openCodeUnsubmittedPane},
+		}
+		getRegistry().Register("rex", engine.NewTerminalEngine(mockBackend))
+
+		_ = state.MutateStateForEngine("rex", func(s *state.State) error {
+			s.RecordTask("board-resolution", filepath.Join(tmpDir, "board-resolution"), "sess_oc", "board-resolution", state.TaskState{
+				TaskSlug:     "owned-note-reconcile",
+				Engine:       "rex",
+				AgentBlockID: "blk_unsub",
+				Agent:        "opencode",
+				Status:       "running",
+			})
+			return nil
+		})
+
+		buf := new(bytes.Buffer)
+		cmd := newWatchCmd()
+		cmd.SetOut(buf)
+		cmd.SetErr(buf)
+		cmd.SetArgs([]string{
+			"--engine", "rex",
+			"--project", "board-resolution",
+			"--task", "owned-note-reconcile",
+			"--interval", "0",
+			"--timeout", "1",
+			"--debounce", "1",
+			"--notify=false",
+		})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch execute failed: %v", err)
+		}
+
+		var resp map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+			t.Fatalf("invalid watch JSON: %v\nraw: %s", err, buf.String())
+		}
+		if resp["event"] != "waiting_for_input" {
+			t.Errorf("watch event = %v, want waiting_for_input", resp["event"])
+		}
+		summary, _ := resp["summary"].(string)
+		if !strings.Contains(summary, "[Pasted ~19 lines]") {
+			t.Errorf("watch summary = %q, want containing [Pasted ~19 lines]", summary)
+		}
+	})
+}
