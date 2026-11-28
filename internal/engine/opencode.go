@@ -142,9 +142,10 @@ func (e *OpenCodeEngine) Capture(ctx context.Context, sessionID, blockID string,
 }
 
 // Close is non-destructive: if the session is actively running on the shared server,
-// it interrupts the active turn via POST /api/session/{id}/interrupt, leaving the
-// conversation history intact in OpenCode Desktop. Offline/404 errors are ignored
-// so local state cleanup remains idempotent.
+// it interrupts the active turn via POST /api/session/{id}/interrupt, and then
+// archives the session via PATCH /api/session/{id} with {"archived": true} so it is
+// hidden from active views in OpenCode Desktop while preserving its history.
+// Offline/404 errors are ignored so local state cleanup remains idempotent.
 func (e *OpenCodeEngine) Close(ctx context.Context, sessionID, windowID string) error {
 	if strings.TrimSpace(windowID) == "" {
 		return nil
@@ -156,10 +157,31 @@ func (e *OpenCodeEngine) Close(ctx context.Context, sessionID, windowID string) 
 	}
 	if _, running := activeMap[windowID]; running {
 		if intErr := e.client.Interrupt(ctx, windowID); intErr != nil && !errors.Is(intErr, opencode.ErrSessionNotFound) {
+			if isOpenCodeOfflineErr(intErr) {
+				return nil
+			}
 			return fmt.Errorf("opencode interrupt session %s: %w", windowID, intErr)
 		}
 	}
+	archived := true
+	if _, updErr := e.client.UpdateSession(ctx, windowID, opencode.UpdateSessionRequest{Archived: &archived}); updErr != nil {
+		if errors.Is(updErr, opencode.ErrSessionNotFound) || isOpenCodeOfflineErr(updErr) {
+			return nil
+		}
+		return fmt.Errorf("opencode archive session %s: %w", windowID, updErr)
+	}
 	return nil
+}
+
+func isOpenCodeOfflineErr(err error) bool {
+	if errors.Is(err, opencode.ErrServiceNotRunning) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *opencode.APIError
+	return !errors.As(err, &apiErr)
 }
 
 // Focus activates OpenCode Desktop on macOS when enabled; no-op elsewhere.

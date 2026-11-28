@@ -123,6 +123,11 @@ type CreateSessionRequest struct {
 	Metadata map[string]any   `json:"metadata,omitempty"`
 }
 
+// UpdateSessionRequest is the JSON payload for PATCH /api/session/{sessionID}.
+type UpdateSessionRequest struct {
+	Archived *bool `json:"archived,omitempty"`
+}
+
 // PromptRequest is the JSON payload for POST /api/session/{sessionID}/prompt.
 type PromptRequest struct {
 	Text     string         `json:"text"`

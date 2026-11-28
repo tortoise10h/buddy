@@ -21,6 +21,10 @@ type mockOpenCodeClient struct {
 	interrupted  bool
 	interruptID  string
 	interruptErr error
+	updatedID    string
+	updateReq    opencode.UpdateSessionRequest
+	updatedSess  *opencode.SessionInfo
+	updateErr    error
 
 	session     *opencode.SessionInfo
 	sessionErr  error
@@ -63,6 +67,17 @@ func (m *mockOpenCodeClient) GetSession(ctx context.Context, sessionID string) (
 		return nil, m.sessionErr
 	}
 	return m.session, nil
+}
+func (m *mockOpenCodeClient) UpdateSession(ctx context.Context, sessionID string, req opencode.UpdateSessionRequest) (*opencode.SessionInfo, error) {
+	m.updatedID = sessionID
+	m.updateReq = req
+	if m.updateErr != nil {
+		return nil, m.updateErr
+	}
+	if m.updatedSess != nil {
+		return m.updatedSess, nil
+	}
+	return &opencode.SessionInfo{ID: sessionID}, nil
 }
 func (m *mockOpenCodeClient) Prompt(ctx context.Context, sessionID string, req opencode.PromptRequest) error {
 	m.promptID = sessionID
@@ -303,7 +318,7 @@ func TestOpenCodeEngine_ProbeStatusTransitions(t *testing.T) {
 }
 
 func TestOpenCodeEngine_CloseNonDestructiveAndOpenDevSplitUnsupported(t *testing.T) {
-	// Running session is interrupted on Close
+	// Running session is interrupted and archived on Close
 	mock := &mockOpenCodeClient{
 		activeMap: map[string]opencode.SessionActive{"ses_active": {Type: "running"}},
 	}
@@ -314,8 +329,11 @@ func TestOpenCodeEngine_CloseNonDestructiveAndOpenDevSplitUnsupported(t *testing
 	if !mock.interrupted || mock.interruptID != "ses_active" {
 		t.Fatalf("expected active session to be interrupted on Close")
 	}
+	if mock.updatedID != "ses_active" || mock.updateReq.Archived == nil || !*mock.updateReq.Archived {
+		t.Fatalf("expected active session to be archived on Close, got id=%q req=%+v", mock.updatedID, mock.updateReq)
+	}
 
-	// Idle session is not interrupted
+	// Idle session is not interrupted, but is archived
 	mockIdle := &mockOpenCodeClient{}
 	engIdle := NewOpenCodeEngineWithClient(mockIdle, OpenCodeEngineOptions{})
 	if err := engIdle.Close(context.Background(), "", "ses_idle"); err != nil {
@@ -324,12 +342,27 @@ func TestOpenCodeEngine_CloseNonDestructiveAndOpenDevSplitUnsupported(t *testing
 	if mockIdle.interrupted {
 		t.Fatalf("did not expect idle session to be interrupted")
 	}
+	if mockIdle.updatedID != "ses_idle" || mockIdle.updateReq.Archived == nil || !*mockIdle.updateReq.Archived {
+		t.Fatalf("expected idle session to be archived on Close, got id=%q req=%+v", mockIdle.updatedID, mockIdle.updateReq)
+	}
 
-	// Offline server is ignored on Close
+	// 404 on archive is ignored idempotently
+	mockMissing := &mockOpenCodeClient{updateErr: opencode.ErrSessionNotFound}
+	engMissing := NewOpenCodeEngineWithClient(mockMissing, OpenCodeEngineOptions{})
+	if err := engMissing.Close(context.Background(), "", "ses_missing"); err != nil {
+		t.Fatalf("Close 404 should succeed idempotently, got %v", err)
+	}
+
+	// Offline server is ignored on Close (both GetActiveSessions and UpdateSession)
 	mockOffline := &mockOpenCodeClient{activeErr: opencode.ErrServiceNotRunning}
 	engOffline := NewOpenCodeEngineWithClient(mockOffline, OpenCodeEngineOptions{})
 	if err := engOffline.Close(context.Background(), "", "ses_1"); err != nil {
 		t.Fatalf("Close offline should succeed idempotently, got %v", err)
+	}
+	mockOfflineUpdate := &mockOpenCodeClient{updateErr: opencode.ErrServiceNotRunning}
+	engOfflineUpdate := NewOpenCodeEngineWithClient(mockOfflineUpdate, OpenCodeEngineOptions{})
+	if err := engOfflineUpdate.Close(context.Background(), "", "ses_1"); err != nil {
+		t.Fatalf("Close offline on UpdateSession should succeed idempotently, got %v", err)
 	}
 
 	// OpenDevSplit returns ErrNotImplemented
